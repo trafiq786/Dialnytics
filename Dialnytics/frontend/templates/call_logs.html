@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Call Logs — Dialnytics{% endblock %}
+{% block content %}
+<div class="logs-layout">
+    <section class="panel logs-list">
+        <div class="page-head"><h1>Call Logs</h1></div>
+        <p class="muted">View and manage your recent calls</p>
+        <div class="chips">
+            <span class="on">All Calls {{ logs|length }}</span>
+            <span>Incoming 0</span>
+            <span>Outgoing {{ logs|length }}</span>
+            <span>Missed 0</span>
+        </div>
+        {% if logs %}
+        <div class="log-group">Today <span>{{ logs|length }} calls</span></div>
+        {% for log in logs %}
+        <a class="log-row" href="/dialer?number={{ log.to_number }}">
+            <span class="pip {% if log.status in ['answered','completed','active'] %}green{% else %}red{% endif %}">👤</span>
+            <span>
+                <strong>{{ log.to_number }}</strong>
+                <small>{% if log.status in ['answered','completed','active'] %}Outgoing{% else %}Failed{% endif %} · {{ log.duration }}s</small>
+            </span>
+        </a>
+        {% endfor %}
+        {% else %}
+        <p class="muted" style="margin-top:24px;">No calls yet.</p>
+        {% endif %}
+    </section>
+    <section class="caught-up">
+        <h2>Hello, {{ user.name.split(' ')[0] }}</h2>
+        <p>You're all caught up</p>
+    </section>
+</div>
+{% endblock %}
