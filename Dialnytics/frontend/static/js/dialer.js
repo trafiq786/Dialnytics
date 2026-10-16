@@ -67,34 +67,65 @@ const input = document.getElementById('numberInput');
         });
         return sec;
     }
-    function markEnded(reason) {
-        if (onHold && reason !== 'You hung up') return;
-        if (ended) return;
-        stopRing();
-        ended = true;
-        const wasRecording = recorder && recorder.state === 'recording';
-        const sec = saveDuration('completed');
-        stopTimer();
-        talkStart = 0;
-        document.getElementById('activityTitle').textContent = reason || 'Call ended';
-        document.getElementById('activitySub').textContent = sec ? clock(sec) : (reason || 'Call ended');
-        setStatus(reason || 'Call ended');
-        if (wasRecording) toggleRec();
-        if (answerHold) { clearInterval(answerHold); answerHold = null; }
-        const audio = document.getElementById('remoteAudio');
-        if (audio) {
-            audio.pause();
-            audio.srcObject = null;
-        }
-        activeCall = null;
-        muted = false;
-        onHold = false;
-        if (heldCall) {
-            resumeHeld();
-            return;
-        }
-        showDialPad();
+    
+function markEnded(reason) {
+    if (ended) return;
+
+    ended = true;
+    placing = false;
+    activeConfirmed = false;
+    lastState = 'hangup';
+
+    stopRing();
+    stopTimer();
+
+    if (answerHold) {
+        clearInterval(answerHold);
+        answerHold = null;
     }
+
+    const wasRecording =
+        recorder && recorder.state === 'recording';
+
+    const sec = saveDuration(
+        talkStart ? 'completed' : 'failed'
+    );
+
+    talkStart = 0;
+
+    const message = reason || 'Call ended';
+
+    const title = document.getElementById('activityTitle');
+    const sub = document.getElementById('activitySub');
+    const inState = document.getElementById('inCallState');
+
+    if (title) title.textContent = message;
+    if (sub) sub.textContent = sec ? clock(sec) : message;
+    if (inState) inState.textContent = message;
+
+    setStatus(message);
+    if (rtcStatus) rtcStatus.textContent = 'Ready';
+
+    if (wasRecording) toggleRec();
+
+    const audio = document.getElementById('remoteAudio');
+    if (audio) {
+        audio.pause();
+        audio.srcObject = null;
+    }
+
+    activeCall = null;
+    muted = false;
+    onHold = false;
+
+    if (heldCall) {
+        resumeHeld();
+        return;
+    }
+
+    showDialPad();
+}
+
     function endReason(call) {
         const cause = ((call && call.cause) || '').toUpperCase();
         const sip = Number((call && call.sipCode) || 0);
@@ -369,10 +400,21 @@ const input = document.getElementById('numberInput');
         const saved = await res.json();
         logId = saved.id || (saved.call && saved.call.id) || null;
     }
-    function hangup() {
-        if (activeCall && activeCall.hangup) activeCall.hangup();
-        markEnded('You hung up');
+    
+function hangup() {
+    const call = activeCall;
+
+    if (call && typeof call.hangup === 'function') {
+        try {
+            call.hangup();
+        } catch (err) {
+            console.error('Hangup error:', err);
+        }
     }
+
+    markEnded('Call ended');
+}
+
     function transferCall() {
         if (!activeCall) return setStatus('Transfer works only during a call', 'var(--danger)');
         const st = String(activeCall.state || '').toLowerCase();
