@@ -72,7 +72,7 @@ users_db["agent@dialnytics.com"] = {
     "id": 2,
     "email": "agent@dialnytics.com",
     "name": "Agent One",
-    "password": hash_password("agent123"),
+    "password": hash_password(os.environ["AGENT_PASSWORD"]),
     "role": "user",
     "phone_number": "+12033039364",
     "sip_username": "",
