@@ -55,7 +55,12 @@ voicemails_db = {}
 campaigns_db = {}
 
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode(),
+        b"dialnytics",
+        600000
+    ).hex()
 
 users_db["admin@dialnytics.com"] = {
     "id": 1,
