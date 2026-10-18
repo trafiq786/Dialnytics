@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Call Logs — Dialnytics{% endblock %}
+{% block content %}
+<div class="logs-layout">
+<section class="panel logs-list">
+<div class="page-head"><h1>Call Logs</h1></div>
+<p class="muted">View and manage your recent calls</p>
+<div class="chips">
+{% for key,label in [('all','All Calls'),('incoming','Incoming'),('outgoing','Outgoing'),('missed','Missed')] %}
+<a href="/call-logs?filter={{ key }}" class="{% if selected == key %}on{% endif %}" style="text-decoration:none">{{ label }} {{ counts[key] }}</a>
+{% endfor %}
+</div>
+{% if logs %}
+<div class="log-group">Recent <span>{{ logs|length }} calls</span></div>
+{% for log in logs %}
+<div class="log-row">
+<span class="pip {% if log.status in ['answered','completed','active'] %}green{% else %}red{% endif %}">☎</span>
+<span>
+<strong>{{ log.from_number if log.direction == 'incoming' else log.to_number }}</strong>
+<small>{{ (log.direction or 'unknown')|capitalize }} · {{ (log.status or 'unknown')|replace('_',' ')|capitalize }} · {{ log.duration or 0 }}s</small>
+</span>
+</div>
+{% endfor %}
+{% else %}<p class="muted" style="margin-top:24px;">No calls in this filter.</p>{% endif %}
+</section>
+<section class="caught-up"><h2>Hello, {{ user.name.split(' ')[0] }}</h2><p>You're all caught up</p></section>
+</div>
+{% endblock %}
