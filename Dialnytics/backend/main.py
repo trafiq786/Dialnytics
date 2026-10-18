@@ -883,9 +883,14 @@ async def dashboard(request: Request):
     answered = len([c for c in user_calls if c.get("status") in ("answered", "completed", "active")])
     failed = len([c for c in user_calls if c.get("status") not in ("answered", "completed", "active")])
     answer_rate = f"{int((answered/total_calls)*100)}%" if total_calls else "0%"
-    talk = [int(c.get("duration") or 0) for c in user_calls]
-    avg = int(sum(talk) / len(talk)) if talk else 0
-    avg_talk = f"{avg // 60}:{avg % 60:02d}"
+   talk = [
+    int(c.get("duration") or 0)
+    for c in user_calls
+    if int(c.get("duration") or 0) > 0
+]
+
+avg = round(sum(talk) / len(talk)) if talk else 0
+avg_talk = f"{avg // 60}:{avg % 60:02d}"
     revenue = 0
     renewals = []
     refresh_users()
