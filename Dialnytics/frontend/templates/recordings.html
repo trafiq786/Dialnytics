@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Recordings — Dialnytics{% endblock %}
+{% block content %}
+<div class="page-head">
+    <div><h1>Recordings</h1><p class="muted">Every recorded call, in one place.</p></div>
+</div>
+{% if not recording_ok %}
+<div class="center-card">
+    <div class="warn-ico">⏺</div>
+    <h2>Upgrade Required</h2>
+    <p>Call recording and campaigns are the $25 upgrade. Ask your admin to unlock this account.</p>
+</div>
+{% elif recordings %}
+<div class="stack">
+    {% for rec in recordings %}
+    <div class="panel row-card">
+        <div><strong>{{ rec.to_number or 'Call' }}</strong><p class="muted">{{ rec.duration }}s · {{ rec.created_at[:16].replace('T',' ') }}</p></div>
+        <audio controls src="{{ rec.url }}"></audio>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<p class="empty-note">No recordings yet. Recorded calls will show up here.</p>
+{% endif %}
+{% endblock %}
