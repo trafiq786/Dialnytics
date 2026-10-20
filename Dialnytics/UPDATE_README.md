@@ -1,0 +1,1 @@
+Power Dialer: select CRM leads in Create Queue popup; stopped queues can Continue; per-queue-item notes persist in Supabase. Run SUPABASE_MIGRATION_06_POWER_NOTES.sql first. Existing outbound calling, CRM, contacts and call logs preserved. Only eligible opted-in non-DNC leads can be selected. Test in staging before production.
