@@ -1,0 +1,11 @@
+{% extends 'base.html' %}{% block title %}Live Monitoring — Dialnytics{% endblock %}{% block content %}
+<div class="page-head"><h1>Live Monitoring</h1><span class="muted">Browser-reported status • refresh every 3s</span></div>
+<div class="stat-row"><div class="panel">Online: <strong id="liveOnline">0</strong></div><div class="panel">On Call: <strong id="liveCalls">0</strong></div><div class="panel">Available: <strong id="liveAvailable">0</strong></div></div>
+<section class="panel"><div class="table-scroll"><table class="modern-table"><thead><tr><th>User</th><th>Status</th><th>Direction</th><th>Number</th><th>Duration</th></tr></thead><tbody id="liveRows"></tbody></table></div></section>
+<p class="muted">Presence is based on an active browser heartbeat. Carrier-side call verification is not yet implemented.</p>
+{% endblock %}{% block scripts %}<script>
+let liveUsers=[];function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function draw(){document.getElementById('liveOnline').textContent=liveUsers.filter(x=>x.status!=='offline').length;document.getElementById('liveCalls').textContent=liveUsers.filter(x=>x.status==='on_call').length;document.getElementById('liveAvailable').textContent=liveUsers.filter(x=>x.status==='available').length;
+document.getElementById('liveRows').innerHTML=liveUsers.map(x=>{let sec=x.status==='on_call'&&x.started_at?Math.max(0,Math.floor((Date.now()-Date.parse(x.started_at))/1000)):0;return `<tr><td><strong>${esc(x.name)}</strong><small>${esc(x.email)}</small></td><td>${esc(x.status)}</td><td>${esc(x.direction)}</td><td>${esc(x.number)}</td><td>${x.status==='on_call'?Math.floor(sec/60)+':'+String(sec%60).padStart(2,'0'):'—'}</td></tr>`}).join('')||'<tr><td colspan="5">No users</td></tr>'}
+async function loadLive(){try{const r=await fetch('/api/admin/live-monitoring',{cache:'no-store'});if(!r.ok)throw Error(r.status);liveUsers=(await r.json()).users;draw()}catch(e){console.error('Live monitoring:',e)}}loadLive();setInterval(loadLive,3000);setInterval(draw,1000);
+</script>{% endblock %}
