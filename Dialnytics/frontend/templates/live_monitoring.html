@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Live Monitoring — Dialnytics{% endblock %}
+{% block content %}
+<div class="module-head"><div><h1>Live Monitoring</h1><p class="muted">Admin-only live browser activity · refreshes every 3 seconds</p></div><span class="module-pill">● LIVE</span></div>
+<div class="module-stats live-stats"><div class="module-stat"><small>Online</small><strong id="liveOnline">—</strong></div><div class="module-stat"><small>On Call</small><strong id="liveCalling">—</strong></div><div class="module-stat"><small>Available</small><strong id="liveAvailable">—</strong></div><div class="module-stat"><small>Offline</small><strong id="liveOffline">—</strong></div></div>
+<section class="module-card"><div class="module-toolbar"><input id="liveSearch" type="search" placeholder="Search user or number" aria-label="Search users"><select id="liveFilter" aria-label="Filter by status"><option value="all">All users</option><option value="on_call">On call</option><option value="available">Available</option><option value="offline">Offline</option></select></div><div class="module-table-wrap"><table class="module-table"><thead><tr><th>User</th><th>Status</th><th>Direction</th><th>Number</th><th>Call Duration</th></tr></thead><tbody id="liveRows"><tr><td colspan="5">Loading...</td></tr></tbody></table></div><p id="liveError" class="module-feedback" role="status"></p><p class="muted">Status is reported by the signed-in browser, not verified by the phone carrier. Backgrounded or disconnected browsers may appear offline.</p></section>
+{% endblock %}
+{% block scripts %}<script src="/static/js/live-monitoring.js"></script>{% endblock %}
