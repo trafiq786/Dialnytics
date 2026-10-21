@@ -1,0 +1,57 @@
+{% extends "base.html" %}{% block title %}Customer — Dialnytics{% endblock %}{% block content %}<style>
+.cm-head{display:flex;justify-content:space-between;align-items:center;margin:12px 0 24px;gap:15px}.cm-head h1{font-size:27px;margin:0}.cm-muted{color:var(--text-secondary,#8893a9)}.cm-card{background:var(--surface,#1b2030);border:1px solid var(--border,#31384b);border-radius:17px;padding:24px;margin-bottom:18px;color:var(--text-primary,#eaf0ff)}.cm-table{width:100%;border-collapse:collapse}.cm-table th{text-align:left;font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--text-secondary,#8893a9);padding:14px}.cm-table td{padding:15px 14px;border-top:1px solid var(--border,#31384b)}.cm-table small{display:block;color:var(--text-secondary,#8893a9);margin-top:4px}.cm-pill{display:inline-block;padding:5px 10px;border-radius:30px;background:rgba(106,90,242,.14);color:#a995ff;font-size:12px;font-weight:700}.cm-ok{color:#10b981;background:rgba(16,185,129,.12)}.cm-warn{color:#f59e0b;background:rgba(245,158,11,.12)}.cm-danger{color:#f87171;background:rgba(248,113,113,.12)}.cm-btn{background:#635cf4;color:white;border:0;border-radius:9px;padding:11px 17px;text-decoration:none;display:inline-block;cursor:pointer;font-weight:600}.cm-btn-alt{background:var(--surface-secondary,#242b3d);color:var(--text-primary,#eef);border:1px solid var(--border,#394155)}.cm-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.cm-field{display:flex;flex-direction:column;gap:7px;margin-bottom:15px}.cm-field label{font-size:12px;color:var(--text-secondary,#9da7bb)}.cm-field input,.cm-field select,.cm-field textarea{background:var(--surface-secondary,#252c3d);color:var(--text-primary,#f5f7ff);border:1px solid var(--border,#394155);border-radius:9px;padding:12px;width:100%;box-sizing:border-box}.cm-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.cm-metric{background:var(--surface-secondary,#252c3d);border-radius:12px;padding:18px}.cm-metric strong{display:block;font-size:20px}.cm-metric small{color:var(--text-secondary,#99a5bb)}.cm-hero{background:linear-gradient(105deg,#10172b,#302268,#162a55);color:white;border-radius:18px;padding:24px;margin-bottom:20px}.cm-overlay{position:fixed;inset:0;background:#0008;z-index:200;display:none}.cm-overlay.open{display:block}.cm-drawer{position:fixed;right:0;top:0;bottom:0;width:min(440px,100vw);overflow:auto;background:var(--surface,#1c2436);color:var(--text-primary,#fff);z-index:201;padding:25px;box-sizing:border-box;transform:translateX(100%);transition:transform .2s;border-left:1px solid var(--border,#394155)}.cm-drawer.open{transform:translateX(0)}.cm-actions{display:flex;flex-wrap:wrap;gap:9px}.cm-actions form{display:inline}.cm-scroll{overflow:auto}.cm-drawer .cm-metrics{grid-template-columns:repeat(2,1fr)}@media(max-width:850px){.cm-grid,.cm-metrics{grid-template-columns:1fr 1fr}.cm-table{min-width:760px}}@media(max-width:550px){.cm-grid,.cm-metrics{grid-template-columns:1fr}}
+</style>
+<div class="cm-head"><a href="/customers">← All Customers</a><div class="cm-actions"><a class="cm-btn" href="/invoices/new?customer={{ customer.email|urlencode }}">Create Invoice</a><a class="cm-btn cm-btn-alt" href="/invoices">Invoices</a></div></div>
+<div class="cm-hero"><h1>{{ customer.name }}</h1><p>{{ customer.email }}</p><div class="cm-metrics"><div class="cm-metric"><strong>{{ (customer.twilio_number if customer.provider == 'twilio' else customer.phone_number) or '—' }}</strong><small>Caller ID</small></div><div class="cm-metric"><strong>{{ customer.calls_month }}</strong><small>Calls This Month</small></div><div class="cm-metric"><strong>{{ (customer.talk_seconds or 0)//60 }}m</strong><small>Talk Time</small></div><div class="cm-metric"><strong>{{ customer.plan_renewal or '—' }}</strong><small>Next Renewal</small></div></div></div>
+{% if request.query_params.get('saved') %}<p class="cm-pill cm-ok">Customer updated</p>{% endif %}
+{% if request.query_params.get('number_updated') %}<p class="cm-pill cm-ok">Caller ID updated successfully.</p>{% endif %}
+<section class="cm-card" style="margin-bottom:18px">
+  <h2>Change User Number (Telnyx)</h2>
+  <p class="cm-muted">Current number: <strong>{{ customer.phone_number or 'Not assigned' }}</strong></p>
+  {% if number_error %}<p class="cm-pill cm-warn">{{ number_error }}</p>{% else %}
+  <form method="post" action="/customers/{{ customer.email|urlencode }}/change-number"
+        onsubmit="return confirm('Change this user Caller ID? Future calls will use the selected number.');">
+    <div class="cm-field"><label>Available Telnyx number</label>
+      <select name="phone_number" required>
+        {% for number in available_numbers %}
+          <option value="{{ number }}" {% if number == customer.phone_number %}selected{% endif %}>{{ number }}{% if number == customer.phone_number %} (Current){% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button class="cm-btn" type="submit" {% if not available_numbers %}disabled{% endif %}>Update Number</button>
+  </form>
+  {% endif %}
+  <p class="cm-muted" style="font-size:12px;margin-top:12px">Numbers assigned to another user cannot be selected. Active calls are not intentionally disconnected.</p>
+</section>
+<section class="cm-card">
+<h2>Calling Cost Analytics <small class="cm-muted">(estimated USD)</small></h2>
+<p class="cm-muted">Only variable incoming and outgoing calling costs; excludes number rental, taxes and subscriptions. These are rate-based estimates, not provider invoices. Rates may differ by destination, call leg and billing rounding.</p>
+<div class="cm-actions" style="margin:12px 0">
+{% for val,label in [('today','Today'),('week','This Week'),('month','This Month')] %}
+<a class="cm-btn cm-btn-alt" href="?cost_period={{ val }}" {% if cost_period==val %}style="border-color:#7869ff"{% endif %}>{{ label }}</a>
+{% endfor %}</div>
+<div class="cm-grid">
+{% for prov in ['telnyx','twilio'] %}{% set d=cost_summary[prov] %}
+<div class="cm-metric"><h3>{{ prov|title }}</h3>
+<p>Incoming: <strong>${{ '%.3f'|format(d.incoming) }}</strong></p>
+<p>Outgoing: <strong>${{ '%.3f'|format(d.outgoing) }}</strong></p>
+<p>Total: <strong>${{ '%.3f'|format(d.incoming+d.outgoing) }}</strong></p>
+<small>{{ '%.1f'|format(d.minutes) }} min · {{ d.calls }} calls</small></div>
+{% endfor %}
+</div>
+</section>
+<section class="cm-card">
+<h2>Calling Provider Switch</h2>
+<p class="cm-muted">Current: <strong>{{ (customer.provider or 'telnyx')|upper }}</strong>. Switching applies to future calls after the user's browser reconnects; do not switch during an active call.</p>
+{% if request.query_params.get('provider_updated') %}<p class="cm-pill cm-ok">Provider updated. User should refresh dialer.</p>{% endif %}
+<form method="post" action="/customers/{{ customer.email|urlencode }}/provider" onsubmit="return confirm('Switch calling provider for future calls? User must refresh dialer.');">
+<div class="cm-field"><label>Provider</label><select name="provider" id="providerSelect">
+<option value="telnyx" {% if customer.provider!='twilio' %}selected{% endif %}>Telnyx</option>
+<option value="twilio" {% if customer.provider=='twilio' %}selected{% endif %}>Twilio</option></select></div>
+<div class="cm-field"><label>Twilio owned number (+E.164, required for Twilio)</label><input name="twilio_number" value="{{ customer.twilio_number or '' }}" placeholder="+12025550123"></div>
+{% if not twilio_configured %}<p class="cm-pill cm-warn">Twilio is not configured in Render; switching to Twilio is blocked.</p>{% endif %}
+<button class="cm-btn">Save Provider</button>
+</form>
+</section>
+<div class="cm-grid"><section class="cm-card"><h2>Business & Account Details</h2><form method="post" action="/customers/{{ customer.email|urlencode }}/update"><div class="cm-field"><label>Customer / Business Name</label><input name="name" value="{{ customer.name }}" required></div><div class="cm-field"><label>Login Email (read-only)</label><input value="{{ customer.email }}" readonly></div><div class="cm-field"><label>Plan</label><input name="plan_name" value="{{ customer.plan_name or '' }}"></div><div class="cm-field"><label>Monthly Revenue (PKR)</label><input name="monthly_amount" type="number" min="0" value="{{ customer.last_paid_amount or 0 }}"></div><div class="cm-field"><label>Renewal Date</label><input name="plan_renewal" type="date" value="{{ customer.plan_renewal or '' }}"></div><div class="cm-field"><label>Account Status</label><select name="is_active"><option value="true" {% if customer.is_active %}selected{% endif %}>Active</option><option value="false" {% if not customer.is_active %}selected{% endif %}>Disabled</option></select></div><div class="cm-field"><label>Contact Name</label><input name="contact_name" value="{{ customer.contact_name or '' }}"></div><div class="cm-field"><label>Contact Phone / WhatsApp</label><input name="contact_phone" value="{{ customer.contact_phone or '' }}"></div><div class="cm-field"><label>Address</label><input name="contact_address" value="{{ customer.contact_address or '' }}"></div><div class="cm-field"><label>Notes</label><textarea name="customer_notes" rows="3">{{ customer.customer_notes or '' }}</textarea></div><div class="cm-field"><label>New Password (leave blank to keep unchanged)</label><input type="password" name="new_password" minlength="12" autocomplete="new-password"></div><button class="cm-btn">Save Changes</button></form></section>
+<section><div class="cm-card"><h2>Renewal & Payments</h2><p>Collected to date: <strong>PKR {{ '{:,.0f}'.format(customer.collected or 0) }}</strong></p><p>Last payment: {{ customer.last_payment_at or '—' }}</p><h3>Record Payment</h3><form method="post" action="/customers/{{ customer.email|urlencode }}/payment"><div class="cm-field"><label>Amount (PKR)</label><input type="number" name="amount" min="1" required></div><div class="cm-field"><label>Payment Method</label><input name="method" value="Manual"></div><div class="cm-field"><label>Reference</label><input name="reference"></div><button class="cm-btn">Record Payment</button></form></div><div class="cm-card cm-scroll"><h2>Payment History</h2><table class="cm-table"><tr><th>Date</th><th>Amount</th><th>Status</th></tr>{% for payment in payments %}<tr><td>{{ payment.paid_at or '—' }}</td><td>PKR {{ '{:,.0f}'.format(payment.amount_pkr) }}</td><td>{{ payment.status }}</td></tr>{% else %}<tr><td colspan="3">No payments</td></tr>{% endfor %}</table></div><div class="cm-card"><h3>Delete Customer</h3><p class="cm-muted">Disables login and releases Caller ID. Payment history stays available.</p><form action="/users/delete" method="post" onsubmit="return confirm('Disable this customer?')"><input type="hidden" name="email" value="{{ customer.email }}"><button class="cm-btn cm-btn-alt" style="color:#f87171">Delete / Disable Customer</button></form></div></section></div>{% endblock %}
