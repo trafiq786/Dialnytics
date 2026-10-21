@@ -763,7 +763,7 @@ async def create_user(
                 cur.execute('SELECT id FROM public.dialnytics_users WHERE lower(email)=lower(%s)', (email,))
                 if cur.fetchone():
                     return fail('Email already exists')
-                cur.execute("""SELECT DISTINCT u.id FROM public.dialnytics_users u
+                cur.execute("""SELECT u.id FROM public.dialnytics_users u
                     LEFT JOIN public.caller_id_assignments a ON a.user_id=u.id
                     WHERE a.phone_number=%s OR u.phone_number=%s
                     FOR UPDATE OF u""", (phone_number, phone_number))
