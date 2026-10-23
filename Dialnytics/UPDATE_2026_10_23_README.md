@@ -52,3 +52,9 @@ Agar deploy ke baad koi page ya dialer CSP ki wajah se na chale: Render mein `CS
 - Fetch fail ho, login expire ho, ya PDF/download link ho to normal page load hota hai.
 - Files: `frontend/static/js/page-nav.js` (naya), `base.html`, `invoice_form.html`, `power-dialer.js`, `style.css`.
 - Limitation: Save, Create User, Record Payment jaise forms submit karne par ab bhi poora page reload hota hai.
+
+## Speed fix (pages 3-4 second mein khul rahe the)
+
+- Wajah: har page par Supabase se 4-8 naye connections bante the (har ek ~300-500ms). Ab connections dobara istemal hote hain (connection pool, `backend/voice_helpers.py`). Kharab/purana connection khud badal jata hai.
+- Link par mouse aate hi page pehle se load hona shuru ho jata hai, click par menu foran highlight hota hai aur upar patli loading line dikhti hai.
+- Optional: Render mein `DB_POOL_SIZE` (default 8) se khule connections ki tadaad badal sakte hain.

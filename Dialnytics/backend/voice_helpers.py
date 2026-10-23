@@ -380,3 +380,100 @@ def env_flag(name, default=False):
     if value is None:
         return default
     return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+# --------------------------------------------------------------------------
+# Database connection pool
+# --------------------------------------------------------------------------
+class ConnectionPool:
+    """Re-use open PostgreSQL connections instead of opening one per query.
+
+    `with pool.connection() as conn:` behaves like `with psycopg.connect() as conn:`
+    (commit on success, rollback on error) but hands the connection back to the
+    pool instead of closing it. Stale or broken connections are replaced.
+    """
+
+    def __init__(self, factory, max_idle=8, max_idle_age=240.0, ping_after=20.0):
+        import threading
+        self._factory = factory
+        self._idle = []            # list of (connection, last_used)
+        self._lock = threading.Lock()
+        self.max_idle = max_idle
+        self.max_idle_age = max_idle_age
+        self.ping_after = ping_after
+
+    @staticmethod
+    def _close(conn):
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _unusable(conn):
+        return bool(getattr(conn, "closed", False) or getattr(conn, "broken", False))
+
+    def _acquire(self):
+        while True:
+            with self._lock:
+                item = self._idle.pop() if self._idle else None
+            if item is None:
+                return self._factory()
+            conn, last_used = item
+            age = time.monotonic() - last_used
+            if self._unusable(conn) or age > self.max_idle_age:
+                self._close(conn)
+                continue
+            if age > self.ping_after:
+                try:
+                    conn.execute("SELECT 1")
+                    conn.rollback()
+                except Exception:
+                    self._close(conn)
+                    continue
+            return conn
+
+    def _release(self, conn):
+        status = getattr(getattr(conn, "info", None), "transaction_status", 0)
+        if self._unusable(conn) or int(status) != 0:   # 0 = IDLE (no open transaction)
+            self._close(conn)
+            return
+        with self._lock:
+            if len(self._idle) < self.max_idle:
+                self._idle.append((conn, time.monotonic()))
+                return
+        self._close(conn)
+
+    def connection(self):
+        return _PoolLease(self)
+
+    def close_all(self):
+        with self._lock:
+            idle, self._idle = self._idle, []
+        for conn, _ in idle:
+            self._close(conn)
+
+
+class _PoolLease:
+    def __init__(self, pool):
+        self.pool = pool
+        self.conn = None
+
+    def __enter__(self):
+        self.conn = self.pool._acquire()
+        return self.conn
+
+    def __exit__(self, exc_type, exc, tb):
+        conn, self.conn = self.conn, None
+        try:
+            if exc_type is None:
+                conn.commit()
+            else:
+                conn.rollback()
+        except Exception:
+            self.pool._close(conn)
+            if exc_type is None:
+                raise
+            return False
+        self.pool._release(conn)
+        return False

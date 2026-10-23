@@ -1003,5 +1003,8 @@ body.nav-collapsed .brand .brand-icon{display:block}
 .shell-main .chips a.on{background:var(--accent);border-color:var(--accent);color:#fff}
 
 /* ===== 2026-10 update: in-app navigation ===== */
-body.nav-loading .shell-main{opacity:.55;transition:opacity .15s ease;pointer-events:none}
+body.nav-loading .shell-main{opacity:.7;transition:opacity .2s ease .15s}
 .shell-main h1:focus{outline:none}
+/* thin progress bar while a page loads */
+body.nav-loading::before{content:"";position:fixed;top:0;left:0;height:3px;width:100%;z-index:2000;background:linear-gradient(90deg,#22d3ee,#2563eb);transform-origin:left;animation:dnNavBar 1.2s ease-out infinite}
+@keyframes dnNavBar{0%{transform:scaleX(0)}60%{transform:scaleX(.7)}100%{transform:scaleX(.95)}}

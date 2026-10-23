@@ -147,8 +147,18 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is required for the database build")
 
+def _new_db_connection():
+    # prepare_threshold=None keeps this safe behind Supabase's transaction pooler.
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10,
+                           prepare_threshold=None)
+
+# Opening a new TLS connection to Supabase costs ~300-500 ms, and one page used
+# up to 8 of them. Connections are now kept open and re-used.
+_db_pool = vh.ConnectionPool(_new_db_connection,
+                             max_idle=int(os.getenv("DB_POOL_SIZE", "8")))
+
 def db_connect():
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
+    return _db_pool.connection()
 
 def _db_user(row):
     return {

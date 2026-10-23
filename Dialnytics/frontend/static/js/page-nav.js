@@ -62,6 +62,8 @@
         if (menu) menu.hidden = true;
     }
 
+    const scriptCache = new Map();   // static page scripts only change on deploy
+
     // Recreate <script> elements so the browser executes them, in order.
     // Same-origin files are fetched and run inline so that listener capture
     // covers exactly the page script and nothing else (e.g. the call SDK).
@@ -80,9 +82,12 @@
         if (!old.src) return execInline(old, old.textContent, '');
         const src = new URL(old.src, location.href);
         if (src.origin === location.origin) {
-            const res = await fetch(src.href, { credentials: 'same-origin' });
-            if (!res.ok) throw new Error('Could not load ' + src.pathname);
-            return execInline(old, await res.text(), src.href);
+            if (!scriptCache.has(src.href)) {
+                const res = await fetch(src.href, { credentials: 'same-origin' });
+                if (!res.ok) throw new Error('Could not load ' + src.pathname);
+                scriptCache.set(src.href, await res.text());
+            }
+            return execInline(old, scriptCache.get(src.href), src.href);
         }
         await new Promise((resolve) => {   // third-party file: load normally
             const script = document.createElement('script');
@@ -102,6 +107,51 @@
     let navSeq = 0;
     let currentKey = location.pathname + location.search;
 
+    // ---- Fetching (with hover prefetch) ------------------------------------
+    // Hovering or pressing a link starts loading the page, so by the time the
+    // click lands most of the server time is already done.
+    const PREFETCH_MAX_AGE = 10000;
+    const prefetched = new Map();   // href -> {time, promise}
+
+    function fetchPage(href) {
+        return fetch(href, { credentials: 'same-origin', cache: 'no-store',
+            headers: { 'X-Requested-With': 'dialnytics-nav' } })
+            .then(async (res) => ({
+                ok: res.ok,
+                finalUrl: new URL(res.url || href),
+                type: res.headers.get('content-type') || '',
+                html: res.ok ? await res.text() : '',
+            }));
+    }
+
+    function prefetch(url) {
+        const href = url.href;
+        const hit = prefetched.get(href);
+        if (hit && Date.now() - hit.time < PREFETCH_MAX_AGE) return;
+        const entry = { time: Date.now(), promise: fetchPage(href) };
+        entry.promise.catch(() => prefetched.delete(href));
+        prefetched.set(href, entry);
+    }
+
+    function takePage(url) {
+        const hit = prefetched.get(url.href);
+        prefetched.delete(url.href);
+        if (hit && Date.now() - hit.time < PREFETCH_MAX_AGE) return hit.promise;
+        return fetchPage(url.href);
+    }
+
+    function markActive(url) {
+        // Instant feedback: highlight the clicked menu item before content arrives.
+        const links = document.querySelectorAll('.shell-nav a[href]');
+        let match = null;
+        links.forEach((a) => {
+            const p = new URL(a.href, location.href).pathname;
+            if (url.pathname === p || (p !== '/' && url.pathname.startsWith(p + '/'))) match = a;
+        });
+        if (!match) return;
+        links.forEach((a) => a.classList.toggle('active', a === match));
+    }
+
     async function navigate(url, push) {
         const main = document.getElementById('pageMain');
         const scriptsBox = document.getElementById('pageScripts');
@@ -109,19 +159,17 @@
         const seq = ++navSeq;
         document.body.classList.add('nav-loading');
         main.setAttribute('aria-busy', 'true');
+        markActive(url);
         let doc, finalUrl;
         try {
-            const res = await fetch(url.href, { credentials: 'same-origin', cache: 'no-store',
-                headers: { 'X-Requested-With': 'dialnytics-nav' } });
-            finalUrl = new URL(res.url || url.href);
-            const type = res.headers.get('content-type') || '';
-            if (!res.ok || !type.includes('text/html') || !isAppPage(finalUrl)) {
+            const page = await takePage(url);
+            finalUrl = page.finalUrl;
+            if (!page.ok || !page.type.includes('text/html') || !isAppPage(finalUrl)) {
                 // Login expired, error page or not an app page: load it normally.
-                if (seq === navSeq) hardNavigate(res.ok ? finalUrl : url);
+                if (seq === navSeq) hardNavigate(page.ok ? finalUrl : url);
                 return;
             }
-            const html = await res.text();
-            doc = new DOMParser().parseFromString(html, 'text/html');
+            doc = new DOMParser().parseFromString(page.html, 'text/html');
         } catch (err) {
             if (seq === navSeq) hardNavigate(url);
             return;
@@ -194,6 +242,29 @@
         event.preventDefault();
         navigate(url, true);
     });
+
+    let hoverTimer = null;
+    function prefetchTarget(event) {
+        const link = event.target.closest && event.target.closest('a[href]');
+        if (!link || link.hasAttribute('download') || (link.target && link.target !== '_self')) return null;
+        let url;
+        try { url = new URL(link.href, location.href); } catch (e) { return null; }
+        if (!isAppPage(url) || (url.pathname === location.pathname && url.search === location.search)) return null;
+        return url;
+    }
+    document.addEventListener('mouseover', (event) => {
+        const url = prefetchTarget(event);
+        clearTimeout(hoverTimer);
+        if (url) hoverTimer = setTimeout(() => prefetch(url), 70);
+    });
+    document.addEventListener('pointerdown', (event) => {
+        const url = event.button === 0 && prefetchTarget(event);
+        if (url) prefetch(url);
+    });
+    document.addEventListener('touchstart', (event) => {
+        const url = prefetchTarget(event);
+        if (url) prefetch(url);
+    }, { passive: true });
 
     window.addEventListener('popstate', () => {
         const key = location.pathname + location.search;
