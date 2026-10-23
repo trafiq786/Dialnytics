@@ -1001,3 +1001,7 @@ body.nav-collapsed .brand .brand-icon{display:block}
 .shell-main .chips a{display:inline-flex;align-items:center;padding:8px 13px;border:1px solid var(--border);border-radius:999px;background:var(--bg-secondary);color:var(--text-secondary);font-size:13px;font-weight:600;text-decoration:none}
 .shell-main .chips a:hover{background:var(--bg-hover);border-color:var(--accent)}
 .shell-main .chips a.on{background:var(--accent);border-color:var(--accent);color:#fff}
+
+/* ===== 2026-10 update: in-app navigation ===== */
+body.nav-loading .shell-main{opacity:.55;transition:opacity .15s ease;pointer-events:none}
+.shell-main h1:focus{outline:none}

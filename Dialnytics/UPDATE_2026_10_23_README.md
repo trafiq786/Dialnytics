@@ -42,3 +42,13 @@ Agar deploy ke baad koi page ya dialer CSP ki wajah se na chale: Render mein `CS
 - Cost estimate har provider ke ek rate par hai (country ke hisaab se alag rate nahi). Har call poore minute mein round up hoti hai.
 - Purani recordings jo disk par thi, woh pehle hi redeploy par mit chuki hain; wapas nahi aa sakti.
 - CSP mein inline scripts abhi allowed hain (purane templates ki wajah se).
+
+## Bina reload ke navigation (in-app navigation)
+
+- Sidebar, Today/This Week/This Month aur andar ke page links ab sirf beech ka content badalte hain. Dialer rail, Telnyx/Twilio connection aur chalti call nahi rukti.
+- Browser ke Back/Forward button kaam karte hain, aur address bar ka URL bhi badalta hai.
+- Contacts, Call Logs, CRM aur Voicemails ke "Call" buttons ab rail se seedha call milate hain, page nahi badalta. Agar pehle se call chal rahi ho to doosri call nahi milti.
+- Har page ke scripts (CRM, Power Dialer, Contacts, Scripts, Users, Invoice) naye content par dobara chalte hain. Purane page ke listeners aur Power Dialer ka timer page chhorte hi band ho jate hain.
+- Fetch fail ho, login expire ho, ya PDF/download link ho to normal page load hota hai.
+- Files: `frontend/static/js/page-nav.js` (naya), `base.html`, `invoice_form.html`, `power-dialer.js`, `style.css`.
+- Limitation: Save, Create User, Record Payment jaise forms submit karne par ab bhi poora page reload hota hai.

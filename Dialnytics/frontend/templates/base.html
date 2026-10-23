@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="/static/css/style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="/static/js/csrf.js"></script>
+    <script src="/static/js/page-nav.js"></script>
 </head>
 <body>
     <script>try{if(localStorage.getItem('dialnytics-theme')==='light')document.body.classList.add('light-theme')}catch(e){}</script>
@@ -68,8 +69,10 @@
                 </nav>
                 <a href="/settings" class="nav-settings {% if request.url.path == '/settings' %}active{% endif %}"><span class="ni">⚙</span><span>Settings</span></a>
             </aside>
-            <main class="shell-main">
+            <main class="shell-main" id="pageMain">
+                <script data-nav-marker>window.DialnyticsNav&&DialnyticsNav.capture(true)</script>
                 {% block content %}{% endblock %}
+                <script data-nav-marker>window.DialnyticsNav&&DialnyticsNav.capture(false)</script>
             </main>
             {% include "dialer_rail.html" %}
         </div>
@@ -82,6 +85,6 @@
     <script src="/static/js/dialer.js"></script>
     <script src="/static/js/ui-enhancements.js"></script>
     <script src="/static/js/session-guard.js"></script>
-    {% block scripts %}{% endblock %}
+    <div id="pageScripts" hidden><script data-nav-marker>window.DialnyticsNav&&DialnyticsNav.capture(true)</script>{% block scripts %}{% endblock %}<script data-nav-marker>window.DialnyticsNav&&DialnyticsNav.capture(false)</script></div>
 </body>
 </html>
