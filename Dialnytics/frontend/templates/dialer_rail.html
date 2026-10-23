@@ -98,7 +98,7 @@
             <span class="rail-label">Your number</span><strong class="rail-own-number">{{ user.phone_number }}</strong>
         </div>
         {% set plan = plan_status(user) %}
-        <div id="dialerConfig" hidden data-from="{{ user.phone_number or '' }}" data-recording="{{ 1 if has_recording(user) else 0 }}" data-expired="{{ 1 if plan.days_left < 0 and user.role != 'admin' else 0 }}"></div>
+        <div id="dialerConfig" hidden data-provider="{{ user.provider or 'telnyx' }}" data-from="{{ user.phone_number or '' }}" data-recording="{{ 1 if has_recording(user) else 0 }}" data-expired="{{ 1 if plan.days_left < 0 and user.role != 'admin' else 0 }}"></div>
         <div id="rtcStatus" style="font-size:12px;margin-bottom:10px;color:var(--text-muted);">Connecting...</div>
         <p id="activityTitle" hidden>Ready to call</p>
         <p id="activitySub" hidden></p>

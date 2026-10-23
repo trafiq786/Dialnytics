@@ -14,6 +14,24 @@
  <div class="revenue-card"><small>This Month Earnings</small><strong>Rs. {{ "{:,}".format(revenue) }}</strong><span>Recorded payments · PKR</span></div>
  <div class="revenue-card"><small>Renewals Due Within 7 Days</small><strong>{{ renewals|length }}</strong><span>Upcoming repayments</span></div>
 </div>
+{% if costs %}
+<section class="cost-panel" aria-labelledby="costTitle">
+ <div class="cost-panel-head">
+  <div><h2 id="costTitle">Estimated Calling Cost — All Customers</h2>
+  <p>Telnyx + Twilio charges estimated from call minutes. Rates can be changed in <a href="/settings">Settings</a>.</p></div>
+ </div>
+ <div class="cost-grid">
+  {% for key,label in [('today','Today'),('week','This Week'),('month','This Month')] %}
+  <div class="cost-cell">
+   <small>{{ label }}</small>
+   <strong>${{ '%.2f'|format(costs[key].usd) }}</strong>
+   <span>≈ Rs. {{ '{:,.0f}'.format(costs[key].pkr) }} · {{ costs[key].calls }} calls</span>
+   <span>↙ In {{ costs[key].in_min }} min · ↗ Out {{ costs[key].out_min }} min</span>
+  </div>
+  {% endfor %}
+ </div>
+</section>
+{% endif %}
 <section class="panel repayment-panel"><h2>Upcoming Repayments — Next 7 Days</h2>
 {% if renewals %}<div class="table-scroll"><table class="modern-table"><thead><tr><th>User</th><th>Renewal</th><th>Previous Amount</th><th>Record Repayment</th></tr></thead><tbody>
 {% for r in renewals %}<tr><td><strong>{{ r.name }}</strong><small>{{ r.email }}</small></td><td>{{ r.renewal }} ({{ r.days }} days)</td><td>Rs. {{ "{:,}".format(r.amount) }}</td><td><form method="post" action="/users/repayment" class="repayment-form"><input type="hidden" name="email" value="{{ r.email }}"><input type="number" name="amount" min="1" value="{{ r.amount }}" required aria-label="Repayment amount PKR"><button class="btn btn-primary" type="submit">Mark as Paid (+30 days)</button></form></td></tr>{% endfor %}

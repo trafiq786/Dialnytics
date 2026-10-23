@@ -5,7 +5,10 @@ const input = document.getElementById('numberInput');
     const FROM = cfg.dataset.from || '';
     const RECORDING_OK = cfg.dataset.recording === '1';
     const EXPIRED = cfg.dataset.expired === '1';
+    const PROVIDER = cfg.dataset.provider === 'twilio' ? 'twilio' : 'telnyx';
     let recorder = null;
+    let recCtx = null;
+    let recCallId = null;
     let recChunks = [];
     let recStarted = 0;
     let activeCall = null;
@@ -225,7 +228,7 @@ function markEnded(reason) {
         if (inState) inState.textContent = label;
         setStatus(label + (who ? ' · ' + who : ''));
         if (st === 'active') {
-            if (activeCall && activeCall.remoteStream) {
+            if (activeCall && activeCall.remoteStream && !activeCall._twilio) {
                 document.getElementById('remoteAudio').srcObject = activeCall.remoteStream;
             }
             watchRemoteEnd(activeCall);
@@ -286,7 +289,140 @@ function markEnded(reason) {
     })();
     function backspace() { input.value = input.value.slice(0, -1); }
 
+    // ---------- Twilio adapter: gives a Twilio Call the same shape the
+    // dialer already uses for Telnyx calls (state, hangup, dtmf, mute...).
+    function twilioShim(tw, number, incoming) {
+        const shim = {
+            _twilio: true,
+            _accepted: false,
+            id: 'tw-' + Math.random().toString(36).slice(2),
+            state: incoming ? 'ringing' : 'new',
+            cause: '',
+            sipCode: 0,
+            options: { destinationNumber: number, remoteCallerNumber: number },
+            get remoteStream() { try { return tw.getRemoteStream ? tw.getRemoteStream() : null; } catch (e) { return null; } },
+            get localStream() { try { return tw.getLocalStream ? tw.getLocalStream() : null; } catch (e) { return null; } },
+            answer() { tw.accept(); },
+            reject() { tw.reject(); },
+            hangup() {
+                try {
+                    if (incoming && !shim._accepted) tw.reject();
+                    else tw.disconnect();
+                } catch (e) {}
+            },
+            dtmf(d) { try { tw.sendDigits(d); } catch (e) {} },
+            muteAudio() { tw.mute(true); },
+            unmuteAudio() { tw.mute(false); },
+            hold() {},
+            unhold() {}
+        };
+        tw.on('ringing', () => {
+            if (shim.state === 'new') shim.state = 'ringing';
+            if (activeCall === shim) showState('ringing');
+        });
+        tw.on('accept', () => {
+            shim._accepted = true;
+            shim.state = 'active';
+            if (activeCall === shim) {
+                activeConfirmed = true;
+                lastState = '';
+                showState('active');
+            }
+        });
+        const finish = (reason) => {
+            shim.state = 'hangup';
+            if (incomingCall === shim) {
+                stopRing();
+                incomingCall = null;
+                showDialPad();
+                setStatus('Missed call');
+                return;
+            }
+            if (activeCall === shim) markEnded(reason || 'Call ended');
+            if (heldCall === shim) heldCall = null;
+        };
+        tw.on('disconnect', () => finish('Call ended'));
+        tw.on('cancel', () => finish('Call ended'));
+        tw.on('reject', () => finish('Call declined'));
+        tw.on('error', (err) => {
+            setStatus((err && err.message) || 'Call error', 'var(--danger)');
+            finish('Call failed');
+        });
+        return shim;
+    }
+
+    async function twilioToken() {
+        const res = await fetch('/api/twilio-token', { cache: 'no-store' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Token failed');
+        return data.token;
+    }
+
+    async function bootTwilio() {
+        const Device = window.Twilio && window.Twilio.Device;
+        if (!Device) {
+            rtcStatus.textContent = 'SDK missing';
+            setStatus('Twilio SDK failed to load. Check your internet or ad blocker.', 'var(--danger)');
+            return;
+        }
+        try {
+            const token = await twilioToken();
+            client = new Device(token, { codecPreferences: ['opus', 'pcmu'], logLevel: 'warn' });
+            try {
+                if (client.audio) {
+                    client.audio.incoming(false);   // the rail plays its own ring
+                    client.audio.disconnect(false);
+                }
+            } catch (e) {}
+            client.on('registered', () => {
+                rtcStatus.textContent = 'Ready';
+                rtcStatus.style.color = 'var(--success)';
+                const params = new URLSearchParams(location.search);
+                if (params.get('call') === '1' && input.value && !window._autoDialed) {
+                    window._autoDialed = true;
+                    makeCall();
+                }
+            });
+            client.on('unregistered', () => {
+                if (rtcStatus.textContent === 'Ready') rtcStatus.textContent = 'Not connected';
+            });
+            client.on('error', (err) => {
+                rtcStatus.textContent = 'RTC error';
+                setStatus((err && err.message) || 'Twilio error', 'var(--danger)');
+            });
+            client.on('tokenWillExpire', async () => {
+                try { client.updateToken(await twilioToken()); } catch (e) {}
+            });
+            client.on('incoming', (tw) => {
+                if (activeCall || incomingCall || heldCall || placing ||
+                    localStorage.getItem('dialnytics-dnd') === 'true') {
+                    try { tw.reject(); } catch (e) {}
+                    return;
+                }
+                const from = (tw.parameters && tw.parameters.From) || 'Unknown caller';
+                const shim = twilioShim(tw, from, true);
+                ended = false;
+                incomingCall = shim;
+                hidePanels();
+                const view = document.getElementById('incomingView');
+                if (view) view.hidden = false;
+                const num = document.getElementById('incomingNumber');
+                if (num) num.textContent = from;
+                rtcStatus.textContent = 'Incoming';
+                rtcStatus.style.color = 'var(--success)';
+                setStatus('Incoming call');
+                startRing();
+            });
+            rtcStatus.textContent = 'Connecting...';
+            await client.register();
+        } catch (err) {
+            rtcStatus.textContent = 'Not connected';
+            setStatus(err.message, 'var(--danger)');
+        }
+    }
+
     async function boot() {
+        if (PROVIDER === 'twilio') return bootTwilio();
         const Klass = RTC();
         if (!Klass) {
             rtcStatus.textContent = 'SDK missing';
@@ -390,12 +526,22 @@ function markEnded(reason) {
         showInCall(number);
         placing = true;
         try {
-            activeCall = client.newCall({
-                destinationNumber: number,
-                callerNumber: FROM,
-                audio: true,
-                remoteElement: 'remoteAudio'
-            });
+            if (PROVIDER === 'twilio') {
+                const tw = await client.connect({ params: { To: number } });
+                if (ended) {            // hung up while the call was being set up
+                    try { tw.disconnect(); } catch (e) {}
+                    placing = false;
+                    return;
+                }
+                activeCall = twilioShim(tw, number, false);
+            } else {
+                activeCall = client.newCall({
+                    destinationNumber: number,
+                    callerNumber: FROM,
+                    audio: true,
+                    remoteElement: 'remoteAudio'
+                });
+            }
         } catch (err) {
             placing = false;
             setStatus(err.message || 'Call failed. Allow the microphone.', 'var(--danger)');
@@ -430,6 +576,7 @@ function hangup() {
 
     function transferCall() {
         if (!activeCall) return setStatus('Transfer works only during a call', 'var(--danger)');
+        if (activeCall._twilio) return setStatus('Transfer is not available on this line yet', 'var(--danger)');
         const st = String(activeCall.state || '').toLowerCase();
         if (st && st !== 'active' && st !== 'held' && st !== 'ringing' && st !== 'early') {
             setStatus('Transfer works only when the call is active', 'var(--danger)');
@@ -476,6 +623,7 @@ function hangup() {
     }
     function addCall() {
         if (!activeCall) return setStatus('No active call', 'var(--danger)');
+        if (activeCall._twilio) return setStatus('Add Call is not available on this line yet', 'var(--danger)');
         if (heldCall) return setStatus('A call is already on hold', 'var(--danger)');
         try { if (activeCall.hold) activeCall.hold(); } catch (err) {}
         heldCall = activeCall;
@@ -528,6 +676,24 @@ function hangup() {
         hidePanels();
         document.getElementById('callsView').hidden = false;
     }
+    // Record both sides of the call (caller + agent) into one track.
+    function recordingStream(call) {
+        const remote = call.remoteStream;
+        const local = call.localStream || (call.options && call.options.localStream) || null;
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!remote) return null;
+        if (!Ctx || !local) return remote;
+        try {
+            recCtx = new Ctx();
+            const dest = recCtx.createMediaStreamDestination();
+            recCtx.createMediaStreamSource(remote).connect(dest);
+            recCtx.createMediaStreamSource(local).connect(dest);
+            if (recCtx.state !== 'running') recCtx.resume().catch(() => {});
+            return dest.stream;
+        } catch (err) {
+            return remote;
+        }
+    }
     function toggleRec() {
         if (!RECORDING_OK) {
             setStatus('Recording and campaigns are $25. Ask your admin to upgrade this account.', 'var(--danger)');
@@ -540,10 +706,18 @@ function hangup() {
             }
             recChunks = [];
             recStarted = Date.now();
-            try { recorder = new MediaRecorder(activeCall.remoteStream); }
+            recCallId = logId;
+            const stream = recordingStream(activeCall);
+            const opts = {};
+            if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+                opts.mimeType = 'audio/webm;codecs=opus';
+                opts.audioBitsPerSecond = 32000;
+            }
+            try { recorder = new MediaRecorder(stream, opts); }
             catch (err) { setStatus('Recording unavailable: ' + err.message, 'var(--danger)'); return; }
             recorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
             recorder.onstop = () => {
+                if (recCtx) { recCtx.close().catch(() => {}); recCtx = null; }
                 const blob = new Blob(recChunks, { type: 'audio/webm' });
                 const seconds = Math.max(1, Math.round((Date.now() - recStarted) / 1000));
                 const form = new FormData();
@@ -551,8 +725,10 @@ function hangup() {
                 form.append('to_number', input.value || '');
                 form.append('duration', String(seconds));
                 form.append('kind', 'call');
+                if (recCallId) form.append('call_id', recCallId);
+                recCallId = null;
                 fetch('/api/recordings', { method: 'POST', body: form })
-                    .then(r => { if (!r.ok) throw new Error('Upload failed (' + r.status + ')'); setStatus('Recording uploaded. Open Recordings to play it.'); })
+                    .then(r => { if (!r.ok) throw new Error('Upload failed (' + r.status + ')'); setStatus('Recording saved. Open Recordings to play it.'); })
                     .catch(() => setStatus('Could not save recording', 'var(--danger)'));
             };
             recorder.start();
@@ -707,6 +883,15 @@ function hangup() {
     async function declineIncoming() {
         const call = incomingCall;
         const groupId = incomingGroupId;
+        if (call && call._twilio) {
+            stopRing();
+            incomingCall = null;
+            try { call.reject(); } catch (e) {}
+            showDialPad();
+            rtcStatus.textContent = 'Ready';
+            setStatus('Call declined. The caller can leave a voicemail.');
+            return;
+        }
         if (!call || !groupId) return;
         stopRing();
         setStatus('Declining incoming call...');
@@ -773,6 +958,7 @@ function hangup() {
     }
     function toggleHold() {
         if (!activeCall) return;
+        if (activeCall._twilio) return setStatus('Hold is not available on this line yet', 'var(--danger)');
         onHold = !onHold;
         rtpStall = 0;
         iceStall = 0;
@@ -893,6 +1079,7 @@ window.addEventListener('dialnytics:session-revoked', () => {
     try { if (activeCall?.hangup) activeCall.hangup(); } catch (_) {}
     try { if (heldCall?.hangup) heldCall.hangup(); } catch (_) {}
     try { if (client?.disconnect) client.disconnect(); } catch (_) {}
+    try { if (client?.destroy) client.destroy(); } catch (_) {}
 });
 
 
@@ -904,7 +1091,7 @@ window.DialnyticsDialer = {
     busy: () => Boolean(activeCall || incomingCall || heldCall || placing),
     dial: async (number) => {
         if (!window.DialnyticsDialer.ready()) {
-            throw new Error('Telnyx is not ready or another call is active');
+            throw new Error('Dialer is not ready or another call is active');
         }
         if (!/^\+[1-9]\d{6,14}$/.test(String(number))) {
             throw new Error('Invalid E.164 phone number');

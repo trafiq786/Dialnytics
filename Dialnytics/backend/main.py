@@ -1,9 +1,9 @@
-from fastapi import FastAPI, Request, Form, HTTPException, UploadFile, File
+from fastapi import FastAPI, Request, Form, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Optional, List
 import secrets
 import hashlib
@@ -29,17 +29,35 @@ from reportlab.lib.enums import TA_RIGHT
 from psycopg.rows import dict_row
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
+import logging
+import sys
+import urllib.parse
 
-app = FastAPI(title="Dialnytics", version="1.1.0")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import voice_helpers as vh  # noqa: E402  (sibling module; works for both start commands)
+
+app = FastAPI(title="Dialnytics", version="1.2.0")
+log = logging.getLogger("dialnytics")
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 
 app.mount("/static", StaticFiles(directory=os.path.join(FRONTEND_DIR, "static")), name="static")
-MEDIA_DIR = os.path.join(BASE_DIR, "data", "media")
-os.makedirs(MEDIA_DIR, exist_ok=True)
-app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
+# Recordings are no longer served from a public /media folder. Audio is kept in
+# Supabase (Storage bucket or database) and streamed only to its logged-in owner.
 templates = Jinja2Templates(directory=os.path.join(FRONTEND_DIR, "templates"))
+
+# Branding (official Dialnytics logo). Replace these PNGs to change the logo.
+templates.env.globals["brand_logo"] = "/static/img/dialnytics-logo.png"            # for light backgrounds
+templates.env.globals["brand_logo_dark"] = "/static/img/dialnytics-logo-dark.png"  # for dark backgrounds
+templates.env.globals["brand_icon"] = "/static/img/dialnytics-favlogo.png"
+
+# Security headers (CSP etc.) and CSRF protection for every form and fetch.
+app.add_middleware(
+    vh.SecurityMiddleware,
+    trusted_hosts=[h for h in os.getenv("TRUSTED_HOSTS", "").split(",") if h.strip()],
+    report_only=vh.env_flag("CSP_REPORT_ONLY", False),
+)
 
 # ==================== CONFIG (Telnyx) ====================
 def _load_env_file():
@@ -60,16 +78,26 @@ TELNYX_API_KEY = os.getenv("TELNYX_API_KEY", "")
 TELNYX_CONNECTION_ID = os.getenv("TELNYX_CONNECTION_ID", "")
 TELNYX_FROM_NUMBER = os.getenv("TELNYX_FROM_NUMBER", "")
 
-# user email -> telephony credential id
-telephony_creds = {}
+# ==================== CONFIG (Twilio backup provider) ====================
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+# Public URL Twilio calls back to (also used for webhook signature checks).
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://dialnytics.co.uk").strip().rstrip("/")
+VOICEMAIL_GREETING = os.getenv(
+    "VOICEMAIL_GREETING",
+    "Sorry, we cannot take your call right now. Please leave a message after the beep.")
+VOICEMAIL_MAX_SECONDS = int(os.getenv("VOICEMAIL_MAX_SECONDS", "120"))
+PROVIDERS = ("telnyx", "twilio")
 
-# ==================== IN-MEMORY DB ====================
+# Private recording storage: Supabase Storage when configured, else the database.
+storage = vh.SupabaseStorage(os.getenv("SUPABASE_URL", ""),
+                             os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
+                             os.getenv("SUPABASE_RECORDINGS_BUCKET", "dialnytics-recordings"))
+MAX_RECORDING_BYTES = 40 * 1024 * 1024
+
+# ==================== IN-MEMORY CACHE ====================
+# Users are cached from PostgreSQL. Campaign drafts are still memory-only.
 users_db = {}
-sessions = {}
-call_logs = []
-contacts_db = {}
-recordings_db = {}
-voicemails_db = {}
 campaigns_db = {}
 
 def hash_password(password: str) -> str:
@@ -128,6 +156,7 @@ def _db_user(row):
         "password": row["password_hash"],
         "role": "admin" if row["role"] == "admin" else "user",
         "phone_number": row["phone_number"] or "",
+        "provider": row.get("provider") if row.get("provider") in PROVIDERS else "telnyx",
         "sip_username": row["sip_username"] or "",
         "credential_id": row["credential_id"] or "",
         "plan_name": row["plan_name"] or "",
@@ -198,12 +227,154 @@ def load_users():
         save_users()
         refresh_users()
 
+SCHEMA_SQL = """
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS provider text NOT NULL DEFAULT 'telnyx';
+ALTER TABLE public.calls ADD COLUMN IF NOT EXISTS provider text NOT NULL DEFAULT 'telnyx';
+ALTER TABLE public.calls ADD COLUMN IF NOT EXISTS provider_call_id text;
+CREATE INDEX IF NOT EXISTS calls_created_at_idx ON public.calls(created_at);
+CREATE TABLE IF NOT EXISTS public.dialnytics_settings (
+    key text PRIMARY KEY,
+    value text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS public.dialnytics_recordings (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id uuid NOT NULL REFERENCES public.dialnytics_users(id) ON DELETE CASCADE,
+    call_id uuid REFERENCES public.calls(id) ON DELETE SET NULL,
+    kind text NOT NULL DEFAULT 'call' CHECK (kind IN ('call','voicemail')),
+    provider text NOT NULL DEFAULT 'telnyx',
+    from_number text NOT NULL DEFAULT '',
+    to_number text NOT NULL DEFAULT '',
+    duration_seconds integer NOT NULL DEFAULT 0,
+    content_type text NOT NULL DEFAULT 'audio/webm',
+    size_bytes integer NOT NULL DEFAULT 0,
+    storage text NOT NULL DEFAULT 'db' CHECK (storage IN ('db','supabase')),
+    storage_path text,
+    audio bytea,
+    is_read boolean NOT NULL DEFAULT false,
+    provider_ref text UNIQUE,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS dialnytics_recordings_user_idx
+    ON public.dialnytics_recordings(user_id, kind, created_at DESC);
+CREATE INDEX IF NOT EXISTS dialnytics_recordings_call_idx ON public.dialnytics_recordings(call_id);
+ALTER TABLE public.dialnytics_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.dialnytics_recordings ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.dialnytics_settings FROM anon, authenticated;
+REVOKE ALL ON public.dialnytics_recordings FROM anon, authenticated;
+"""
+
+def ensure_schema():
+    """Idempotent additive migration (same SQL as SUPABASE_MIGRATION_07)."""
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext('dialnytics-schema-07'))")
+                cur.execute(SCHEMA_SQL)
+    except Exception:
+        log.exception("Automatic schema update failed; run SUPABASE_MIGRATION_07.sql manually")
+
+ensure_schema()
 DEFAULT_ADMIN = dict(users_db["admin@dialnytics.com"])
 DEFAULT_AGENT = dict(users_db["agent@dialnytics.com"])
 load_users()
 
-class CallRequest(BaseModel):
-    to_number: str
+
+# ==================== SETTINGS & RATES ====================
+def get_setting(key, default=None):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM public.dialnytics_settings WHERE key=%s", (key,))
+            row = cur.fetchone()
+    return row["value"] if row else default
+
+def set_setting(key, value):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO public.dialnytics_settings(key,value,updated_at)
+                VALUES(%s,%s,NOW()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()""",
+                (key, str(value)))
+
+def get_rates():
+    rates = dict(vh.DEFAULT_RATES)
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT key,value FROM public.dialnytics_settings WHERE key LIKE 'rate_%'")
+                for row in cur.fetchall():
+                    name = row["key"][5:]
+                    if name in rates:
+                        try:
+                            rates[name] = float(row["value"])
+                        except ValueError:
+                            pass
+    except Exception:
+        log.exception("Could not load provider rates; using defaults")
+    return rates
+
+def _period_starts():
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(os.getenv("DASHBOARD_TIMEZONE", "Asia/Karachi"))
+    today = datetime.now(tz).date()
+    def at(d):
+        return datetime.combine(d, datetime.min.time(), tzinfo=tz)
+    return {"today": at(today),
+            "week": at(today - timedelta(days=today.weekday())),
+            "month": at(today.replace(day=1))}
+
+def cost_summary(user_id=None):
+    """Estimated provider cost (USD) for today / this week / this month.
+
+    Billable minutes are rounded up per call and multiplied by the admin-set
+    per-minute rate of the provider and direction the call used.
+    """
+    rates = get_rates()
+    starts = _period_starts()
+    params = {"tx_in": rates["telnyx_in"], "tx_out": rates["telnyx_out"],
+              "tw_in": rates["twilio_in"], "tw_out": rates["twilio_out"],
+              "since": min(starts.values()), "today": starts["today"],
+              "week": starts["week"], "month": starts["month"], "uid": user_id}
+    sql = """
+        WITH c AS (
+            SELECT created_at, direction,
+                   CEIL(GREATEST(COALESCE(duration_seconds,0),0)/60.0)::float8 AS mins,
+                   CASE WHEN COALESCE(provider,'telnyx')='twilio'
+                        THEN CASE WHEN direction='incoming' THEN %(tw_in)s::float8 ELSE %(tw_out)s::float8 END
+                        ELSE CASE WHEN direction='incoming' THEN %(tx_in)s::float8 ELSE %(tx_out)s::float8 END
+                   END AS rate
+            FROM public.calls
+            WHERE created_at >= %(since)s AND (%(uid)s::uuid IS NULL OR user_id=%(uid)s::uuid)
+        )
+        SELECT
+          COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(today)s),0) AS today_cost,
+          COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(week)s),0)  AS week_cost,
+          COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(month)s),0) AS month_cost,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(today)s AND direction='incoming'),0) AS today_in,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(today)s AND direction<>'incoming'),0) AS today_out,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(week)s AND direction='incoming'),0) AS week_in,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(week)s AND direction<>'incoming'),0) AS week_out,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(month)s AND direction='incoming'),0) AS month_in,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(month)s AND direction<>'incoming'),0) AS month_out,
+          COUNT(*) FILTER (WHERE created_at >= %(today)s) AS today_calls,
+          COUNT(*) FILTER (WHERE created_at >= %(week)s) AS week_calls,
+          COUNT(*) FILTER (WHERE created_at >= %(month)s) AS month_calls
+        FROM c"""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+    pkr = rates["usd_to_pkr"]
+    out = {"rates": rates}
+    for period in ("today", "week", "month"):
+        usd = float(row[f"{period}_cost"] or 0)
+        out[period] = {"usd": usd, "pkr": usd * pkr,
+                       "in_min": int(row[f"{period}_in"] or 0),
+                       "out_min": int(row[f"{period}_out"] or 0),
+                       "calls": int(row[f"{period}_calls"] or 0)}
+    return out
+
+templates.env.globals["call_cost"] = vh.call_cost
+
 
 class CampaignCreate(BaseModel):
     name: str
@@ -361,6 +532,98 @@ def get_telnyx_numbers():
     return sorted(set(numbers))
 
 
+# ==================== TWILIO ====================
+TWILIO_API = "https://api.twilio.com/2010-04-01"
+
+def twilio_enabled():
+    return bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN)
+
+def _twilio_request(method, path, form=None):
+    if not twilio_enabled():
+        raise HTTPException(status_code=503, detail="Twilio is not configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN)")
+    url = path if path.startswith("https://") else f"{TWILIO_API}/Accounts/{TWILIO_ACCOUNT_SID}{path}"
+    try:
+        status, data = vh.http_json(method, url, form=form, basic_auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+    except vh.ProviderError:
+        log.exception("Twilio network error")
+        raise HTTPException(status_code=502, detail="Twilio is unreachable")
+    if status >= 400:
+        message = data.get("message") if isinstance(data, dict) else ""
+        raise HTTPException(status_code=502, detail=f"Twilio error {status}: {message}"[:300])
+    return data if isinstance(data, dict) else {}
+
+def _twilio_number_records():
+    records, path = [], "/IncomingPhoneNumbers.json?PageSize=1000"
+    for _ in range(20):
+        data = _twilio_request("GET", path)
+        records.extend(data.get("incoming_phone_numbers") or [])
+        next_uri = data.get("next_page_uri")
+        if not next_uri:
+            break
+        path = "https://api.twilio.com" + next_uri
+    return records
+
+def get_twilio_numbers():
+    return sorted({r.get("phone_number") for r in _twilio_number_records() if r.get("phone_number")})
+
+def get_provider_numbers(provider):
+    if provider == "twilio":
+        return get_twilio_numbers()
+    return get_telnyx_numbers()
+
+def _twilio_configure_number(number):
+    """Point a Twilio number's Voice webhook at this app (best effort)."""
+    if not twilio_enabled() or not PUBLIC_BASE_URL:
+        return False
+    try:
+        for record in _twilio_number_records():
+            if record.get("phone_number") == number and record.get("sid"):
+                _twilio_request("POST", f"/IncomingPhoneNumbers/{record['sid']}.json", {
+                    "VoiceUrl": PUBLIC_BASE_URL + "/twilio/incoming",
+                    "VoiceMethod": "POST",
+                })
+                return True
+    except Exception:
+        log.exception("Could not configure Twilio number webhook for %s", number)
+    return False
+
+def _twilio_voice_config():
+    """API key + TwiML app used for browser calling.
+
+    Environment variables win. Otherwise the app creates them once through the
+    Twilio API and stores them in dialnytics_settings.
+    """
+    key_sid = os.getenv("TWILIO_API_KEY_SID", "").strip() or get_setting("twilio_api_key_sid", "")
+    key_secret = os.getenv("TWILIO_API_KEY_SECRET", "").strip() or get_setting("twilio_api_key_secret", "")
+    app_sid = os.getenv("TWILIO_TWIML_APP_SID", "").strip() or get_setting("twilio_twiml_app_sid", "")
+    if key_sid and key_secret and app_sid:
+        return key_sid, key_secret, app_sid
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('dialnytics-twilio-setup'))")
+            key_sid = key_sid or get_setting("twilio_api_key_sid", "")
+            key_secret = key_secret or get_setting("twilio_api_key_secret", "")
+            app_sid = app_sid or get_setting("twilio_twiml_app_sid", "")
+            if not (key_sid and key_secret):
+                created = _twilio_request("POST", "/Keys.json", {"FriendlyName": "Dialnytics Web Dialer"})
+                key_sid, key_secret = created.get("sid", ""), created.get("secret", "")
+                if not (key_sid and key_secret):
+                    raise HTTPException(status_code=502, detail="Twilio API key creation failed")
+                set_setting("twilio_api_key_sid", key_sid)
+                set_setting("twilio_api_key_secret", key_secret)
+            if not app_sid:
+                created = _twilio_request("POST", "/Applications.json", {
+                    "FriendlyName": "Dialnytics Web Dialer",
+                    "VoiceUrl": PUBLIC_BASE_URL + "/twilio/voice",
+                    "VoiceMethod": "POST",
+                })
+                app_sid = created.get("sid", "")
+                if not app_sid:
+                    raise HTTPException(status_code=502, detail="Twilio TwiML app creation failed")
+                set_setting("twilio_twiml_app_sid", app_sid)
+    return key_sid, key_secret, app_sid
+
+
 def number_assignments(number):
     """Database is authoritative, including inactive users and stale user-number rows."""
     with db_connect() as conn:
@@ -378,7 +641,10 @@ async def admin_caller_ids(request: Request):
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
-    numbers = get_telnyx_numbers()
+    provider = request.query_params.get("provider", "telnyx")
+    if provider not in PROVIDERS:
+        raise HTTPException(status_code=422, detail="Unknown provider")
+    numbers = get_provider_numbers(provider)
     # Fetch all assignments in one database roundtrip, not from cached users_db.
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -412,7 +678,7 @@ def require_admin(request):
 def _customer_data(email):
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.plan_name,
+            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.provider,u.plan_name,
                 u.plan_start,u.plan_renewal,u.created_at,u.is_active,u.is_demo,
                 u.last_paid_amount,u.recording_premium,u.contact_name,u.contact_phone,
                 u.contact_address,u.customer_notes,
@@ -447,20 +713,14 @@ async def customer_detail(request:Request,email:str):
         with conn.cursor() as cur:
             cur.execute('SELECT amount_pkr,status,paid_at,renewal_date FROM public.payments WHERE user_id=%s ORDER BY paid_at DESC NULLS LAST LIMIT 100',(c['id'],))
             payments=cur.fetchall()
-    number_error = None
     try:
-        owned_numbers = get_telnyx_numbers()
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT phone_number FROM public.caller_id_assignments WHERE user_id <> %s", (c['id'],))
-                occupied = {r['phone_number'] for r in cur.fetchall()}
-        available_numbers = [n for n in owned_numbers if n not in occupied]
+        costs = cost_summary(c['id'])
     except Exception:
-        available_numbers = [c['phone_number']] if c.get('phone_number') else []
-        number_error = 'Unable to load Telnyx numbers. Number changes are temporarily unavailable.'
+        log.exception("Cost summary failed for customer")
+        costs = None
     return templates.TemplateResponse(request=request,name='customer_detail.html',context={
-        'user':admin,'customer':c,'payments':payments,
-        'available_numbers':available_numbers,'number_error':number_error})
+        'user':admin,'customer':c,'payments':payments,'costs':costs,
+        'twilio_ready':twilio_enabled()})
 
 
 @app.post('/customers/{email}/update')
@@ -494,16 +754,18 @@ async def customer_update(request:Request,email:str,name:str=Form(...),plan_name
 
 
 @app.post('/customers/{email}/change-number')
-async def customer_change_number(request: Request, email: str, phone_number: str = Form(...)):
+async def customer_change_number(request: Request, email: str, phone_number: str = Form(...),
+                                 provider: str = Form("telnyx")):
     require_admin(request)
     from urllib.parse import quote
-    import re
     new_number = phone_number.strip()
+    if provider not in PROVIDERS:
+        raise HTTPException(422, 'Unknown provider')
     if not re.fullmatch(r"\+[1-9][0-9]{7,14}", new_number):
         raise HTTPException(422, 'Invalid E.164 phone number')
     # Verify ownership with the provider before changing the database.
-    if new_number not in get_telnyx_numbers():
-        raise HTTPException(422, 'Number is not owned by this Telnyx account')
+    if new_number not in get_provider_numbers(provider):
+        raise HTTPException(422, f'Number is not owned by this {provider.capitalize()} account')
     with db_connect() as conn:
         with conn.cursor() as cur:
             # Serialize changes to this user and the requested number.
@@ -519,8 +781,11 @@ async def customer_change_number(request: Request, email: str, phone_number: str
             # Remove old assignment and insert new assignment in one transaction.
             cur.execute('DELETE FROM public.caller_id_assignments WHERE user_id=%s', (target['id'],))
             cur.execute('INSERT INTO public.caller_id_assignments(user_id,phone_number) VALUES (%s,%s)', (target['id'],new_number))
-            cur.execute('UPDATE public.dialnytics_users SET phone_number=%s WHERE id=%s', (new_number,target['id']))
+            cur.execute('UPDATE public.dialnytics_users SET phone_number=%s,provider=%s WHERE id=%s',
+                        (new_number,provider,target['id']))
     refresh_users()
+    if provider == 'twilio':
+        _twilio_configure_number(new_number)
     return RedirectResponse('/customers/' + quote(email, safe='') + '?number_updated=1', status_code=303)
 
 
@@ -707,6 +972,7 @@ async def create_user(
     plan_start: str = Form(""),
     plan_renewal: str = Form(""),
     is_demo: bool = Form(False),
+    provider: str = Form("telnyx"),
 ):
     from urllib.parse import urlencode
     from psycopg.errors import UniqueViolation
@@ -727,12 +993,15 @@ async def create_user(
         return fail('Valid international Caller ID required')
     if len(password) < 12:
         return fail('Password must be at least 12 characters')
+    if provider not in PROVIDERS:
+        return fail('Select a calling provider')
+    provider_label = provider.capitalize()
     try:
-        owned_numbers = get_telnyx_numbers()
+        owned_numbers = get_provider_numbers(provider)
     except HTTPException:
-        return fail('Unable to verify Telnyx numbers')
+        return fail(f'Unable to verify {provider_label} numbers')
     if phone_number not in owned_numbers:
-        return fail('Caller ID not in Telnyx account')
+        return fail(f'Caller ID not in {provider_label} account')
 
     form = await request.form()
     confirmed_transfer = form.get('confirm_shared_number') == 'yes'
@@ -775,10 +1044,10 @@ async def create_user(
                     cur.execute('DELETE FROM public.caller_id_assignments WHERE phone_number=%s', (phone_number,))
                 cur.execute("""INSERT INTO public.dialnytics_users
                     (name,email,password_hash,role,phone_number,credential_id,sip_username,
-                     plan_name,plan_start,plan_renewal,last_paid_amount,recording_premium,dnd_enabled,is_demo)
-                    VALUES (%s,%s,%s,'agent',%s,NULL,NULL,%s,%s,%s,%s,FALSE,FALSE,%s)
+                     plan_name,plan_start,plan_renewal,last_paid_amount,recording_premium,dnd_enabled,is_demo,provider)
+                    VALUES (%s,%s,%s,'agent',%s,NULL,NULL,%s,%s,%s,%s,FALSE,FALSE,%s,%s)
                     RETURNING id""", (name,email,hash_password(password),phone_number,
-                    (plan_name or '1 USER ACCOUNT').strip(),start,renewal,amount_paid,is_demo))
+                    (plan_name or '1 USER ACCOUNT').strip(),start,renewal,amount_paid,is_demo,provider))
                 new_id = cur.fetchone()['id']
                 cur.execute('INSERT INTO public.caller_id_assignments(user_id,phone_number) VALUES (%s,%s)',
                             (new_id,phone_number))
@@ -790,11 +1059,13 @@ async def create_user(
         return fail('Email or Caller ID already assigned; refresh and retry')
 
     refresh_users()
-    try:
-        _ensure_credential(email)
-    except Exception:
-        import logging
-        logging.exception('Telnyx credential creation failed for new user')
+    if provider == 'twilio':
+        _twilio_configure_number(phone_number)
+    else:
+        try:
+            _ensure_credential(email)
+        except Exception:
+            log.exception('Telnyx credential creation failed for new user')
     return RedirectResponse('/users?created=1', status_code=303)
 
 
@@ -1013,7 +1284,7 @@ async def dashboard(request: Request):
         if not ts:
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=datetime.timezone.utc)
+            ts = ts.replace(tzinfo=timezone.utc)
         local_ts = ts.astimezone(chart_tz)
         d = local_ts.date()
         if period == "today" and d == local_today:
@@ -1054,13 +1325,24 @@ async def dashboard(request: Request):
                 cur.execute("""SELECT COALESCE(SUM(amount_pkr),0) AS total FROM public.payments
                     WHERE status='paid' AND paid_at >= date_trunc('month',NOW())""")
                 revenue = float(cur.fetchone()["total"])
+    costs = None
+    if user.get("role") == "admin":
+        try:
+            costs = cost_summary()
+        except Exception:
+            log.exception("Dashboard cost summary failed")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM public.dialnytics_recordings WHERE user_id=%s AND kind='call'",
+                        (user["id"],))
+            recordings_count = cur.fetchone()["n"]
     return templates.TemplateResponse(request=request, name="dashboard.html", context={
         "chart_bars": chart_bars,
-        "period": period, "revenue": revenue, "renewals": renewals,
+        "period": period, "revenue": revenue, "renewals": renewals, "costs": costs,
         "user": user, "total_calls": total_calls, "answer_rate": answer_rate,
         "avg_talk_time": avg_talk, "contacts_count": _count_contacts(user["id"]),
         "followups": 0, "failed_calls": failed, "answered_calls": answered,
-        "recordings_count": len(recordings_db.get(user["email"], [])),
+        "recordings_count": recordings_count,
         "campaigns_count": len(campaigns_db.get(user["email"], []))
     })
 
@@ -1127,6 +1409,8 @@ async def webrtc_token(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     if user.get("role") != "admin" and plan_status(user)["days_left"] < 0:
         raise HTTPException(status_code=402, detail="Subscription expired")
+    if user.get("provider") == "twilio":
+        raise HTTPException(status_code=409, detail="This account uses Twilio; request /api/twilio-token")
     cred_id = _ensure_credential(user["email"])
     token_resp = _telnyx_request("POST", f"/v2/telephony_credentials/{cred_id}/token")
     token = None
@@ -1173,23 +1457,20 @@ async def log_webrtc_call(request: Request):
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
     data = await request.json()
-    call_entry = {
-        "id": secrets.token_hex(8),
-        "user_email": user["email"],
-        "from_number": user.get("phone_number") or TELNYX_FROM_NUMBER,
-        "to_number": data.get("to_number"),
-        "status": data.get("status", "initiated"),
-        "duration": 0,
-        "created_at": datetime.now().isoformat(),
-        "recording_url": None,
-    }
+    to_number = str(data.get("to_number") or "").strip()[:40]
+    status = str(data.get("status") or "initiated")[:60]
+    from_number = user.get("phone_number") or TELNYX_FROM_NUMBER
+    provider = user.get("provider") or "telnyx"
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO public.calls
-                (user_id,from_number,to_number,direction,status,created_at)
-                VALUES (%s,%s,%s,'outgoing',%s,NOW()) RETURNING id""",
-                (user["id"],call_entry["from_number"],call_entry["to_number"],call_entry["status"]))
-            call_entry["id"] = str(cur.fetchone()["id"])
+                (user_id,from_number,to_number,direction,status,provider,created_at)
+                VALUES (%s,%s,%s,'outgoing',%s,%s,NOW()) RETURNING id,created_at""",
+                (user["id"], from_number, to_number, status, provider))
+            row = cur.fetchone()
+    call_entry = {"id": str(row["id"]), "from_number": from_number, "to_number": to_number,
+                  "status": status, "duration": 0, "provider": provider,
+                  "created_at": row["created_at"].isoformat()}
     return JSONResponse({"success": True, "call": call_entry, "id": call_entry["id"]})
 
 @app.post("/api/call-log/{call_id}")
@@ -1213,61 +1494,55 @@ async def update_call_log(call_id: str, request: Request):
                 raise HTTPException(status_code=404,detail="Call not found")
     return JSONResponse({"success":True})
 
-@app.post("/api/call")
-async def make_call(request: Request, data: CallRequest):
+@app.delete("/api/call-log/{call_id}")
+async def delete_call_log(call_id: uuid.UUID, request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
+    from psycopg.errors import ForeignKeyViolation
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM public.calls WHERE id=%s AND user_id=%s RETURNING id",
+                            (call_id, user["id"]))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Call not found")
+    except ForeignKeyViolation:
+        raise HTTPException(status_code=409, detail="This call is linked to other records and cannot be deleted")
+    return {"deleted": True}
 
-    call_id = secrets.token_hex(8)
-    status = "initiated"
-    note = "Simulation mode"
 
-    # ========== TELNYX REAL CALL (uncomment when keys ready) ==========
-    # if TELNYX_API_KEY and TELNYX_CONNECTION_ID:
-    #     try:
-    #         import telnyx
-    #         telnyx.api_key = TELNYX_API_KEY
-    #         call = telnyx.Call.create(
-    #             connection_id=TELNYX_CONNECTION_ID,
-    #             to=data.to_number,
-    #             from_=TELNYX_FROM_NUMBER or user["phone_number"],
-    #             # answering_machine_detection="detect",
-    #         )
-    #         call_id = call.call_control_id
-    #         status = "initiated"
-    #         note = "Real Telnyx call"
-    #     except Exception as e:
-    #         return JSONResponse({"success": False, "message": str(e)})
-    # ================================================================
+# ==================== CALL LOGS ====================
+def _local_tz():
+    from zoneinfo import ZoneInfo
+    return ZoneInfo(os.getenv("DASHBOARD_TIMEZONE", "Asia/Karachi"))
 
-    call_entry = {
-        "id": call_id, "user_email": user["email"],
-        "from_number": user["phone_number"], "to_number": data.to_number,
-        "status": status, "duration": 0,
-        "created_at": datetime.now().isoformat(),
-        "recording_url": None
-    }
-    call_logs.append(call_entry)
+def _to_local(ts):
+    if not ts:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(_local_tz())
 
-    # Simulate a recording entry
-    if user["email"] not in recordings_db:
-        recordings_db[user["email"]] = []
-    recordings_db[user["email"]].append({
-        "id": secrets.token_hex(6),
-        "call_id": call_id,
-        "to_number": data.to_number,
-        "duration": 0,
-        "created_at": datetime.now().isoformat(),
-        "url": "#"
-    })
+def _day_label(local_ts, today):
+    d = local_ts.date()
+    if d == today:
+        return "Today"
+    if d == today - timedelta(days=1):
+        return "Yesterday"
+    return local_ts.strftime("%d %b %Y")
 
-    return JSONResponse({
-        "success": True,
-        "message": f"Call initiated to {data.to_number}",
-        "call_id": call_id,
-        "note": note
-    })
+def _contact_names(user_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id,name,number FROM public.dialnytics_contacts WHERE user_id=%s", (user_id,))
+            return {r["number"]: {"id": str(r["id"]), "name": r["name"]} for r in cur.fetchall()}
+
+def _clean_number(value):
+    value = str(value or "").strip()
+    if not value or "anonymous" in value.lower():
+        return ""
+    return value
 
 @app.get("/call-logs", response_class=HTMLResponse)
 async def call_logs_page(request: Request):
@@ -1276,28 +1551,58 @@ async def call_logs_page(request: Request):
         return RedirectResponse(url="/login", status_code=302)
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT id,from_number,to_number,direction,status,duration_seconds,created_at,
-                recording_url FROM public.calls WHERE user_id=%s
-                ORDER BY created_at DESC LIMIT 500""",(user["id"],))
-            user_calls = [dict(id=str(r["id"]),from_number=r["from_number"],
-                to_number=r["to_number"],direction=r["direction"],status=r["status"],duration=r["duration_seconds"],
-                created_at=r["created_at"].isoformat(),recording_url=r["recording_url"])
-                for r in cur.fetchall()]
+            cur.execute("""SELECT c.id,c.from_number,c.to_number,c.direction,c.status,c.duration_seconds,
+                    c.created_at,COALESCE(c.provider,'telnyx') AS provider,
+                    r.id AS recording_id, r.kind AS recording_kind
+                FROM public.calls c
+                LEFT JOIN LATERAL (
+                    SELECT id,kind FROM public.dialnytics_recordings
+                    WHERE call_id=c.id AND user_id=c.user_id ORDER BY created_at DESC LIMIT 1
+                ) r ON TRUE
+                WHERE c.user_id=%s ORDER BY c.created_at DESC LIMIT 500""", (user["id"],))
+            rows = cur.fetchall()
+    contacts = _contact_names(user["id"])
+    rates = get_rates() if user.get("role") == "admin" else None
+    today = datetime.now(_local_tz()).date()
+    user_calls = []
+    for r in rows:
+        number = _clean_number(r["from_number"] if r["direction"] == "incoming" else r["to_number"])
+        local = _to_local(r["created_at"])
+        contact = contacts.get(number)
+        entry = dict(
+            id=str(r["id"]), from_number=r["from_number"] or "", to_number=r["to_number"] or "",
+            direction=r["direction"] or "unknown", status=r["status"] or "unknown",
+            duration=int(r["duration_seconds"] or 0), provider=r["provider"],
+            number=number, contact_name=contact["name"] if contact else "",
+            created_at=r["created_at"].isoformat() if r["created_at"] else "",
+            date_label=_day_label(local, today) if local else "",
+            time_label=local.strftime("%I:%M %p").lstrip("0") if local else "",
+            full_time=local.strftime("%d %b %Y, %I:%M:%S %p") if local else "",
+            recording_id=str(r["recording_id"]) if r["recording_id"] else "",
+            recording_kind=r["recording_kind"] or "",
+        )
+        if rates is not None:
+            entry["cost_usd"] = vh.call_cost(entry["duration"], entry["provider"], entry["direction"], rates)
+        user_calls.append(entry)
     selected = request.query_params.get('filter', 'all')
     if selected not in ('all','incoming','outgoing','missed'):
         selected = 'all'
+    def is_missed(c):
+        return c.get('direction') == 'incoming' and c.get('status') in ('missed','declined','failed')
     counts = {
         'all': len(user_calls),
         'incoming': sum(c.get('direction') == 'incoming' for c in user_calls),
         'outgoing': sum(c.get('direction') == 'outgoing' for c in user_calls),
-        'missed': sum(c.get('direction') == 'incoming' and c.get('status') in ('missed','declined','failed') for c in user_calls)
+        'missed': sum(is_missed(c) for c in user_calls),
     }
     filtered = [c for c in user_calls if selected == 'all' or
-        (selected == 'missed' and c.get('direction') == 'incoming' and c.get('status') in ('missed','declined','failed')) or
-        c.get('direction') == selected]
+        (selected == 'missed' and is_missed(c)) or c.get('direction') == selected]
     return templates.TemplateResponse(request=request, name="call_logs.html", context={
-        "user":user,"logs":filtered,"counts":counts,"selected":selected})
+        "user":user,"logs":filtered,"counts":counts,"selected":selected,
+        "show_cost": rates is not None})
 
+
+# ==================== CONTACTS ====================
 @app.get("/contacts", response_class=HTMLResponse)
 async def contacts_page(request: Request):
     user = get_current_user(request)
@@ -1319,18 +1624,99 @@ async def add_contact(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     data = await request.json()
     name = str(data.get("name") or "").strip()[:200]
-    number = str(data.get("number") or "").strip()[:40]
+    number = re.sub(r"[\s().-]", "", str(data.get("number") or "").strip())[:40]
     if not name or not number:
         raise HTTPException(status_code=422,detail="Name and number required")
+    if not re.fullmatch(r"\+?[0-9*#]{3,20}", number):
+        raise HTTPException(status_code=422,detail="Enter a valid phone number, e.g. +447700900123")
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""INSERT INTO public.dialnytics_contacts(user_id,name,number)
-                VALUES(%s,%s,%s) RETURNING id,created_at""",(user["id"],name,number))
-            r=cur.fetchone()
+            cur.execute("""SELECT id,created_at FROM public.dialnytics_contacts
+                WHERE user_id=%s AND number=%s LIMIT 1""", (user["id"], number))
+            existing = cur.fetchone()
+            if existing:
+                cur.execute("UPDATE public.dialnytics_contacts SET name=%s WHERE id=%s", (name, existing["id"]))
+                r = existing
+            else:
+                cur.execute("""INSERT INTO public.dialnytics_contacts(user_id,name,number)
+                    VALUES(%s,%s,%s) RETURNING id,created_at""",(user["id"],name,number))
+                r=cur.fetchone()
     contact=dict(id=str(r["id"]),name=name,number=number,created_at=r["created_at"].isoformat())
-    return JSONResponse({"success":True,"contact":contact})
+    return JSONResponse({"success":True,"contact":contact,"updated":bool(existing)})
 
-# ========== NEW PAGES ==========
+@app.delete("/api/contacts/{contact_id}")
+async def delete_contact(contact_id: uuid.UUID, request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public.dialnytics_contacts WHERE id=%s AND user_id=%s RETURNING id",
+                        (contact_id, user["id"]))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Contact not found")
+    return {"deleted": True}
+
+
+# ==================== RECORDINGS & VOICEMAILS ====================
+AUDIO_TYPES = {"audio/webm": ".webm", "audio/ogg": ".ogg", "audio/mpeg": ".mp3",
+               "audio/mp3": ".mp3", "audio/mp4": ".m4a", "audio/wav": ".wav", "audio/x-wav": ".wav"}
+
+def _store_recording(user_id, kind, data, content_type, *, call_id=None, provider="telnyx",
+                     from_number="", to_number="", duration=0, provider_ref=None):
+    """Persist audio privately. Returns the new recording id, or None for a duplicate."""
+    content_type = (content_type or "audio/webm").split(";")[0].strip().lower()
+    if content_type not in AUDIO_TYPES:
+        content_type = "audio/webm"
+    rec_id = uuid.uuid4()
+    storage_kind, storage_path, audio = "db", None, data
+    if storage.enabled:
+        path = f"{user_id}/{kind}/{rec_id}{AUDIO_TYPES[content_type]}"
+        try:
+            storage.upload(path, data, content_type)
+            storage_kind, storage_path, audio = "supabase", path, None
+        except vh.ProviderError:
+            log.exception("Supabase Storage upload failed; keeping recording in the database")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO public.dialnytics_recordings
+                (id,user_id,call_id,kind,provider,from_number,to_number,duration_seconds,
+                 content_type,size_bytes,storage,storage_path,audio,provider_ref)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (provider_ref) DO NOTHING RETURNING id""",
+                (rec_id, user_id, call_id, kind, provider, (from_number or "")[:40], (to_number or "")[:40],
+                 max(0, int(duration or 0)), content_type, len(data), storage_kind, storage_path,
+                 audio, provider_ref))
+            row = cur.fetchone()
+    if not row and storage_path:
+        storage.delete(storage_path)
+    return row["id"] if row else None
+
+def _recording_rows(user_id, kind):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id,call_id,kind,provider,from_number,to_number,duration_seconds,
+                    size_bytes,is_read,created_at
+                FROM public.dialnytics_recordings WHERE user_id=%s AND kind=%s
+                ORDER BY created_at DESC LIMIT 500""", (user_id, kind))
+            rows = cur.fetchall()
+    contacts = _contact_names(user_id)
+    today = datetime.now(_local_tz()).date()
+    items = []
+    for r in rows:
+        local = _to_local(r["created_at"])
+        number = _clean_number(r["from_number"] if kind == "voicemail" else (r["to_number"] or r["from_number"]))
+        contact = contacts.get(number)
+        items.append(dict(
+            id=str(r["id"]), number=number or "Unknown", contact_name=contact["name"] if contact else "",
+            duration=int(r["duration_seconds"] or 0), is_read=bool(r["is_read"]),
+            size_kb=max(1, int((r["size_bytes"] or 0) / 1024)),
+            date_label=_day_label(local, today) if local else "",
+            time_label=local.strftime("%I:%M %p").lstrip("0") if local else "",
+            is_today=bool(local and local.date() == today),
+            url=f"/recordings/{r['id']}/audio",
+        ))
+    return items
 
 @app.get("/recordings", response_class=HTMLResponse)
 async def recordings_page(request: Request):
@@ -1339,7 +1725,7 @@ async def recordings_page(request: Request):
         return RedirectResponse(url="/login", status_code=302)
     return templates.TemplateResponse(request=request, name="recordings.html", context={
         "user": user,
-        "recordings": recordings_db.get(user["email"], [])[::-1],
+        "recordings": _recording_rows(user["id"], "call"),
         "recording_ok": has_recording(user),
     })
 
@@ -1350,29 +1736,130 @@ async def save_recording(
     to_number: str = Form(""),
     duration: int = Form(0),
     kind: str = Form("call"),
+    call_id: str = Form(""),
 ):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    if kind != "voicemail" and not has_recording(user):
+    if kind != "call":
+        raise HTTPException(status_code=422, detail="Only call recordings can be uploaded")
+    if not has_recording(user):
         raise HTTPException(status_code=402, detail="Recording is a $25 upgrade")
-    rec_id = secrets.token_hex(8)
-    ext = ".webm"
-    path = os.path.join(MEDIA_DIR, rec_id + ext)
-    with open(path, "wb") as f:
-        f.write(await file.read())
-    entry = {
-        "id": rec_id,
-        "to_number": to_number,
-        "from_number": "",
-        "duration": duration,
-        "created_at": datetime.now().isoformat(),
-        "url": f"/media/{rec_id}{ext}",
-    }
-    bucket = voicemails_db if kind == "voicemail" else recordings_db
-    bucket.setdefault(user["email"], []).append(entry)
-    return JSONResponse({"success": True, "recording": entry})
+    data = await file.read(MAX_RECORDING_BYTES + 1)
+    if not data:
+        raise HTTPException(status_code=422, detail="Empty recording")
+    if len(data) > MAX_RECORDING_BYTES:
+        raise HTTPException(status_code=413, detail="Recording is too large")
+    linked_call = None
+    if call_id:
+        try:
+            linked_call = uuid.UUID(call_id)
+        except ValueError:
+            linked_call = None
+    direction_from, direction_to = user.get("phone_number") or "", to_number.strip()[:40]
+    if linked_call:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT id,direction,from_number,to_number FROM public.calls
+                    WHERE id=%s AND user_id=%s""", (linked_call, user["id"]))
+                row = cur.fetchone()
+        if row:
+            direction_from, direction_to = row["from_number"] or "", row["to_number"] or ""
+        else:
+            linked_call = None
+    rec_id = _store_recording(user["id"], "call", data, file.content_type or "audio/webm",
+                              call_id=linked_call, provider=user.get("provider") or "telnyx",
+                              from_number=direction_from, to_number=direction_to,
+                              duration=min(max(0, duration), 86400))
+    return JSONResponse({"success": True, "recording": {"id": str(rec_id), "url": f"/recordings/{rec_id}/audio"}})
 
+def _range_response(data, content_type, range_header, extra_headers):
+    size = len(data)
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", (range_header or "").strip())
+    if match and size:
+        start_s, end_s = match.groups()
+        if start_s == "" and end_s:
+            start, end = max(0, size - int(end_s)), size - 1
+        else:
+            start = int(start_s or 0)
+            end = min(int(end_s), size - 1) if end_s else size - 1
+        if start >= size or start > end:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+        headers = dict(extra_headers)
+        headers.update({"Content-Range": f"bytes {start}-{end}/{size}", "Accept-Ranges": "bytes"})
+        return Response(data[start:end + 1], status_code=206, media_type=content_type, headers=headers)
+    headers = dict(extra_headers)
+    headers["Accept-Ranges"] = "bytes"
+    return Response(data, media_type=content_type, headers=headers)
+
+@app.get("/recordings/{rec_id}/audio")
+async def recording_audio(rec_id: uuid.UUID, request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT kind,content_type,storage,storage_path,audio,created_at
+                FROM public.dialnytics_recordings WHERE id=%s AND user_id=%s""", (rec_id, user["id"]))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Recording not found")
+            if row["kind"] == "voicemail":
+                cur.execute("UPDATE public.dialnytics_recordings SET is_read=TRUE WHERE id=%s AND is_read=FALSE",
+                            (rec_id,))
+    if row["storage"] == "supabase":
+        try:
+            data, _ = storage.download(row["storage_path"])
+        except vh.ProviderError:
+            log.exception("Recording download from Supabase Storage failed")
+            raise HTTPException(status_code=502, detail="Recording storage is unavailable")
+    else:
+        data = bytes(row["audio"] or b"")
+    ext = AUDIO_TYPES.get(row["content_type"], ".webm")
+    stamp = _to_local(row["created_at"]).strftime("%Y%m%d-%H%M") if row["created_at"] else "recording"
+    disposition = "attachment" if request.query_params.get("download") else "inline"
+    headers = {"Cache-Control": "private, no-store",
+               "Content-Disposition": f'{disposition}; filename="dialnytics-{row["kind"]}-{stamp}{ext}"'}
+    return _range_response(data, row["content_type"], request.headers.get("range"), headers)
+
+@app.delete("/api/recordings/{rec_id}")
+async def delete_recording(rec_id: uuid.UUID, request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""DELETE FROM public.dialnytics_recordings WHERE id=%s AND user_id=%s
+                RETURNING storage,storage_path""", (rec_id, user["id"]))
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if row["storage"] == "supabase" and row["storage_path"]:
+        try:
+            storage.delete(row["storage_path"])
+        except vh.ProviderError:
+            log.exception("Could not delete recording object from storage")
+    return {"deleted": True}
+
+@app.get("/voicemails", response_class=HTMLResponse)
+async def voicemails_page(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    items = _recording_rows(user["id"], "voicemail")
+    selected = request.query_params.get("filter", "all")
+    stats = {"total": len(items), "unread": sum(not v["is_read"] for v in items),
+             "today": sum(v["is_today"] for v in items)}
+    if selected == "unread":
+        items = [v for v in items if not v["is_read"]]
+    else:
+        selected = "all"
+    return templates.TemplateResponse(request=request, name="voicemails.html", context={
+        "user": user, "voicemails": items, "stats": stats, "selected": selected,
+    })
+
+
+# ==================== TELNYX WEBHOOK (incoming + voicemail) ====================
 def verify_telnyx_webhook(raw: bytes, signature: str, timestamp: str) -> bool:
     """Validate Telnyx API v2 Ed25519 signature with a 5-minute replay window."""
     public_key = os.getenv("TELNYX_PUBLIC_KEY", "").strip()
@@ -1389,9 +1876,130 @@ def verify_telnyx_webhook(raw: bytes, signature: str, timestamp: str) -> bool:
     except (ValueError, TypeError, InvalidSignature):
         return False
 
+def _cs_encode(text):
+    return base64.b64encode(text.encode()).decode()
+
+def _cs_decode(value):
+    if not value:
+        return ""
+    try:
+        return base64.b64decode(value, validate=True).decode("utf-8", "replace")
+    except (ValueError, TypeError):
+        return ""
+
+def _telnyx_hangup_quietly(call_control_id):
+    try:
+        _telnyx_request("POST", f"/v2/calls/{call_control_id}/actions/hangup", {})
+    except Exception:
+        log.info("Hangup for %s was not accepted (call probably already ended)", call_control_id)
+
+def _telnyx_start_voicemail(call_control_id, group_id):
+    """Answer the parked inbound leg and send the caller to voicemail."""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE public.incoming_call_groups SET status='missed'
+                WHERE id=%s AND status='ringing' RETURNING call_log_id""", (group_id,))
+            row = cur.fetchone()
+            if not row:
+                return False
+            cur.execute("""UPDATE public.call_participants SET status='cancelled'
+                WHERE group_id=%s AND status='ringing'""", (group_id,))
+            if row["call_log_id"]:
+                cur.execute("UPDATE public.calls SET status='missed' WHERE id=%s", (row["call_log_id"],))
+    try:
+        _telnyx_request("POST", f"/v2/calls/{call_control_id}/actions/answer",
+                        {"client_state": _cs_encode(f"vm:{group_id}")})
+        return True
+    except Exception:
+        log.exception("Voicemail answer failed for group %s", group_id)
+        _telnyx_hangup_quietly(call_control_id)
+        return False
+
+def _telnyx_save_voicemail(group_id, mp3_url, duration, provider_ref, call_control_id):
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT c.id AS call_id,c.user_id,g.caller_number,g.destination_number
+                    FROM public.incoming_call_groups g JOIN public.calls c ON c.id=g.call_log_id
+                    WHERE g.id=%s""", (group_id,))
+                row = cur.fetchone()
+        if not row:
+            log.warning("Voicemail for unknown call group %s ignored", group_id)
+            return
+        data, ctype = vh.http_bytes(mp3_url, max_bytes=MAX_RECORDING_BYTES)
+        _store_recording(row["user_id"], "voicemail", data, "audio/mpeg", call_id=row["call_id"],
+                         provider="telnyx", from_number=row["caller_number"] or "",
+                         to_number=row["destination_number"] or "", duration=duration,
+                         provider_ref=provider_ref)
+    except Exception:
+        log.exception("Saving Telnyx voicemail failed for group %s", group_id)
+    finally:
+        _telnyx_hangup_quietly(call_control_id)
+
+def _seconds_between(start, end):
+    try:
+        a = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        b = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+        return max(0, int((b - a).total_seconds()))
+    except (TypeError, ValueError):
+        return 0
+
+def _handle_voicemail_event(event, payload, group_id, background):
+    call_id = payload.get("call_control_id")
+    state = _cs_encode(f"vm:{group_id}")
+    if not call_id:
+        return
+    if event == "call.answered":
+        try:
+            _telnyx_request("POST", f"/v2/calls/{call_id}/actions/speak", {
+                "payload": VOICEMAIL_GREETING, "voice": "female", "language": "en-US",
+                "client_state": state})
+        except Exception:
+            log.exception("Voicemail greeting failed; recording without greeting")
+            event = "call.speak.ended"
+    if event == "call.speak.ended":
+        try:
+            _telnyx_request("POST", f"/v2/calls/{call_id}/actions/record_start", {
+                "format": "mp3", "channels": "single", "play_beep": True,
+                "max_length": VOICEMAIL_MAX_SECONDS, "client_state": state})
+        except Exception:
+            log.exception("Voicemail record_start failed")
+            _telnyx_hangup_quietly(call_id)
+    elif event == "call.recording.saved":
+        urls = payload.get("recording_urls") or {}
+        mp3 = urls.get("mp3") or (payload.get("public_recording_urls") or {}).get("mp3")
+        if mp3:
+            duration = _seconds_between(payload.get("recording_started_at"), payload.get("recording_ended_at"))
+            ref = "telnyx:" + str(payload.get("recording_id") or payload.get("call_leg_id") or call_id)
+            background.add_task(_telnyx_save_voicemail, group_id, mp3, duration, ref, call_id)
+
+def _handle_ring_leg_event(event, group_id, background):
+    """Events from the SIP leg that rings the agent's browser."""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            if event in ("call.answered", "call.bridged"):
+                cur.execute("""UPDATE public.incoming_call_groups SET status='answered'
+                    WHERE id=%s AND status='ringing' RETURNING call_log_id""", (group_id,))
+                row = cur.fetchone()
+                if row and row["call_log_id"]:
+                    cur.execute("UPDATE public.calls SET status='answered' WHERE id=%s AND status='ringing'",
+                                (row["call_log_id"],))
+                return
+            if event != "call.hangup":
+                return
+            cur.execute("SELECT status,telnyx_call_id FROM public.incoming_call_groups WHERE id=%s", (group_id,))
+            group = cur.fetchone()
+    if not group:
+        return
+    if group["status"] == "ringing":
+        # Agent did not pick up (timeout, rejected, offline): go to voicemail.
+        background.add_task(_telnyx_start_voicemail, group["telnyx_call_id"], group_id)
+    elif group["status"] == "answered":
+        # Agent hung up first: do not leave the caller in silence.
+        background.add_task(_telnyx_hangup_quietly, group["telnyx_call_id"])
 
 @app.post("/webhooks/telnyx")
-async def telnyx_webhook(request: Request):
+async def telnyx_webhook(request: Request, background: BackgroundTasks):
     raw = await request.body()
     if not verify_telnyx_webhook(
         raw,
@@ -1406,17 +2014,26 @@ async def telnyx_webhook(request: Request):
     data = body.get("data") or {}
     payload = data.get("payload") or {}
     event = data.get("event_type") or ""
+    client_state = _cs_decode(payload.get("client_state"))
+    if client_state.startswith("vm:"):
+        _handle_voicemail_event(event, payload, client_state[3:], background)
+        if event != "call.hangup":
+            return JSONResponse({"ok": True})
+    elif client_state.startswith("ring:"):
+        _handle_ring_leg_event(event, client_state[5:], background)
+        return JSONResponse({"ok": True})
     # Single-number/single-user Voice API routing.
     # Telnyx Voice API originates a SIP leg to the assigned WebRTC credential,
     # automatically bridging it to the inbound leg once answered.
     # Only the first, idempotently inserted call.initiated event originates a leg.
-    if event in ("call.initiated", "call.answered", "call.bridge", "call.hangup"):
+    if event in ("call.initiated", "call.answered", "call.bridged", "call.hangup"):
         call_id = payload.get("call_control_id")
         destination = payload.get("to") or ""
         origin = payload.get("from") or ""
         direction = str(payload.get("direction") or "").lower()
         if call_id and event == "call.initiated" and direction == "incoming" and destination:
-            recipient = None
+            ring_user = None
+            voicemail_ok = False
             group_id = None
             with db_connect() as conn:
                 with conn.cursor() as cur:
@@ -1432,29 +2049,31 @@ async def telnyx_webhook(request: Request):
                             u.dnd_enabled,u.plan_renewal FROM public.caller_id_assignments a
                             JOIN public.dialnytics_users u ON u.id=a.user_id
                             WHERE a.phone_number=%s AND u.is_active=TRUE
+                            AND COALESCE(u.provider,'telnyx')='telnyx'
                             LIMIT 1""", (destination,))
                         recipient = cur.fetchone()
-                        if recipient and not recipient["dnd_enabled"] and (
+                        if recipient and (
                             not recipient["plan_renewal"] or recipient["plan_renewal"] >= datetime.now().date()
                         ):
-                            cur.execute("""INSERT INTO public.call_participants
-                                (group_id,user_id,status) VALUES (%s,%s,'ringing')
-                                ON CONFLICT(group_id,user_id) DO NOTHING""",
-                                (group_id,recipient["id"]))
                             # Idempotent incoming call log; no duplicate records on webhook retries.
                             cur.execute("""INSERT INTO public.calls
-                                (user_id,from_number,to_number,direction,status,created_at)
-                                VALUES (%s,%s,%s,'incoming','ringing',NOW()) RETURNING id""",
-                                (recipient["id"], origin or 'Unknown', destination))
+                                (user_id,from_number,to_number,direction,status,provider,provider_call_id,created_at)
+                                VALUES (%s,%s,%s,'incoming','ringing','telnyx',%s,NOW()) RETURNING id""",
+                                (recipient["id"], origin or 'Unknown', destination, call_id))
                             new_log_id = cur.fetchone()['id']
                             cur.execute("UPDATE public.incoming_call_groups SET call_log_id=%s WHERE id=%s",
                                         (new_log_id, group_id))
-                        else:
-                            recipient = None
+                            voicemail_ok = True
+                            if not recipient["dnd_enabled"]:
+                                cur.execute("""INSERT INTO public.call_participants
+                                    (group_id,user_id,status) VALUES (%s,%s,'ringing')
+                                    ON CONFLICT(group_id,user_id) DO NOTHING""",
+                                    (group_id,recipient["id"]))
+                                ring_user = recipient
             if group_id:
                 # Do not create new SIP credentials in a webhook: the user must
                 # have logged in once and obtained a WebRTC credential already.
-                sip_username = (recipient or {}).get("sip_username", "")
+                sip_username = (ring_user or {}).get("sip_username", "")
                 if sip_username and TELNYX_API_KEY and os.getenv("TELNYX_VOICE_APP_ID"):
                     try:
                         _telnyx_request("POST", "/v2/calls", {
@@ -1467,37 +2086,29 @@ async def telnyx_webhook(request: Request):
                             "prevent_double_bridge": True,
                             "timeout_secs": 30,
                             "command_id": str(group_id),
+                            "client_state": _cs_encode(f"ring:{group_id}"),
                         })
                     except Exception:
                         # Do not expose provider credentials or error bodies in responses.
-                        import logging
-                        logging.exception("Inbound SIP dial failed for call group %s", group_id)
-                        with db_connect() as conn:
-                            with conn.cursor() as cur:
-                                cur.execute("""UPDATE public.incoming_call_groups
-                                    SET status='failed',ended_at=NOW() WHERE id=%s""", (group_id,))
-                        try:
-                            _telnyx_request("POST", f"/v2/calls/{call_id}/actions/hangup", {})
-                        except Exception:
-                            logging.exception("Inbound hangup after routing failure")
+                        log.exception("Inbound SIP dial failed for call group %s", group_id)
+                        background.add_task(_telnyx_start_voicemail, call_id, group_id)
+                elif voicemail_ok and TELNYX_API_KEY:
+                    # Agent is on Do Not Disturb or has never logged in: voicemail.
+                    background.add_task(_telnyx_start_voicemail, call_id, group_id)
                 else:
-                    # No eligible logged-in/registered agent. Do not leave a
-                    # caller ringing indefinitely.
+                    # Unassigned number or expired plan. Do not leave a caller
+                    # ringing indefinitely.
                     with db_connect() as conn:
                         with conn.cursor() as cur:
                             cur.execute("""UPDATE public.incoming_call_groups
                                 SET status='missed',ended_at=NOW() WHERE id=%s""", (group_id,))
-                    try:
-                        _telnyx_request("POST", f"/v2/calls/{call_id}/actions/hangup", {})
-                    except Exception:
-                        import logging
-                        logging.exception("Unable to terminate unroutable incoming call")
-        if call_id and event in ("call.answered", "call.bridge", "call.hangup"):
+                    background.add_task(_telnyx_hangup_quietly, call_id)
+        if call_id and event in ("call.answered", "call.bridged", "call.hangup"):
             with db_connect() as conn:
                 with conn.cursor() as cur:
                     # Linked SIP leg webhooks can have their own call control id.
                     # For now, only update the inbound leg's stored id.
-                    if event in ("call.answered", "call.bridge"):
+                    if event in ("call.answered", "call.bridged"):
                         cur.execute("""UPDATE public.incoming_call_groups SET status='answered'
                             WHERE telnyx_call_id=%s AND status='ringing'""", (call_id,))
                         cur.execute("""UPDATE public.calls c SET status='answered'
@@ -1517,30 +2128,172 @@ async def telnyx_webhook(request: Request):
                                 ELSE COALESCE(c.duration_seconds,0) END
                             FROM public.incoming_call_groups g
                             WHERE g.call_log_id=c.id AND g.telnyx_call_id=%s""", (call_id,))
-    urls = payload.get("recording_urls") or {}
-    mp3 = urls.get("mp3") or (payload.get("public_recording_urls") or {}).get("mp3")
-    if mp3 or "voicemail" in event or "recording" in event:
-        entry = {
-            "id": secrets.token_hex(6),
-            "to_number": payload.get("to") or payload.get("to_number") or "",
-            "from_number": payload.get("from") or payload.get("from_number") or "",
-            "duration": payload.get("duration_millis", 0) // 1000 if isinstance(payload.get("duration_millis"), int) else 0,
-            "created_at": datetime.now().isoformat(),
-            "url": mp3 or "#",
-        }
-        voicemails_db.setdefault("_shared", []).append(entry)
     return JSONResponse({"ok": True})
 
-@app.get("/voicemails", response_class=HTMLResponse)
-async def voicemails_page(request: Request):
+
+# ==================== TWILIO WEBHOOKS & TOKEN ====================
+async def _twilio_params(request: Request):
+    """Read Twilio's form POST and verify X-Twilio-Signature."""
+    if not TWILIO_AUTH_TOKEN:
+        raise HTTPException(status_code=503, detail="Twilio not configured")
+    form = await request.form()
+    params = {}
+    for key, value in form.multi_items():
+        params.setdefault(key, []).append(str(value))
+    query = request.url.query
+    path = request.url.path + ("?" + query if query else "")
+    candidates = [PUBLIC_BASE_URL + path, str(request.url),
+                  str(request.url).replace("http://", "https://", 1)]
+    if not vh.twilio_signature_valid(TWILIO_AUTH_TOKEN, candidates, params,
+                                     request.headers.get("x-twilio-signature", "")):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+    return {k: v[0] for k, v in params.items()}
+
+def _twiml_response(*verbs):
+    return Response(vh.twiml(*verbs), media_type="application/xml")
+
+def _say(text):
+    return f'<Say voice="alice" language="en-US">{vh.xml_attr(text)}</Say>'
+
+def _twilio_voicemail_twiml(log_id):
+    callback = f"/twilio/recording?log={log_id}"
+    return (_say(VOICEMAIL_GREETING) +
+            f'<Record maxLength="{VOICEMAIL_MAX_SECONDS}" playBeep="true" trim="trim-silence" '
+            f'action="/twilio/voicemail-done" method="POST" '
+            f'recordingStatusCallback="{vh.xml_attr(callback)}" recordingStatusCallbackMethod="POST"/>')
+
+def _db_user_by_id(user_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM public.dialnytics_users WHERE id=%s AND is_active=TRUE", (user_id,))
+            row = cur.fetchone()
+    return _db_user(row) if row else None
+
+@app.get("/api/twilio-token")
+async def twilio_token(request: Request):
     user = get_current_user(request)
     if not user:
-        return RedirectResponse(url="/login", status_code=302)
-    mine = voicemails_db.get(user["email"], [])
-    shared = voicemails_db.get("_shared", [])
-    return templates.TemplateResponse(request=request, name="voicemails.html", context={
-        "user": user, "voicemails": (shared + mine)[::-1]
-    })
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if user.get("role") != "admin" and plan_status(user)["days_left"] < 0:
+        raise HTTPException(status_code=402, detail="Subscription expired")
+    if user.get("provider") != "twilio":
+        raise HTTPException(status_code=409, detail="This account does not use Twilio")
+    if not twilio_enabled():
+        raise HTTPException(status_code=503, detail="Twilio is not configured on the server")
+    key_sid, key_secret, app_sid = _twilio_voice_config()
+    identity = vh.identity_for_user(user["id"])
+    token = vh.twilio_access_token(TWILIO_ACCOUNT_SID, key_sid, key_secret, identity, app_sid, ttl=3600)
+    return JSONResponse({"token": token, "identity": identity, "from_number": user.get("phone_number") or ""},
+                        headers={"Cache-Control": "no-store"})
+
+@app.post("/twilio/voice")
+async def twilio_voice(request: Request):
+    """TwiML App Voice URL: outgoing calls placed from the browser."""
+    params = await _twilio_params(request)
+    user_id = vh.user_id_from_identity(params.get("From") or params.get("Caller") or "")
+    user = _db_user_by_id(user_id) if user_id else None
+    to_number = re.sub(r"[\s().-]", "", params.get("To") or "")
+    if not user or user.get("provider") != "twilio":
+        return _twiml_response(_say("This account is not allowed to place calls."), "<Hangup/>")
+    if user.get("role") != "admin" and plan_status(user)["days_left"] < 0:
+        return _twiml_response(_say("Your subscription has expired."), "<Hangup/>")
+    if not re.fullmatch(r"\+[1-9]\d{6,14}", to_number):
+        return _twiml_response(_say("The number you dialed is not valid."), "<Hangup/>")
+    if not user.get("phone_number"):
+        return _twiml_response(_say("No caller ID is assigned to this account."), "<Hangup/>")
+    return _twiml_response(
+        f'<Dial callerId="{vh.xml_attr(user["phone_number"])}" answerOnBridge="true" timeLimit="14400">'
+        f'<Number>{vh.xml_attr(to_number)}</Number></Dial>')
+
+@app.post("/twilio/incoming")
+async def twilio_incoming(request: Request):
+    """Voice webhook of each Twilio number: ring the assigned user's browser."""
+    params = await _twilio_params(request)
+    to_number = params.get("To", "")
+    from_number = params.get("From", "") or "Unknown"
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT u.* FROM public.caller_id_assignments a
+                JOIN public.dialnytics_users u ON u.id=a.user_id
+                WHERE a.phone_number=%s AND u.is_active=TRUE AND u.provider='twilio' LIMIT 1""", (to_number,))
+            row = cur.fetchone()
+    user = _db_user(row) if row else None
+    if not user or (user.get("role") != "admin" and plan_status(user)["days_left"] < 0):
+        return _twiml_response(_say("This number is not available right now. Goodbye."), "<Hangup/>")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO public.calls
+                (user_id,from_number,to_number,direction,status,provider,provider_call_id,created_at)
+                VALUES (%s,%s,%s,'incoming','ringing','twilio',%s,NOW()) RETURNING id""",
+                (user["id"], from_number, to_number, params.get("CallSid")))
+            log_id = cur.fetchone()["id"]
+    if user.get("dnd_enabled"):
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE public.calls SET status='missed' WHERE id=%s", (log_id,))
+        return _twiml_response(_twilio_voicemail_twiml(log_id))
+    identity = vh.identity_for_user(user["id"])
+    return _twiml_response(
+        f'<Dial timeout="25" answerOnBridge="true" action="/twilio/dial-status?log={log_id}" method="POST">'
+        f'<Client><Identity>{identity}</Identity>'
+        f'<Parameter name="logId" value="{log_id}"/></Client></Dial>')
+
+@app.post("/twilio/dial-status")
+async def twilio_dial_status(request: Request):
+    params = await _twilio_params(request)
+    try:
+        log_id = uuid.UUID(request.query_params.get("log", ""))
+    except ValueError:
+        return _twiml_response("<Hangup/>")
+    status = params.get("DialCallStatus", "")
+    duration = int(params.get("DialCallDuration") or 0) if str(params.get("DialCallDuration") or "0").isdigit() else 0
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            if status == "completed":
+                cur.execute("UPDATE public.calls SET status='completed',duration_seconds=%s WHERE id=%s",
+                            (duration, log_id))
+            else:
+                cur.execute("UPDATE public.calls SET status='missed' WHERE id=%s", (log_id,))
+    if status in ("completed", "canceled"):
+        return _twiml_response("<Hangup/>")
+    return _twiml_response(_twilio_voicemail_twiml(log_id))
+
+@app.post("/twilio/voicemail-done")
+async def twilio_voicemail_done(request: Request):
+    await _twilio_params(request)
+    return _twiml_response(_say("Thank you. Goodbye."), "<Hangup/>")
+
+def _twilio_save_voicemail(log_id, recording_url, recording_sid, duration):
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id,user_id,from_number,to_number FROM public.calls WHERE id=%s", (log_id,))
+                row = cur.fetchone()
+        if not row:
+            return
+        data, _ = vh.http_bytes(recording_url + ".mp3", basic_auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+                                max_bytes=MAX_RECORDING_BYTES)
+        _store_recording(row["user_id"], "voicemail", data, "audio/mpeg", call_id=row["id"],
+                         provider="twilio", from_number=row["from_number"] or "",
+                         to_number=row["to_number"] or "", duration=duration,
+                         provider_ref="twilio:" + recording_sid)
+    except Exception:
+        log.exception("Saving Twilio voicemail failed for call %s", log_id)
+
+@app.post("/twilio/recording")
+async def twilio_recording(request: Request, background: BackgroundTasks):
+    params = await _twilio_params(request)
+    try:
+        log_id = uuid.UUID(request.query_params.get("log", ""))
+    except ValueError:
+        return JSONResponse({"ok": True})
+    url = params.get("RecordingUrl", "")
+    sid = params.get("RecordingSid", "")
+    if params.get("RecordingStatus", "completed") == "completed" and url.startswith("https://api.twilio.com/") and sid:
+        duration = int(params.get("RecordingDuration") or 0) if str(params.get("RecordingDuration") or "0").isdigit() else 0
+        background.add_task(_twilio_save_voicemail, log_id, url, sid, duration)
+    return JSONResponse({"ok": True})
+
 
 @app.get("/campaigns", response_class=HTMLResponse)
 async def campaigns_page(request: Request):
@@ -1943,9 +2696,36 @@ async def settings_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
-    return templates.TemplateResponse(request=request, name="settings.html", context={
-        "user": user, "plan": plan_status(user)
-    })
+    context = {"user": user, "plan": plan_status(user)}
+    if user.get("role") == "admin":
+        context.update({
+            "rates": get_rates(),
+            "twilio_ready": twilio_enabled(),
+            "storage_mode": "Supabase Storage (private bucket)" if storage.enabled else "Supabase database",
+            "public_base_url": PUBLIC_BASE_URL,
+            "saved": request.query_params.get("saved"),
+        })
+    return templates.TemplateResponse(request=request, name="settings.html", context=context)
+
+@app.post("/settings/rates")
+async def save_rates(request: Request):
+    require_admin(request)
+    form = await request.form()
+    updates = {}
+    for key in vh.DEFAULT_RATES:
+        raw = str(form.get(key, "")).strip()
+        if raw == "":
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"Invalid number for {key}")
+        if value < 0 or value > (1000 if key == "usd_to_pkr" else 5):
+            raise HTTPException(status_code=422, detail=f"Value out of range for {key}")
+        updates[key] = value
+    for key, value in updates.items():
+        set_setting("rate_" + key, value)
+    return RedirectResponse("/settings?saved=1", status_code=303)
 
 @app.get("/billing", response_class=HTMLResponse)
 async def billing_page(request: Request):
