@@ -56,6 +56,12 @@ const input = document.getElementById('numberInput');
     function startTimer() {
         if (talkStart) return;
         talkStart = Date.now();
+        // Calling Preferences: record every call automatically.
+        if (cfg.dataset.autorec === '1' && RECORDING_OK) {
+            setTimeout(() => {
+                if (activeCall && !ended && (!recorder || recorder.state === 'inactive')) toggleRec();
+            }, 800);
+        }
         document.getElementById('activitySub').textContent = '00:00';
         timerId = setInterval(() => {
             const sec = Math.floor((Date.now() - talkStart) / 1000);
@@ -295,6 +301,7 @@ function markEnded(reason) {
         const shim = {
             _twilio: true,
             _accepted: false,
+            direction: incoming ? 'inbound' : 'outbound',
             id: 'tw-' + Math.random().toString(36).slice(2),
             state: incoming ? 'ringing' : 'new',
             cause: '',
@@ -362,7 +369,7 @@ function markEnded(reason) {
         const Device = window.Twilio && window.Twilio.Device;
         if (!Device) {
             rtcStatus.textContent = 'SDK missing';
-            setStatus('Twilio SDK failed to load. Check your internet or ad blocker.', 'var(--danger)');
+            setStatus('Calling service failed to load. Check your internet or ad blocker.', 'var(--danger)');
             return;
         }
         try {
@@ -388,7 +395,7 @@ function markEnded(reason) {
             });
             client.on('error', (err) => {
                 rtcStatus.textContent = 'RTC error';
-                setStatus((err && err.message) || 'Twilio error', 'var(--danger)');
+                setStatus((err && err.message) || 'Line error', 'var(--danger)');
             });
             client.on('tokenWillExpire', async () => {
                 try { client.updateToken(await twilioToken()); } catch (e) {}
@@ -426,7 +433,7 @@ function markEnded(reason) {
         const Klass = RTC();
         if (!Klass) {
             rtcStatus.textContent = 'SDK missing';
-            setStatus('Telnyx SDK failed to load. Check your internet or ad blocker.', 'var(--danger)');
+            setStatus('Calling service failed to load. Check your internet or ad blocker.', 'var(--danger)');
             return;
         }
         try {
@@ -446,7 +453,7 @@ function markEnded(reason) {
             client.on('telnyx.error', (e) => {
                 const details = e && (e.error || e);
                 const code = details && (details.code || details.error?.code);
-                const message = (details && (details.message || details.error?.message)) || 'WebRTC error';
+                const message = (details && (details.message || details.error?.message)) || 'Line error';
                 if (code === -32002 || /CALL DOES NOT EXIST/i.test(String(message))) return;
                 rtcStatus.textContent = 'RTC error';
                 setStatus(typeof message === 'string' ? message : JSON.stringify(message), 'var(--danger');
@@ -799,6 +806,10 @@ function hangup() {
     let ringTimer = null;
     function startRing() {
         stopRing();
+        if (window.DialnyticsRing) {           // ringtone chosen in Calling Preferences
+            window._ringStop = window.DialnyticsRing.start(cfg.dataset.ringtone, Number(cfg.dataset.ringvol || 70));
+            return;
+        }
         const Ctx = window.AudioContext || window.webkitAudioContext;
         if (!Ctx) return;
         const ctx = new Ctx();
@@ -817,6 +828,7 @@ function hangup() {
         window._ringCtx = ctx;
     }
     function stopRing() {
+        if (window._ringStop) { try { window._ringStop(); } catch (e) {} window._ringStop = null; }
         if (ringTimer) clearInterval(ringTimer);
         ringTimer = null;
         if (window._ringCtx) {
@@ -1067,7 +1079,10 @@ function hangup() {
     document.addEventListener('keydown', (e) => {
         if (document.activeElement === input && e.key === 'Enter') makeCall();
     });
-    if (!EXPIRED) boot();
+    const NO_LINE = cfg.dataset.nocall === '1';
+    if (NO_LINE) {
+        rtcStatus.textContent = 'No calling number';
+    } else if (!EXPIRED) boot();
     else {
         rtcStatus.textContent = 'Subscription expired';
         setStatus('Subscription expired. Ask your admin to renew it.', 'var(--danger)');

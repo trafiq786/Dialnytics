@@ -12,21 +12,21 @@
     const grid = document.getElementById('mobMoreGrid');
     const inCall = document.getElementById('inCallView');
     const incoming = document.getElementById('incomingView');
-    if (!dialBtn || !sheet) return;
+    if (!sheet || !moreBtn) return;
 
     function setRail(open) {
         body.classList.toggle('rail-open', open);
-        dialBtn.setAttribute('aria-expanded', String(open));
+        if (dialBtn) dialBtn.setAttribute('aria-expanded', String(open));
         if (open) closeMore();
     }
-    dialBtn.addEventListener('click', () => setRail(!body.classList.contains('rail-open')));
+    dialBtn && dialBtn.addEventListener('click', () => setRail(!body.classList.contains('rail-open')));
     railClose && railClose.addEventListener('click', () => setRail(false));
     window.addEventListener('dialnytics:show-dialer', () => { if (mq.matches) setRail(true); });
 
     // Follow the call: open the dialer for incoming/new calls, show "On call" on the tab.
     let wasCalling = false;
     function syncCall() {
-        const calling = !!(inCall && !inCall.hidden);
+        const calling = !!(inCall && !inCall.hidden && !inCall.classList.contains('tour-demo'));
         const ringing = !!(incoming && !incoming.hidden);
         body.classList.toggle('dn-in-call', calling);
         body.classList.toggle('dn-ringing', ringing);
@@ -39,7 +39,7 @@
     syncCall();
 
     // "More" sheet lists every sidebar page that is not already a tab.
-    const TAB_PATHS = ['/dashboard', '/call-logs', '/contacts'];
+    const TAB_PATHS = ['/dashboard', '/call-logs', '/contacts', '/clients'];
     function buildMore() {
         grid.innerHTML = '';
         document.querySelectorAll('.shell-nav nav a[href], .shell-nav .nav-settings').forEach((a) => {

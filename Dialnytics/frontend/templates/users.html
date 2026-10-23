@@ -13,8 +13,16 @@
  <div class="field"><label>Full Name</label><input name="name" placeholder="e.g. Ahmed Khan" required autocomplete="name"></div>
  <div class="field"><label>Email Address</label><input name="email" type="email" placeholder="agent@example.com" required autocomplete="off"></div>
  <div class="field"><label>Password</label><input name="password" type="password" placeholder="Create a strong password" required minlength="12" autocomplete="new-password"></div>
- <div class="field"><label for="provider-select">Calling Provider</label><select id="provider-select" name="provider" required><option value="telnyx" selected>Telnyx (main)</option><option value="twilio">Twilio (backup)</option></select><small>The Caller ID list below shows numbers from the selected provider.</small></div>
- <div class="field"><label for="caller-id" id="caller-id-label">Caller ID · Telnyx Numbers</label><select id="caller-id" name="phone_number" required><option value="">Loading Telnyx numbers...</option></select><input type="hidden" id="confirm-shared-number" name="confirm_shared_number" value="no"><small id="caller-id-message" aria-live="polite">Numbers assigned to other users require transfer confirmation.</small></div>
+ <div class="field"><label for="user-type">User type</label><select id="user-type" name="user_type"><option value="customer" selected>Customer (company user)</option><option value="reseller">Reseller (views own clients only)</option></select></div>
+ <div class="customer-only">
+ <div class="field"><label for="company-mode">Company</label><select id="company-mode" name="company_mode"><option value="new" selected>New company</option>{% if companies %}<option value="existing">Add to existing company</option>{% endif %}</select></div>
+ <div class="field company-new"><label for="company-name">Company name</label><input id="company-name" name="company_name" maxlength="200" placeholder="Leave empty to use the user's name"><small>This user becomes the company owner.</small></div>
+ <div class="field company-new"><label for="company-reseller">Reseller</label><select id="company-reseller" name="reseller_id"><option value="">Direct customer (no reseller)</option>{% for r in resellers %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></div>
+ <div class="field company-existing" hidden><label for="company-select">Existing company</label><select id="company-select" name="account_id"><option value="">Select company…</option>{% for c in companies %}<option value="{{ c.id }}">{{ c.name }} ({{ c.users }} users)</option>{% endfor %}</select></div>
+ <div class="field company-existing" hidden><label for="account-role">Role in company</label><select id="account-role" name="account_role"><option value="agent" selected>Agent (makes calls)</option><option value="owner">Owner (sees the whole team)</option></select><small>Owners see live status, call logs and recordings of every team member.</small></div>
+ </div>
+ <div class="field calling-only"><label for="provider-select">Calling Provider</label><select id="provider-select" name="provider" required><option value="telnyx" selected>Telnyx (main)</option><option value="twilio">Twilio (backup)</option></select><small>The Caller ID list below shows numbers from the selected provider.</small></div>
+ <div class="field"><label for="caller-id" id="caller-id-label">Caller ID · Telnyx Numbers</label><select id="caller-id" name="phone_number"><option value="">Loading Telnyx numbers...</option></select><input type="hidden" id="confirm-shared-number" name="confirm_shared_number" value="no"><small id="caller-id-message" aria-live="polite">Numbers assigned to other users require transfer confirmation.</small><small>Owners can be created without a number (they only watch the team). Agents need a number.</small></div>
  </section>
  <section class="user-panel"><div class="panel-title"><span class="panel-icon">▤</span><div><h2>Subscription & Payment</h2><p>Manage plan and PKR payments</p></div></div>
  <div class="field"><label style="display:flex;gap:10px;align-items:center"><input type="checkbox" name="is_demo" value="true" id="demoTrial" style="width:auto"> 1-hour demo / free trial</label><small>Trial starts on first successful login. Calling access expires after 60 minutes.</small></div>
@@ -72,7 +80,28 @@
       ? 'Assigned to: ' + selected.assigned_to.map(u => u.last_name).join(', ') + '. Transfer confirmation required.'
       : '';
   });
+  const typeSel = document.getElementById('user-type');
+  const modeSel = document.getElementById('company-mode');
+  const roleSel = document.getElementById('account-role');
+  function syncForm() {
+    const reseller = typeSel.value === 'reseller';
+    const existing = modeSel.value === 'existing';
+    document.querySelectorAll('.customer-only').forEach(el => el.hidden = reseller);
+    document.querySelectorAll('.calling-only, #caller-id').forEach(el => { const f = el.closest('.field'); if (f) f.hidden = reseller; });
+    document.querySelectorAll('.company-new').forEach(el => el.hidden = existing);
+    document.querySelectorAll('.company-existing').forEach(el => el.hidden = !existing);
+    document.getElementById('company-select').required = !reseller && existing;
+  }
+  [typeSel, modeSel].forEach(el => el.addEventListener('change', syncForm));
+  if (location.hash === '#reseller') { typeSel.value = 'reseller'; }
+  syncForm();
   form.addEventListener('submit', event => {
+    const reseller = typeSel.value === 'reseller';
+    const needsNumber = !reseller && modeSel.value === 'existing' && roleSel.value === 'agent';
+    if (reseller || !select.value) {
+      if (needsNumber) { event.preventDefault(); message.textContent = 'Agents need a Caller ID. Select a number.'; select.focus(); }
+      return;
+    }
     const selected = callerIds.find(item => item.number === select.value);
     if (!selected) { event.preventDefault(); return; }
     if (selected.assigned_to.length && confirmedNumber !== selected.number) {
@@ -100,8 +129,9 @@
  <div class="premium-users-head"><div><h2>User Management</h2><p>Manage accounts, subscriptions and calling access.</p></div><div class="premium-count">{{ users|length }} users</div></div>
  <div class="premium-search"><span>⌕</span><input id="userSearch" type="search" placeholder="Search name, email or number" aria-label="Search users"></div>
  <div class="premium-scroll"><table class="premium-table"><thead><tr><th>USER</th><th>CALLER ID</th><th>PLAN</th><th>STATUS</th><th>RENEWAL</th><th>ACTION</th></tr></thead><tbody>
+ {% set cmap = {} %}{% for c in companies %}{% set _ = cmap.update({c.id|string: c.name}) %}{% endfor %}
  {% for u in users %}<tr class="premium-user-row" data-search="{{ (u.name ~ ' ' ~ u.email ~ ' ' ~ (u.phone_number or ''))|lower|e }}">
- <td><strong>{{ u.name }}</strong><small>{{ u.email }}</small></td><td class="number-cell">{{ u.phone_number or 'Unassigned' }}<small><span class="dn-pill {{ u.provider or 'telnyx' }}">{{ (u.provider or 'telnyx')|capitalize }}</span></small></td><td><span class="plan-pill">{{ u.plan_name or '—' }}</span></td>
+ <td><strong>{{ u.name }}</strong><small>{{ u.email }}</small>{% if u.user_type == 'reseller' %}<small><span class="dn-pill warn">Reseller</span></small>{% elif u.account_id and cmap.get(u.account_id) %}<small><a href="/companies/{{ u.account_id }}">{{ cmap.get(u.account_id) }}</a> · {{ 'Owner' if u.account_role == 'owner' else 'Agent' }}</small>{% endif %}</td><td class="number-cell">{{ u.phone_number or 'Unassigned' }}<small><span class="dn-pill {{ u.provider or 'telnyx' }}">{{ (u.provider or 'telnyx')|capitalize }}</span></small></td><td><span class="plan-pill">{{ u.plan_name or '—' }}</span></td>
  <td><span class="status-pill {{ 'status-demo' if u.is_demo else 'status-active' }}">{{ 'Demo' if u.is_demo else 'Active' }}</span></td><td>{{ u.plan_renewal or '—' }}</td>
  <td><button type="button" class="premium-edit" data-user='{{ {"name":u.name,"email":u.email,"number":u.phone_number,"provider":u.provider or "telnyx","plan":u.plan_name,"renewal":u.plan_renewal,"recording":u.recording_premium,"demo":u.is_demo,"role":u.role}|tojson|forceescape }}'>Edit ✎</button></td></tr>{% endfor %}
  </tbody></table></div>

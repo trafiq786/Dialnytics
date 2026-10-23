@@ -175,6 +175,9 @@ def _db_user(row):
         "recording_premium": row["recording_premium"],
         "dnd_enabled": row["dnd_enabled"],
         "is_demo": bool(row.get("is_demo", False)),
+        "account_id": str(row["account_id"]) if row.get("account_id") else "",
+        "account_role": "owner" if row.get("account_role") == "owner" else "agent",
+        "user_type": "reseller" if row.get("user_type") == "reseller" else "customer",
         "trial_started_at": row["trial_started_at"].isoformat() if row.get("trial_started_at") else None,
         "trial_expires_at": row["trial_expires_at"].isoformat() if row.get("trial_expires_at") else None,
         "created_at": row["created_at"].isoformat() if row["created_at"] else "",
@@ -272,6 +275,39 @@ ALTER TABLE public.dialnytics_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.dialnytics_recordings ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.dialnytics_settings FROM anon, authenticated;
 REVOKE ALL ON public.dialnytics_recordings FROM anon, authenticated;
+-- 08: companies (accounts), owners/agents, resellers, live presence
+CREATE TABLE IF NOT EXISTS public.dialnytics_accounts (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name text NOT NULL,
+    reseller_id uuid REFERENCES public.dialnytics_users(id) ON DELETE SET NULL,
+    notes text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS account_id uuid REFERENCES public.dialnytics_accounts(id) ON DELETE SET NULL;
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS account_role text NOT NULL DEFAULT 'agent';
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS user_type text NOT NULL DEFAULT 'customer';
+CREATE INDEX IF NOT EXISTS dialnytics_users_account_idx ON public.dialnytics_users(account_id);
+CREATE INDEX IF NOT EXISTS dialnytics_accounts_reseller_idx ON public.dialnytics_accounts(reseller_id);
+CREATE TABLE IF NOT EXISTS public.user_presence (
+    user_id uuid PRIMARY KEY REFERENCES public.dialnytics_users(id) ON DELETE CASCADE,
+    status text NOT NULL DEFAULT 'online',
+    call_number text NOT NULL DEFAULT '',
+    call_direction text NOT NULL DEFAULT '',
+    call_started_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+-- Every existing customer becomes the owner of its own company (company id = user id).
+INSERT INTO public.dialnytics_accounts(id, name)
+    SELECT u.id, COALESCE(NULLIF(u.name, ''), u.email) FROM public.dialnytics_users u
+    WHERE u.account_id IS NULL AND u.role <> 'admin' AND u.user_type = 'customer'
+    ON CONFLICT (id) DO NOTHING;
+UPDATE public.dialnytics_users u SET account_id = u.id, account_role = 'owner'
+    WHERE u.account_id IS NULL AND u.role <> 'admin' AND u.user_type = 'customer'
+      AND EXISTS (SELECT 1 FROM public.dialnytics_accounts a WHERE a.id = u.id);
+ALTER TABLE public.dialnytics_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_presence ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.dialnytics_accounts FROM anon, authenticated;
+REVOKE ALL ON public.user_presence FROM anon, authenticated;
 """
 
 def ensure_schema():
@@ -708,9 +744,13 @@ async def customers_page(request: Request):
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT u.name,u.email,u.plan_name,u.phone_number,u.last_paid_amount,
-                u.plan_renewal,u.is_active,u.is_demo,u.created_at,
+                u.plan_renewal,u.is_active,u.is_demo,u.created_at,u.account_role,
+                acc.id AS account_id, acc.name AS account_name,
                 (SELECT count(*) FROM public.caller_id_assignments a WHERE a.user_id=u.id) AS numbers
-                FROM public.dialnytics_users u WHERE u.role <> 'admin' ORDER BY u.created_at DESC""")
+                FROM public.dialnytics_users u
+                LEFT JOIN public.dialnytics_accounts acc ON acc.id=u.account_id
+                WHERE u.role <> 'admin' AND u.user_type='customer'
+                ORDER BY acc.name NULLS LAST, u.account_role DESC, u.created_at DESC""")
             customers=cur.fetchall()
     return templates.TemplateResponse(request=request,name='customers.html',context={'user':admin,'customers':customers,'today':date.today()})
 
@@ -966,6 +1006,8 @@ async def users_page(request: Request):
     return templates.TemplateResponse(request=request, name="users.html", context={
         "user": user,
         "users": list(users_db.values()),
+        "companies": _all_companies(),
+        "resellers": _all_resellers(),
         "error": request.query_params.get("error"),
         "created": request.query_params.get("created"),
         "deleted": request.query_params.get("deleted"),
@@ -977,12 +1019,18 @@ async def create_user(
     name: str = Form(...),
     email: str = Form(...),
     password: str = Form(...),
-    phone_number: str = Form(...),
+    phone_number: str = Form(""),
     plan_name: str = Form("1 USER ACCOUNT"),
     plan_start: str = Form(""),
     plan_renewal: str = Form(""),
     is_demo: bool = Form(False),
     provider: str = Form("telnyx"),
+    user_type: str = Form("customer"),
+    company_mode: str = Form("new"),
+    company_name: str = Form(""),
+    account_id: str = Form(""),
+    account_role: str = Form("owner"),
+    reseller_id: str = Form(""),
 ):
     from urllib.parse import urlencode
     from psycopg.errors import UniqueViolation
@@ -997,21 +1045,28 @@ async def create_user(
     email = email.strip().lower()
     name = name.strip()
     phone_number = phone_number.strip()
+    user_type = 'reseller' if user_type == 'reseller' else 'customer'
+    account_role = 'owner' if account_role == 'owner' else 'agent'
     if not name or not email or '@' not in email:
         return fail('Valid name and email required')
-    if not re.fullmatch(r'\+[1-9][0-9]{7,14}', phone_number):
-        return fail('Valid international Caller ID required')
     if len(password) < 12:
         return fail('Password must be at least 12 characters')
+    if user_type == 'reseller':
+        phone_number = ''          # resellers only view their clients
+    if phone_number and not re.fullmatch(r'\+[1-9][0-9]{7,14}', phone_number):
+        return fail('Valid international Caller ID required')
+    if user_type == 'customer' and account_role == 'agent' and not phone_number:
+        return fail('Agents need a Caller ID to make calls')
     if provider not in PROVIDERS:
         return fail('Select a calling provider')
-    provider_label = provider.capitalize()
-    try:
-        owned_numbers = get_provider_numbers(provider)
-    except HTTPException:
-        return fail(f'Unable to verify {provider_label} numbers')
-    if phone_number not in owned_numbers:
-        return fail(f'Caller ID not in {provider_label} account')
+    if phone_number:
+        provider_label = provider.capitalize()
+        try:
+            owned_numbers = get_provider_numbers(provider)
+        except HTTPException:
+            return fail(f'Unable to verify {provider_label} numbers')
+        if phone_number not in owned_numbers:
+            return fail(f'Caller ID not in {provider_label} account')
 
     form = await request.form()
     confirmed_transfer = form.get('confirm_shared_number') == 'yes'
@@ -1024,7 +1079,7 @@ async def create_user(
     payment_status = str(form.get('payment_status', 'paid'))
     if payment_status not in ('paid', 'partial', 'unpaid'):
         payment_status = 'unpaid'
-    if is_demo or payment_status == 'unpaid':
+    if is_demo or payment_status == 'unpaid' or user_type == 'reseller':
         amount_paid = 0
         payment_status = 'unpaid'
     try:
@@ -1032,35 +1087,68 @@ async def create_user(
         renewal = date.fromisoformat(plan_renewal) if plan_renewal else date.today() + timedelta(days=30)
     except ValueError:
         return fail('Invalid plan date')
+    existing_account = None
+    if user_type == 'customer' and company_mode == 'existing':
+        try:
+            existing_account = uuid.UUID(account_id)
+        except ValueError:
+            return fail('Select a company')
+    reseller_uuid = None
+    if user_type == 'customer' and company_mode != 'existing' and reseller_id:
+        try:
+            reseller_uuid = uuid.UUID(reseller_id)
+        except ValueError:
+            return fail('Invalid reseller')
 
     # Ownership check, optional transfer and new account creation are atomic.
     # The advisory lock serializes concurrent assignments of the same number.
     try:
         with db_connect() as conn:
             with conn.cursor() as cur:
-                cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', ('caller-id:' + phone_number,))
+                if phone_number:
+                    cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', ('caller-id:' + phone_number,))
                 cur.execute('SELECT id FROM public.dialnytics_users WHERE lower(email)=lower(%s)', (email,))
                 if cur.fetchone():
                     return fail('Email already exists')
-                cur.execute("""SELECT u.id FROM public.dialnytics_users u
-                    LEFT JOIN public.caller_id_assignments a ON a.user_id=u.id
-                    WHERE a.phone_number=%s OR u.phone_number=%s
-                    FOR UPDATE OF u""", (phone_number, phone_number))
-                owners = [r['id'] for r in cur.fetchall()]
-                if owners and not confirmed_transfer:
-                    return fail('Caller ID already assigned; confirm transfer first')
-                if owners:
-                    cur.execute('UPDATE public.dialnytics_users SET phone_number=NULL WHERE id=ANY(%s)', (owners,))
-                    cur.execute('DELETE FROM public.caller_id_assignments WHERE phone_number=%s', (phone_number,))
+                if phone_number:
+                    cur.execute("""SELECT u.id FROM public.dialnytics_users u
+                        LEFT JOIN public.caller_id_assignments a ON a.user_id=u.id
+                        WHERE a.phone_number=%s OR u.phone_number=%s
+                        FOR UPDATE OF u""", (phone_number, phone_number))
+                    owners = [r['id'] for r in cur.fetchall()]
+                    if owners and not confirmed_transfer:
+                        return fail('Caller ID already assigned; confirm transfer first')
+                    if owners:
+                        cur.execute('UPDATE public.dialnytics_users SET phone_number=NULL WHERE id=ANY(%s)', (owners,))
+                        cur.execute('DELETE FROM public.caller_id_assignments WHERE phone_number=%s', (phone_number,))
+                new_account = None
+                if user_type == 'customer':
+                    if existing_account:
+                        cur.execute('SELECT id FROM public.dialnytics_accounts WHERE id=%s', (existing_account,))
+                        if not cur.fetchone():
+                            return fail('Company not found')
+                        new_account = existing_account
+                    else:
+                        if reseller_uuid:
+                            cur.execute("SELECT 1 FROM public.dialnytics_users WHERE id=%s AND user_type='reseller'", (reseller_uuid,))
+                            if not cur.fetchone():
+                                return fail('Reseller not found')
+                        cur.execute("""INSERT INTO public.dialnytics_accounts(name, reseller_id)
+                            VALUES (%s,%s) RETURNING id""", ((company_name.strip() or name)[:200], reseller_uuid))
+                        new_account = cur.fetchone()['id']
+                        account_role = 'owner'          # first user of a new company owns it
                 cur.execute("""INSERT INTO public.dialnytics_users
                     (name,email,password_hash,role,phone_number,credential_id,sip_username,
-                     plan_name,plan_start,plan_renewal,last_paid_amount,recording_premium,dnd_enabled,is_demo,provider)
-                    VALUES (%s,%s,%s,'agent',%s,NULL,NULL,%s,%s,%s,%s,FALSE,FALSE,%s,%s)
-                    RETURNING id""", (name,email,hash_password(password),phone_number,
-                    (plan_name or '1 USER ACCOUNT').strip(),start,renewal,amount_paid,is_demo,provider))
+                     plan_name,plan_start,plan_renewal,last_paid_amount,recording_premium,dnd_enabled,is_demo,provider,
+                     account_id,account_role,user_type)
+                    VALUES (%s,%s,%s,'agent',%s,NULL,NULL,%s,%s,%s,%s,FALSE,FALSE,%s,%s,%s,%s,%s)
+                    RETURNING id""", (name,email,hash_password(password),phone_number or None,
+                    (plan_name or '1 USER ACCOUNT').strip(),start,renewal,amount_paid,is_demo,provider,
+                    new_account, account_role if user_type == 'customer' else 'agent', user_type))
                 new_id = cur.fetchone()['id']
-                cur.execute('INSERT INTO public.caller_id_assignments(user_id,phone_number) VALUES (%s,%s)',
-                            (new_id,phone_number))
+                if phone_number:
+                    cur.execute('INSERT INTO public.caller_id_assignments(user_id,phone_number) VALUES (%s,%s)',
+                                (new_id,phone_number))
                 if amount_paid:
                     cur.execute("""INSERT INTO public.payments(user_id,amount_pkr,status,paid_at,renewal_date)
                         VALUES (%s,%s,%s,%s,%s)""", (new_id,amount_paid,payment_status,
@@ -1069,13 +1157,14 @@ async def create_user(
         return fail('Email or Caller ID already assigned; refresh and retry')
 
     refresh_users()
-    if provider == 'twilio':
-        _twilio_configure_number(phone_number)
-    else:
-        try:
-            _ensure_credential(email)
-        except Exception:
-            log.exception('Telnyx credential creation failed for new user')
+    if phone_number:
+        if provider == 'twilio':
+            _twilio_configure_number(phone_number)
+        else:
+            try:
+                _ensure_credential(email)
+            except Exception:
+                log.exception('Telnyx credential creation failed for new user')
     return RedirectResponse('/users?created=1', status_code=303)
 
 
@@ -1259,6 +1348,8 @@ async def dashboard(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
+    if user.get("user_type") == "reseller":
+        return RedirectResponse(url="/clients", status_code=302)
     period = request.query_params.get("period", "today")
     if period not in ("today", "week", "month"): period = "today"
     from zoneinfo import ZoneInfo
@@ -1412,7 +1503,27 @@ def _ensure_credential(email: str) -> str:
         save_users()
     return cred_id
 
+LINE_UNAVAILABLE = "Calling line is temporarily unavailable. Please contact support."
+
+def _customer_safe(fn):
+    """Hide provider names/details (Telnyx, Twilio) from non-admin users."""
+    import functools
+    @functools.wraps(fn)
+    async def wrapper(request: Request, *args, **kwargs):
+        try:
+            return await fn(request, *args, **kwargs)
+        except HTTPException as exc:
+            if exc.status_code in (401, 402):
+                raise
+            user = get_current_user(request)
+            if user and user.get("role") == "admin":
+                raise
+            log.warning("Calling token error hidden from customer: %s", exc.detail)
+            raise HTTPException(status_code=exc.status_code, detail=LINE_UNAVAILABLE)
+    return wrapper
+
 @app.get("/api/webrtc-token")
+@_customer_safe
 async def webrtc_token(request: Request):
     user = get_current_user(request)
     if not user:
@@ -1809,12 +1920,14 @@ async def recording_audio(rec_id: uuid.UUID, request: Request):
         raise HTTPException(status_code=401, detail="Login required")
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT kind,content_type,storage,storage_path,audio,created_at
-                FROM public.dialnytics_recordings WHERE id=%s AND user_id=%s""", (rec_id, user["id"]))
+            cur.execute("""SELECT r.user_id,r.kind,r.content_type,r.storage,r.storage_path,r.audio,r.created_at,
+                    u.account_id FROM public.dialnytics_recordings r
+                JOIN public.dialnytics_users u ON u.id=r.user_id WHERE r.id=%s""", (rec_id,))
             row = cur.fetchone()
-            if not row:
+            own = bool(row) and str(row["user_id"]) == user["id"]
+            if not row or not (own or _can_manage_account(user, row["account_id"])):
                 raise HTTPException(status_code=404, detail="Recording not found")
-            if row["kind"] == "voicemail":
+            if row["kind"] == "voicemail" and own:
                 cur.execute("UPDATE public.dialnytics_recordings SET is_read=TRUE WHERE id=%s AND is_read=FALSE",
                             (rec_id,))
     if row["storage"] == "supabase":
@@ -2180,6 +2293,7 @@ def _db_user_by_id(user_id):
     return _db_user(row) if row else None
 
 @app.get("/api/twilio-token")
+@_customer_safe
 async def twilio_token(request: Request):
     user = get_current_user(request)
     if not user:
@@ -2716,6 +2830,463 @@ async def settings_page(request: Request):
             "saved": request.query_params.get("saved"),
         })
     return templates.TemplateResponse(request=request, name="settings.html", context=context)
+
+# ==================== COMPANIES, TEAM, RESELLERS ====================
+PRESENCE_TIMEOUT_SECONDS = 40
+
+def _is_admin(user):
+    return bool(user) and user.get("role") == "admin"
+
+def _is_reseller(user):
+    return bool(user) and user.get("user_type") == "reseller"
+
+def _is_owner(user):
+    return bool(user) and user.get("user_type") == "customer" and user.get("account_role") == "owner" and bool(user.get("account_id"))
+
+templates.env.globals["is_owner"] = _is_owner
+templates.env.globals["is_reseller"] = _is_reseller
+
+def _account_row(account_id):
+    try:
+        aid = uuid.UUID(str(account_id))
+    except (ValueError, TypeError):
+        return None
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT a.*, r.name AS reseller_name, r.email AS reseller_email
+                FROM public.dialnytics_accounts a LEFT JOIN public.dialnytics_users r ON r.id=a.reseller_id
+                WHERE a.id=%s""", (aid,))
+            return cur.fetchone()
+
+def _can_manage_account(viewer, account_id):
+    """Admin: every company. Owner: own company (calls, recordings, everything)."""
+    if not viewer or not account_id:
+        return False
+    if _is_admin(viewer):
+        return True
+    return _is_owner(viewer) and str(account_id) == viewer.get("account_id")
+
+def _can_view_account(viewer, account_id):
+    """Managers plus the reseller the company belongs to (status and counts only)."""
+    if _can_manage_account(viewer, account_id):
+        return True
+    if _is_reseller(viewer) and account_id:
+        acc = _account_row(account_id)
+        return bool(acc) and str(acc["reseller_id"] or "") == viewer["id"]
+    return False
+
+def _all_companies():
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT a.id,a.name,a.reseller_id,a.created_at,r.name AS reseller_name,
+                    (SELECT count(*) FROM public.dialnytics_users u WHERE u.account_id=a.id AND u.is_active) AS users,
+                    (SELECT string_agg(u.name, ', ') FROM public.dialnytics_users u
+                        WHERE u.account_id=a.id AND u.is_active AND u.account_role='owner') AS owners,
+                    (SELECT count(*) FROM public.dialnytics_users u JOIN public.user_presence p ON p.user_id=u.id
+                        WHERE u.account_id=a.id AND u.is_active
+                        AND p.updated_at > now() - make_interval(secs => %s) AND p.status <> 'offline') AS online
+                FROM public.dialnytics_accounts a
+                LEFT JOIN public.dialnytics_users r ON r.id=a.reseller_id
+                ORDER BY lower(a.name)""", (PRESENCE_TIMEOUT_SECONDS,))
+            return cur.fetchall()
+
+def _all_resellers():
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT u.id,u.name,u.email,u.is_active,u.created_at,
+                    (SELECT count(*) FROM public.dialnytics_accounts a WHERE a.reseller_id=u.id) AS companies,
+                    (SELECT count(*) FROM public.dialnytics_users m JOIN public.dialnytics_accounts a ON a.id=m.account_id
+                        WHERE a.reseller_id=u.id AND m.is_active) AS users
+                FROM public.dialnytics_users u WHERE u.user_type='reseller' AND u.is_active
+                ORDER BY lower(u.name)""")
+            return cur.fetchall()
+
+def _team_members(account_id):
+    """Members of a company with live status and today's numbers."""
+    starts = _period_starts()
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.account_role,u.is_active,
+                    p.status,p.call_number,p.call_direction,p.call_started_at,p.updated_at,
+                    EXTRACT(EPOCH FROM (now()-p.updated_at))::int AS seen_ago,
+                    EXTRACT(EPOCH FROM (now()-p.call_started_at))::int AS call_seconds,
+                    COALESCE(t.calls,0) AS calls_today, COALESCE(t.answered,0) AS answered_today,
+                    COALESCE(t.talk,0) AS talk_today, t.last_call
+                FROM public.dialnytics_users u
+                LEFT JOIN public.user_presence p ON p.user_id=u.id
+                LEFT JOIN LATERAL (
+                    SELECT count(*) AS calls,
+                           count(*) FILTER (WHERE c.status IN ('answered','completed','active')) AS answered,
+                           COALESCE(sum(c.duration_seconds),0) AS talk, max(c.created_at) AS last_call
+                    FROM public.calls c WHERE c.user_id=u.id AND c.created_at >= %s
+                ) t ON TRUE
+                WHERE u.account_id=%s AND u.is_active
+                ORDER BY (u.account_role='owner') DESC, lower(u.name)""", (starts["today"], account_id))
+            rows = cur.fetchall()
+    members = []
+    for r in rows:
+        status = r["status"] or "offline"
+        if r["updated_at"] is None or (r["seen_ago"] or 0) > PRESENCE_TIMEOUT_SECONDS:
+            status = "offline"
+        last_call = _to_local(r["last_call"])
+        members.append({
+            "id": str(r["id"]), "name": r["name"], "email": r["email"],
+            "phone_number": r["phone_number"] or "", "account_role": r["account_role"],
+            "status": status if status in ("online", "on_call", "ringing", "dialing", "offline") else "online",
+            "call_number": r["call_number"] if status in ("on_call", "ringing", "dialing") else "",
+            "call_direction": r["call_direction"] if status in ("on_call", "ringing", "dialing") else "",
+            "call_seconds": max(0, int(r["call_seconds"] or 0)) if status == "on_call" and r["call_started_at"] else 0,
+            "calls_today": int(r["calls_today"]), "answered_today": int(r["answered_today"]),
+            "talk_today": int(r["talk_today"]),
+            "last_call": last_call.strftime("%I:%M %p").lstrip("0") if last_call else "",
+        })
+    return members
+
+def _team_summary(members):
+    return {
+        "total": len(members),
+        "online": sum(m["status"] != "offline" for m in members),
+        "on_call": sum(m["status"] in ("on_call", "dialing") for m in members),
+        "calls_today": sum(m["calls_today"] for m in members),
+        "talk_today": sum(m["talk_today"] for m in members),
+    }
+
+def _resolve_team_account(user, requested):
+    if requested and (_is_admin(user) or _is_reseller(user)):
+        if not _can_view_account(user, requested):
+            raise HTTPException(status_code=404, detail="Company not found")
+        return requested
+    if _is_owner(user):
+        return user["account_id"]
+    raise HTTPException(status_code=403, detail="Team view is for company owners")
+
+@app.post("/api/presence")
+async def presence_update(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    data = await request.json()
+    status = str(data.get("status") or "online")
+    if status not in ("online", "on_call", "ringing", "dialing", "offline"):
+        status = "online"
+    number = re.sub(r"[^\d+*#]", "", str(data.get("number") or ""))[:40]
+    direction = "incoming" if data.get("direction") in ("incoming", "inbound") else ("outgoing" if number else "")
+    started = None
+    try:
+        ms = int(data.get("started_at") or 0)
+        if ms > 0 and status == "on_call":
+            started = datetime.fromtimestamp(min(ms / 1000, time.time()), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        started = None
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO public.user_presence(user_id,status,call_number,call_direction,call_started_at,updated_at)
+                VALUES (%s,%s,%s,%s,%s,now())
+                ON CONFLICT (user_id) DO UPDATE SET status=EXCLUDED.status, call_number=EXCLUDED.call_number,
+                    call_direction=EXCLUDED.call_direction, call_started_at=EXCLUDED.call_started_at, updated_at=now()""",
+                (user["id"], status, number, direction, started))
+    return {"ok": True}
+
+@app.get("/team", response_class=HTMLResponse)
+async def team_page(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    try:
+        account_id = _resolve_team_account(user, request.query_params.get("account"))
+    except HTTPException:
+        return RedirectResponse(url="/dashboard", status_code=302)
+    account = _account_row(account_id)
+    if not account:
+        return RedirectResponse(url="/dashboard", status_code=302)
+    members = _team_members(account["id"])
+    return templates.TemplateResponse(request=request, name="team.html", context={
+        "user": user, "account": account, "members": members, "summary": _team_summary(members),
+        "can_open": _can_manage_account(user, account["id"]),
+        "back_url": "/clients" if _is_reseller(user) else ("/companies/" + str(account["id"]) if _is_admin(user) else ""),
+    })
+
+@app.get("/api/team")
+async def team_api(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    account_id = _resolve_team_account(user, request.query_params.get("account"))
+    members = _team_members(account_id)
+    return JSONResponse({"members": members, "summary": _team_summary(members)}, headers={"Cache-Control": "no-store"})
+
+@app.get("/team/member/{member_id}", response_class=HTMLResponse)
+async def team_member_page(member_id: uuid.UUID, request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    target = _db_user_by_id(str(member_id))
+    if not target or not _can_manage_account(user, target.get("account_id")):
+        return RedirectResponse(url="/team", status_code=302)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT c.id,c.from_number,c.to_number,c.direction,c.status,c.duration_seconds,c.created_at,
+                    r.id AS recording_id, r.kind AS recording_kind
+                FROM public.calls c
+                LEFT JOIN LATERAL (SELECT id,kind FROM public.dialnytics_recordings
+                    WHERE call_id=c.id ORDER BY created_at DESC LIMIT 1) r ON TRUE
+                WHERE c.user_id=%s ORDER BY c.created_at DESC LIMIT 300""", (member_id,))
+            rows = cur.fetchall()
+    today = datetime.now(_local_tz()).date()
+    calls = []
+    for r in rows:
+        local = _to_local(r["created_at"])
+        calls.append({
+            "number": _clean_number(r["from_number"] if r["direction"] == "incoming" else r["to_number"]) or "Private Number",
+            "direction": r["direction"] or "", "status": (r["status"] or "").replace("_", " "),
+            "duration": int(r["duration_seconds"] or 0),
+            "date_label": _day_label(local, today) if local else "",
+            "time_label": local.strftime("%I:%M %p").lstrip("0") if local else "",
+            "recording_url": f"/recordings/{r['recording_id']}/audio" if r["recording_id"] else "",
+            "recording_kind": r["recording_kind"] or "",
+        })
+    recordings = _recording_rows(str(member_id), "call") + _recording_rows(str(member_id), "voicemail")
+    members = _team_members(target["account_id"])
+    me = next((m for m in members if m["id"] == target["id"]), None)
+    return templates.TemplateResponse(request=request, name="team_member.html", context={
+        "user": user, "member": target, "live": me, "calls": calls, "recordings": recordings,
+        "back_url": "/team" + ("?account=" + target["account_id"] if _is_admin(user) else ""),
+    })
+
+# ---- Admin: companies ----
+@app.get("/companies", response_class=HTMLResponse)
+async def companies_page(request: Request):
+    admin = require_admin(request)
+    return templates.TemplateResponse(request=request, name="companies.html", context={
+        "user": admin, "companies": _all_companies(), "resellers": _all_resellers(),
+        "msg": request.query_params.get("msg")})
+
+@app.post("/companies")
+async def company_create(request: Request, name: str = Form(...), reseller_id: str = Form("")):
+    require_admin(request)
+    name = name.strip()[:200]
+    if not name:
+        raise HTTPException(status_code=422, detail="Company name required")
+    reseller = None
+    if reseller_id:
+        try:
+            reseller = uuid.UUID(reseller_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid reseller")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            if reseller:
+                cur.execute("SELECT 1 FROM public.dialnytics_users WHERE id=%s AND user_type='reseller'", (reseller,))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=422, detail="Reseller not found")
+            cur.execute("INSERT INTO public.dialnytics_accounts(name,reseller_id) VALUES (%s,%s) RETURNING id", (name, reseller))
+            new_id = cur.fetchone()["id"]
+    return RedirectResponse(f"/companies/{new_id}?msg=created", status_code=303)
+
+@app.get("/companies/{account_id}", response_class=HTMLResponse)
+async def company_detail(account_id: uuid.UUID, request: Request):
+    admin = require_admin(request)
+    account = _account_row(account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Company not found")
+    members = _team_members(account_id)
+    extra = {}
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id,email,plan_name,plan_renewal,provider,is_demo FROM public.dialnytics_users
+                WHERE account_id=%s""", (account_id,))
+            for r in cur.fetchall():
+                extra[str(r["id"])] = r
+            cur.execute("""SELECT id,name,email FROM public.dialnytics_users
+                WHERE is_active AND role<>'admin' AND user_type='customer' AND (account_id IS NULL OR account_id<>%s)
+                ORDER BY lower(name)""", (account_id,))
+            others = cur.fetchall()
+    for m in members:
+        e = extra.get(m["id"]) or {}
+        m.update(plan_name=e.get("plan_name") or "", plan_renewal=e.get("plan_renewal"),
+                 provider=e.get("provider") or "telnyx", is_demo=bool(e.get("is_demo")))
+    return templates.TemplateResponse(request=request, name="company_detail.html", context={
+        "user": admin, "account": account, "members": members, "summary": _team_summary(members),
+        "resellers": _all_resellers(), "others": others, "companies": _all_companies(),
+        "msg": request.query_params.get("msg")})
+
+@app.post("/companies/{account_id}/update")
+async def company_update(account_id: uuid.UUID, request: Request, name: str = Form(...),
+                         reseller_id: str = Form(""), notes: str = Form("")):
+    require_admin(request)
+    reseller = None
+    if reseller_id:
+        try:
+            reseller = uuid.UUID(reseller_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid reseller")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            if reseller:
+                cur.execute("SELECT 1 FROM public.dialnytics_users WHERE id=%s AND user_type='reseller'", (reseller,))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=422, detail="Reseller not found")
+            cur.execute("""UPDATE public.dialnytics_accounts SET name=%s,reseller_id=%s,notes=%s
+                WHERE id=%s RETURNING id""", (name.strip()[:200] or "Company", reseller, notes.strip()[:2000], account_id))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Company not found")
+    return RedirectResponse(f"/companies/{account_id}?msg=saved", status_code=303)
+
+@app.post("/companies/{account_id}/members")
+async def company_member(account_id: uuid.UUID, request: Request, user_id: str = Form(...),
+                         action: str = Form(...), account_role: str = Form("agent"), target_account: str = Form("")):
+    """add (move a user into this company) / role (owner or agent) / move (to another company)."""
+    require_admin(request)
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid user")
+    role = "owner" if account_role == "owner" else "agent"
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM public.dialnytics_users WHERE id=%s AND user_type='customer' AND role<>'admin'", (uid,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="User not found")
+            if action == "add":
+                cur.execute("UPDATE public.dialnytics_users SET account_id=%s,account_role=%s WHERE id=%s", (account_id, role, uid))
+            elif action == "role":
+                cur.execute("UPDATE public.dialnytics_users SET account_role=%s WHERE id=%s AND account_id=%s", (role, uid, account_id))
+            elif action == "move":
+                try:
+                    dest = uuid.UUID(target_account)
+                except ValueError:
+                    raise HTTPException(status_code=422, detail="Select a company")
+                cur.execute("SELECT 1 FROM public.dialnytics_accounts WHERE id=%s", (dest,))
+                if not cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Company not found")
+                cur.execute("UPDATE public.dialnytics_users SET account_id=%s,account_role='agent' WHERE id=%s AND account_id=%s",
+                            (dest, uid, account_id))
+            else:
+                raise HTTPException(status_code=422, detail="Unknown action")
+    refresh_users()
+    return RedirectResponse(f"/companies/{account_id}?msg=members", status_code=303)
+
+# ---- Admin: resellers ----
+@app.get("/resellers", response_class=HTMLResponse)
+async def resellers_page(request: Request):
+    admin = require_admin(request)
+    return templates.TemplateResponse(request=request, name="resellers.html", context={
+        "user": admin, "resellers": _all_resellers(), "msg": request.query_params.get("msg")})
+
+@app.get("/resellers/{reseller_id}", response_class=HTMLResponse)
+async def reseller_detail(reseller_id: uuid.UUID, request: Request):
+    admin = require_admin(request)
+    reseller = _db_user_by_id(str(reseller_id))
+    if not reseller or reseller.get("user_type") != "reseller":
+        raise HTTPException(status_code=404, detail="Reseller not found")
+    companies = [c for c in _all_companies() if str(c["reseller_id"] or "") == reseller["id"]]
+    unassigned = [c for c in _all_companies() if not c["reseller_id"]]
+    return templates.TemplateResponse(request=request, name="reseller_detail.html", context={
+        "user": admin, "reseller": reseller, "companies": companies, "unassigned": unassigned,
+        "msg": request.query_params.get("msg")})
+
+@app.post("/resellers/{reseller_id}/companies")
+async def reseller_assign(reseller_id: uuid.UUID, request: Request, account_id: str = Form(...), action: str = Form("assign")):
+    require_admin(request)
+    try:
+        aid = uuid.UUID(account_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Select a company")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM public.dialnytics_users WHERE id=%s AND user_type='reseller'", (reseller_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Reseller not found")
+            if action == "remove":
+                cur.execute("UPDATE public.dialnytics_accounts SET reseller_id=NULL WHERE id=%s AND reseller_id=%s", (aid, reseller_id))
+            else:
+                cur.execute("UPDATE public.dialnytics_accounts SET reseller_id=%s WHERE id=%s", (reseller_id, aid))
+    return RedirectResponse(f"/resellers/{reseller_id}?msg=saved", status_code=303)
+
+# ---- Reseller portal (view only, no provider names or costs) ----
+@app.get("/clients", response_class=HTMLResponse)
+async def reseller_clients(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    if not _is_reseller(user):
+        return RedirectResponse(url="/dashboard", status_code=302)
+    companies = [c for c in _all_companies() if str(c["reseller_id"] or "") == user["id"]]
+    starts = _period_starts()
+    stats = {}
+    if companies:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT u.account_id,
+                        count(c.id) FILTER (WHERE c.created_at >= %s) AS today,
+                        count(c.id) FILTER (WHERE c.created_at >= %s) AS week,
+                        count(c.id) FILTER (WHERE c.created_at >= %s) AS month
+                    FROM public.dialnytics_users u LEFT JOIN public.calls c ON c.user_id=u.id AND c.created_at >= %s
+                    WHERE u.account_id = ANY(%s) GROUP BY u.account_id""",
+                    (starts["today"], starts["week"], starts["month"], min(starts.values()),
+                     [c["id"] for c in companies]))
+                for r in cur.fetchall():
+                    stats[str(r["account_id"])] = r
+    for c in companies:
+        st = stats.get(str(c["id"])) or {}
+        c["calls_today"] = int(st.get("today") or 0)
+        c["calls_week"] = int(st.get("week") or 0)
+        c["calls_month"] = int(st.get("month") or 0)
+    totals = {k: sum(c[k] for c in companies) for k in ("users", "online", "calls_today", "calls_month")}
+    return templates.TemplateResponse(request=request, name="clients.html", context={
+        "user": user, "companies": companies, "totals": totals})
+
+
+# ==================== CALLING PREFERENCES (per user) ====================
+RINGTONES = ("classic", "uk", "digital", "chime", "pulse", "silent")
+DEFAULT_PREFS = {"ringtone": "classic", "ring_volume": 70, "auto_record": False}
+
+def get_user_prefs(user_id):
+    prefs = dict(DEFAULT_PREFS)
+    try:
+        raw = get_setting(f"prefs:{user_id}")
+        if raw:
+            data = json.loads(raw)
+            if data.get("ringtone") in RINGTONES:
+                prefs["ringtone"] = data["ringtone"]
+            if isinstance(data.get("ring_volume"), int) and 0 <= data["ring_volume"] <= 100:
+                prefs["ring_volume"] = data["ring_volume"]
+            prefs["auto_record"] = data.get("auto_record") is True
+    except Exception:
+        log.exception("Could not read calling preferences")
+    return prefs
+
+templates.env.globals["user_prefs"] = lambda user: get_user_prefs(user.get("id")) if user and user.get("id") else dict(DEFAULT_PREFS)
+
+@app.get("/settings/calling", response_class=HTMLResponse)
+async def calling_prefs_page(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    return templates.TemplateResponse(request=request, name="calling_prefs.html", context={
+        "user": user, "prefs": get_user_prefs(user["id"]), "recording_ok": has_recording(user)})
+
+@app.post("/api/preferences")
+async def save_calling_prefs(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    data = await request.json()
+    ringtone = data.get("ringtone")
+    if ringtone not in RINGTONES:
+        raise HTTPException(status_code=422, detail="Unknown ringtone")
+    try:
+        volume = int(data.get("ring_volume", 70))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid volume")
+    if not 0 <= volume <= 100:
+        raise HTTPException(status_code=422, detail="Volume must be 0-100")
+    auto_record = data.get("auto_record") is True
+    if auto_record and not has_recording(user):
+        raise HTTPException(status_code=402, detail="Call recording is not enabled on this account")
+    prefs = {"ringtone": ringtone, "ring_volume": volume, "auto_record": auto_record}
+    set_setting(f"prefs:{user['id']}", json.dumps(prefs))
+    return {"saved": True, "prefs": prefs}
 
 @app.post("/settings/rates")
 async def save_rates(request: Request):

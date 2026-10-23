@@ -188,8 +188,9 @@
         const newSettings = doc.querySelector('.shell-nav .nav-settings');
         if (settings && newSettings) settings.className = newSettings.className;
 
-        if (push) history.pushState({ dnNav: true }, '', finalUrl.href);
-        else if (finalUrl.href !== location.href) history.replaceState({ dnNav: true }, '', finalUrl.href);
+        const target = finalUrl.href.split('#')[0] + (url.hash || '');   // keep #anchors
+        if (push) history.pushState({ dnNav: true }, '', target);
+        else if (target !== location.href) history.replaceState({ dnNav: true }, '', target);
         currentKey = location.pathname + location.search;
 
         main.innerHTML = newMain.innerHTML;

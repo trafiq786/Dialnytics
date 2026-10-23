@@ -66,3 +66,22 @@ Agar deploy ke baad koi page ya dialer CSP ki wajah se na chale: Render mein `CS
 - Phone ka custom system font ab buttons/inputs par nahi lagta (keypad ke number saaf).
 - Chhoti screen (iPhone SE), tircha phone (keypad side mein), tablet, notch/home-bar wale phones (safe area) sab ke liye adjust hota hai. Computer par layout pehle jaisa.
 - Files: `static/js/mobile-nav.js` (naya), `base.html`, `dialer_rail.html`, `login.html`, `page-nav.js`, `style.css`.
+
+## White-label: customers ko provider ka naam nahi dikhta
+
+- Messages page, Power Dialer aur dialer ke error messages se "Telnyx/Twilio" hata diya.
+- Calling token ke errors customers ko sirf "Calling line is temporarily unavailable. Please contact support." dikhate hain; asal detail Render logs mein jati hai. Admin ko poori detail milti hai.
+- Admin pages (Settings rates, cost box, Users/Customers) mein provider ke naam pehle jaise hain.
+
+## Dialer: premium number box, Calling Preferences, Take the Tour
+- Number box: gradient border, bara saaf font, country code ka nishan (GB, US, PK...), andar Paste aur × (clear) button.
+- Dialer ki lambai content jitni (neeche khali jagah khatam), premium gradient border (computer par).
+- Profile menu → Calling Preferences (`/settings/calling`): 6 ringtones (preview ke saath), volume, "Record every call automatically" (sirf recording-upgrade wale accounts).
+- Profile menu → Take the Tour: 14 steps, Back / Next / Cancel, phone par bhi.
+
+## Management system: Companies, Owner Team dashboard, Resellers
+- **Companies** (admin sidebar): har customer ab ek company ka hissa hai. Purana har customer khud apni company ka Owner ban gaya (kuch nahi toota).
+- **Users page**: User type (Customer / Reseller), Company (nayi ya mojooda), Role (Owner / Agent). Owner bina number ke ban sakta hai (sirf team dekhta hai); Agent ko number chahiye.
+- **Owner ka Team page** (`/team`): har member ka live status (Online / On call + number + timer / Ringing / Offline), aaj ki calls, answered, talk time, last call; har 5 second update. Member kholne par uski call logs aur recordings.
+- **Resellers** (admin sidebar): reseller ki companies assign/remove. Reseller login karke sirf "My Clients" dekhta hai: companies, users, online, calls (view only). Telnyx/Twilio ka naam, cost, recordings ya call details nahi.
+- Database: app start par khud update hota hai (`SUPABASE_MIGRATION_08_COMPANIES_RESELLERS.sql` manual backup ke liye).
