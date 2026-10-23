@@ -58,3 +58,11 @@ Agar deploy ke baad koi page ya dialer CSP ki wajah se na chale: Render mein `CS
 - Wajah: har page par Supabase se 4-8 naye connections bante the (har ek ~300-500ms). Ab connections dobara istemal hote hain (connection pool, `backend/voice_helpers.py`). Kharab/purana connection khud badal jata hai.
 - Link par mouse aate hi page pehle se load hona shuru ho jata hai, click par menu foran highlight hota hai aur upar patli loading line dikhti hai.
 - Optional: Render mein `DB_POOL_SIZE` (default 8) se khule connections ki tadaad badal sakte hain.
+
+## Mobile / tablet layout
+
+- 1100px se chhoti screen (phone, tablet) par sidebar ki jagah neeche tab bar: Home, Calls, Dial (beech mein), Contacts, More.
+- Dial button se dialer neeche se poori screen par khulta hai; call ke dauran chhupa kar doosre pages dekh sakte hain ("On call" hara button). Incoming call par dialer khud khulta hai.
+- Phone ka custom system font ab buttons/inputs par nahi lagta (keypad ke number saaf).
+- Chhoti screen (iPhone SE), tircha phone (keypad side mein), tablet, notch/home-bar wale phones (safe area) sab ke liye adjust hota hai. Computer par layout pehle jaisa.
+- Files: `static/js/mobile-nav.js` (naya), `base.html`, `dialer_rail.html`, `login.html`, `page-nav.js`, `style.css`.

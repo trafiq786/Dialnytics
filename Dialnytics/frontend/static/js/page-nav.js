@@ -216,6 +216,7 @@
             if (typeof window.setStatus === 'function') window.setStatus(msg, bad ? 'var(--danger)' : undefined);
         };
         if (!dialer || !input) return false;
+        try { window.dispatchEvent(new CustomEvent('dialnytics:show-dialer')); } catch (e) {}
         if (dialer.busy()) { say('Another call is active. Finish it before calling ' + number + '.', true); return true; }
         input.value = number;
         if (!dialer.ready()) { say('Dialer is still connecting. Press the green button when it shows Ready.', true); return true; }

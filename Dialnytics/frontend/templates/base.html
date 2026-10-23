@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0c1020">
     <title>{% block title %}Dialnytics{% endblock %}</title>
     <script>try{if(localStorage.getItem('dialnytics-theme')==='light')document.documentElement.classList.add('theme-light-preload')}catch(e){}</script>
     <link rel="icon" href="{{ brand_icon }}">
@@ -77,6 +78,19 @@
             {% include "dialer_rail.html" %}
         </div>
     </div>
+    <!-- Mobile / tablet: bottom tab bar, "More" sheet -->
+    <nav class="mob-tabbar" id="mobTabbar" aria-label="Main menu">
+        <a href="/dashboard" class="mob-tab" data-tab="/dashboard"><span class="mi" aria-hidden="true">▦</span><span>Home</span></a>
+        <a href="/call-logs" class="mob-tab" data-tab="/call-logs"><span class="mi" aria-hidden="true">☎</span><span>Calls</span></a>
+        <button type="button" class="mob-dial" id="mobDial" aria-label="Open dialer" aria-controls="dialRail" aria-expanded="false"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.3 1.8.6 2.6a2 2 0 0 1-.5 2.1L8 9.6a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.5c.8.3 1.7.5 2.6.6a2 2 0 0 1 1.7 2z"/></svg><span class="mob-dial-label" id="mobDialLabel">Dial</span></button>
+        <a href="/contacts" class="mob-tab" data-tab="/contacts"><span class="mi" aria-hidden="true">👤</span><span>Contacts</span></a>
+        <button type="button" class="mob-tab" id="mobMore" aria-haspopup="dialog" aria-expanded="false"><span class="mi" aria-hidden="true">☰</span><span>More</span></button>
+    </nav>
+    <div class="mob-sheet-backdrop" id="mobMoreBackdrop" hidden></div>
+    <div class="mob-sheet" id="mobMoreSheet" role="dialog" aria-label="All pages" hidden>
+        <div class="mob-sheet-handle" aria-hidden="true"></div>
+        <div class="mob-sheet-grid" id="mobMoreGrid"></div>
+    </div>
     {% if user.provider == 'twilio' %}
     <script src="https://cdn.jsdelivr.net/npm/@twilio/voice-sdk@2.18.1/dist/twilio.min.js"></script>
     {% else %}
@@ -85,6 +99,7 @@
     <script src="/static/js/dialer.js"></script>
     <script src="/static/js/ui-enhancements.js"></script>
     <script src="/static/js/session-guard.js"></script>
+    <script src="/static/js/mobile-nav.js"></script>
     <div id="pageScripts" hidden><script data-nav-marker>window.DialnyticsNav&&DialnyticsNav.capture(true)</script>{% block scripts %}{% endblock %}<script data-nav-marker>window.DialnyticsNav&&DialnyticsNav.capture(false)</script></div>
 </body>
 </html>

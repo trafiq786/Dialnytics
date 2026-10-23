@@ -93,7 +93,8 @@
 .dial-rail .dial-btn { background: var(--bg-secondary); border-color: var(--border); }
 .dial-rail .call-btn.green { background: var(--success); box-shadow: none; }
 </style>
-<aside class="dial-rail">
+<aside class="dial-rail" id="dialRail">
+        <button type="button" class="rail-close" id="railClose" aria-label="Hide dialer"><span aria-hidden="true">⌄</span> Hide dialer</button>
         <div class="your-number">
             <span class="rail-label">Your number</span><strong class="rail-own-number">{{ user.phone_number }}</strong>
         </div>
