@@ -1369,3 +1369,8 @@ body.light-theme .dn-callcard { background:rgba(255,255,255,.97); color:#0b1633;
 .pn-field.pn-noflag.pn-xlong #numberInput { font-size:15px !important; letter-spacing:0 !important; }
 .pn-hint { text-align:center; }
 .dial-rail .rail-own-number { letter-spacing:.03em; }
+/* Stop the dialer "shaking" while typing: always reserve the scrollbar space,
+   so the scrollbar appearing/disappearing can no longer resize the keypad. */
+.dial-rail { scrollbar-gutter: stable both-edges; }
+.dial-rail .pn-field #numberInput { min-height:54px; height:54px; line-height:24px; }
+.dial-rail .pn-hint { height:18px; line-height:18px; }
