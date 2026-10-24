@@ -16,6 +16,8 @@ import secrets
 import time
 import urllib.error
 import urllib.parse
+import logging
+_log = logging.getLogger("dialnytics.security")
 import urllib.request
 from html import escape as _html_escape
 
@@ -332,9 +334,11 @@ class SecurityMiddleware:
             host = headers.get(b"host", "")
             origin = headers.get(b"origin", "")
             referer = headers.get(b"referer", "")
+            origin_verified = False
             if origin and origin != "null":
                 if not self._host_ok(origin, host):
                     return await self._reject(send, "origin")
+                origin_verified = True
             elif referer and not self._host_ok(referer, host):
                 return await self._reject(send, "referer")
 
@@ -366,7 +370,14 @@ class SecurityMiddleware:
                     return await receive()
                 receive = replay
             if not supplied or not any(hmac.compare_digest(t, supplied) for t in cookie_tokens):
-                return await self._reject(send, "token", html="text/html" in headers.get(b"accept", ""))
+                if not origin_verified:
+                    _log.warning("CSRF rejected %s %s: cookie=%s supplied=%s", method, path,
+                                 bool(cookie_tokens), bool(supplied))
+                    return await self._reject(send, "token", html="text/html" in headers.get(b"accept", ""))
+                # The browser proved the request comes from our own pages (Origin header matches
+                # the host; session cookie is SameSite=Lax). Accept it, so an old cached script or
+                # an unusual cookie jar can never block a real form.
+                _log.info("CSRF token missing but same-origin verified: %s %s", method, path)
 
         csp_header = b"content-security-policy-report-only" if self.report_only else b"content-security-policy"
         security = [
