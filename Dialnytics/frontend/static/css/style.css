@@ -1360,3 +1360,12 @@ body.light-theme .dn-callcard { background:rgba(255,255,255,.97); color:#0b1633;
 .dial-rail #padBody[hidden] { display:none !important; }
 .dial-rail #padBody .dial-input-row, .dial-rail #padBody .pn-hint { width:100%; }
 .dial-rail .pn-hint { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+/* Number box without country flag: full width, number always fully visible */
+.pn-cc[hidden] { display:none !important; }
+.dial-rail .pn-field.pn-noflag #numberInput { padding-left:40px !important; padding-right:40px !important; text-align:center; text-overflow:clip; }
+.pn-field.pn-noflag #numberInput { font-size:21px !important; letter-spacing:.5px !important; }
+.pn-field.pn-noflag.pn-long #numberInput { font-size:17px !important; letter-spacing:.2px !important; }
+.pn-field.pn-noflag.pn-xlong #numberInput { font-size:15px !important; letter-spacing:0 !important; }
+.pn-hint { text-align:center; }
+.dial-rail .rail-own-number { letter-spacing:.03em; }
