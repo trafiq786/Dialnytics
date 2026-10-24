@@ -18,7 +18,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from html import escape as _html_escape
-from http.cookies import SimpleCookie
 
 
 # --------------------------------------------------------------------------
@@ -271,16 +270,25 @@ class SecurityMiddleware:
         return out
 
     @staticmethod
-    def _cookie(headers, name):
-        raw = headers.get(b"cookie")
-        if not raw:
-            return ""
-        jar = SimpleCookie()
-        try:
-            jar.load(raw)
-        except Exception:
-            return ""
-        return jar[name].value if name in jar else ""
+    def _cookies(headers, name):
+        """All values of a cookie. Hand-parsed: SimpleCookie silently stops at the first
+        cookie it dislikes (JSON values, spaces), which made the CSRF cookie 'disappear'
+        when the browser held such a cookie from another script or extension."""
+        out = []
+        for part in (headers.get(b"cookie") or "").split(";"):
+            key, sep, value = part.strip().partition("=")
+            if sep and key.strip() == name:
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] == '"':
+                    value = value[1:-1]
+                if value:
+                    out.append(value)
+        return out
+
+    @classmethod
+    def _cookie(cls, headers, name):
+        values = cls._cookies(headers, name)
+        return values[0] if values else ""
 
     def _host_ok(self, value, host):
         try:
@@ -292,11 +300,22 @@ class SecurityMiddleware:
             return False
         return netloc == (host or "").lower() or netloc in self.trusted_hosts
 
-    async def _reject(self, send, reason):
-        body = json.dumps({"detail": "Security check failed. Please refresh the page and try again.",
-                           "reason": reason}).encode()
+    async def _reject(self, send, reason, html=False):
+        if html:
+            # A normal form post (not fetch): show a readable page instead of raw JSON.
+            body = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                    "<title>Please try again</title><body style='font-family:system-ui;background:#0b0f19;color:#f1f5f9;"
+                    "display:grid;place-items:center;min-height:90vh'><div style='max-width:420px;text-align:center'>"
+                    "<h2>Please try again</h2><p style='color:#94a3b8'>Your page was open for a while, so the security "
+                    "check expired. Go back, refresh the page and submit again.</p>"
+                    "<p><a href='javascript:history.back()' style='color:#818cf8'>&larr; Go back</a></p></div>").encode()
+            ctype = b"text/html; charset=utf-8"
+        else:
+            body = json.dumps({"detail": "Security check failed. Please refresh the page and try again.",
+                               "reason": reason}).encode()
+            ctype = b"application/json"
         await send({"type": "http.response.start", "status": 403,
-                    "headers": [(b"content-type", b"application/json"),
+                    "headers": [(b"content-type", ctype),
                                 (b"cache-control", b"no-store")]})
         await send({"type": "http.response.body", "body": body})
 
@@ -306,8 +325,8 @@ class SecurityMiddleware:
         headers = self._headers(scope)
         method = scope.get("method", "GET").upper()
         path = scope.get("path", "")
-        cookie_token = self._cookie(headers, CSRF_COOKIE)
-        new_token = None if cookie_token else secrets.token_urlsafe(32)
+        cookie_tokens = self._cookies(headers, CSRF_COOKIE)
+        new_token = None if cookie_tokens else secrets.token_urlsafe(32)
 
         if method not in SAFE_METHODS and not path.startswith(self.exempt):
             host = headers.get(b"host", "")
@@ -346,8 +365,8 @@ class SecurityMiddleware:
                         return {"type": "http.request", "body": body, "more_body": False}
                     return await receive()
                 receive = replay
-            if not cookie_token or not supplied or not hmac.compare_digest(cookie_token, supplied):
-                return await self._reject(send, "token")
+            if not supplied or not any(hmac.compare_digest(t, supplied) for t in cookie_tokens):
+                return await self._reject(send, "token", html="text/html" in headers.get(b"accept", ""))
 
         csp_header = b"content-security-policy-report-only" if self.report_only else b"content-security-policy"
         security = [
