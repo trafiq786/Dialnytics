@@ -509,7 +509,9 @@ function markEnded(reason) {
     async function makeCall() {
         let number = input.value.trim();
         if (!number) return setStatus('Enter a number', 'var(--danger)');
-        if (!number.startsWith('+')) number = '+' + number.replace(/\D/g, '');
+        // Country code is added from the user's own line (US line -> +1, UK line -> +44).
+        number = window.DNNumber ? window.DNNumber.toE164(number) : (number.startsWith('+') ? number : '+' + number.replace(/\D/g, ''));
+        if (!/^\+[1-9]\d{6,14}$/.test(number)) return setStatus('Check the number: ' + number, 'var(--danger)');
         if (!client) return setStatus('WebRTC is not ready', 'var(--danger)');
         ended = false;
         lastState = '';
@@ -617,7 +619,9 @@ function hangup() {
     function confirmCompose() {
         let number = document.getElementById('composeInput').value.trim();
         if (!number) return setStatus('Enter a number', 'var(--danger)');
-        if (!number.startsWith('+')) number = '+' + number.replace(/\D/g, '');
+        // Country code is added from the user's own line (US line -> +1, UK line -> +44).
+        number = window.DNNumber ? window.DNNumber.toE164(number) : (number.startsWith('+') ? number : '+' + number.replace(/\D/g, ''));
+        if (!/^\+[1-9]\d{6,14}$/.test(number)) return setStatus('Check the number: ' + number, 'var(--danger)');
         if (composeMode === 'transfer') {
             if (activeCall && activeCall.transfer) activeCall.transfer(number);
             composeMode = '';
