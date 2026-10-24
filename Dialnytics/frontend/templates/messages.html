@@ -1,9 +1,167 @@
 {% extends "base.html" %}
 {% block title %}Messages — Dialnytics{% endblock %}
 {% block content %}
-<div class="center-card">
-    <div class="warn-ico">!</div>
-    <h2>Texting is not enabled</h2>
-    <p>This number can make calls. Texting has not been activated for it yet — contact support to enable SMS.</p>
+{% if not sms_ok %}
+<div class="center-card sms-locked">
+    <div class="warn-ico">💬</div>
+    <h2>Text messages are not enabled</h2>
+    <p>Send and receive SMS from your business number, right next to your calls. Contact support to add the <strong>SMS add-on</strong> to your account.</p>
+    {% if is_admin %}<p class="muted">Admin: switch on "SMS add-on" for a user on the Users page (the user also needs a calling number).</p>{% endif %}
 </div>
+{% else %}
+<div class="sms-app" id="smsApp" data-open="{{ open_number }}" data-from="{{ user.phone_number }}">
+    <aside class="sms-side">
+        <div class="sms-side-head">
+            <div><h1>Messages</h1><small>From <span class="sms-from">{{ user.phone_number }}</span></small></div>
+            <button type="button" class="module-btn primary" id="smsNewBtn">＋ New</button>
+        </div>
+        <input type="search" id="smsSearch" class="sms-search" placeholder="Search name, number or text" aria-label="Search conversations">
+        <div class="sms-threads" id="smsThreads" role="list"><p class="sms-empty">Loading…</p></div>
+    </aside>
+    <section class="sms-main" id="smsMain" aria-live="polite">
+        <div class="sms-placeholder" id="smsPlaceholder">
+            <div class="sms-ph-ico">💬</div>
+            <h2>Your conversations</h2>
+            <p>Pick a conversation, or start a new one with ＋ New.</p>
+        </div>
+        <div class="sms-thread" id="smsThread" hidden>
+            <header class="sms-thread-head">
+                <button type="button" class="sms-back" id="smsBack" aria-label="Back to conversations">‹</button>
+                <span class="sms-avatar" id="smsAvatar">?</span>
+                <div class="sms-who"><strong id="smsName"></strong><small id="smsNumber"></small></div>
+                <a class="module-btn" id="smsCall" href="#" title="Call this number">☎ Call</a>
+                <button type="button" class="icon-btn" id="smsSave" title="Save contact" aria-label="Save contact">👤＋</button>
+                <button type="button" class="icon-btn" id="smsDelete" title="Delete conversation" aria-label="Delete conversation">🗑</button>
+            </header>
+            <div class="sms-messages" id="smsMessages"></div>
+            <form class="sms-compose" id="smsCompose">
+                <textarea id="smsText" rows="1" maxlength="1600" placeholder="Type a text message…" aria-label="Message"></textarea>
+                <button type="submit" class="sms-send" id="smsSend" aria-label="Send">➤</button>
+            </form>
+            <div class="sms-meta"><span id="smsCount">0 / 160 · 1 SMS</span><span id="smsError" class="sms-error"></span></div>
+        </div>
+    </section>
+</div>
+<dialog class="module-dialog sms-new" id="smsNewDialog">
+    <form method="dialog" id="smsNewForm">
+        <div class="module-dialog-head"><h2>New message</h2><button class="module-close" value="cancel" formnovalidate aria-label="Close">×</button></div>
+        <div class="module-fields">
+            <label class="module-wide">To (with country code)<input id="smsNewTo" placeholder="+12025550123" autocomplete="off" inputmode="tel" required></label>
+        </div>
+        <p class="module-feedback" id="smsNewErr"></p>
+        <div class="module-dialog-actions"><button class="module-btn" value="cancel" formnovalidate>Cancel</button><button class="module-btn primary" id="smsNewGo" value="go">Open chat</button></div>
+    </form>
+</dialog>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+{% if sms_ok %}
+<script>
+(() => {
+  const app = document.getElementById('smsApp'); if (!app) return;
+  const $ = id => document.getElementById(id);
+  const threadsEl = $('smsThreads'), msgsEl = $('smsMessages'), text = $('smsText');
+  let threads = [], current = '', currentName = '', sending = false, lastSig = '';
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const initials = (name, num) => (name || '').trim() ? name.trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase() : '#';
+  const norm = v => { v = String(v || '').replace(/[\s().-]/g, ''); if (v.startsWith('00')) v = '+' + v.slice(2); return /^\+[1-9]\d{7,14}$/.test(v) ? v : ''; };
+  function segments(t) {
+    const gsm = /^[A-Za-z0-9 \r\n@£$¥èéùìòÇØøÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ!"#¤%&'()*+,\-./:;<=>?¡ÄÖÑÜ§¿äöñüà^{}\\\[~\]|€]*$/.test(t);
+    const single = gsm ? 160 : 70, per = gsm ? 153 : 67, n = t.length;
+    return { n, max: n <= single ? single : Math.ceil(n / per) * per, parts: n <= single ? 1 : Math.ceil(n / per) };
+  }
+  function renderThreads() {
+    const q = $('smsSearch').value.trim().toLowerCase();
+    const list = threads.filter(t => !q || (t.name + ' ' + t.number + ' ' + t.preview).toLowerCase().includes(q));
+    if (!list.length) { threadsEl.innerHTML = '<p class="sms-empty">' + (threads.length ? 'No match.' : 'No messages yet. Start one with ＋ New.') + '</p>'; return; }
+    threadsEl.innerHTML = list.map(t => `<button type="button" class="sms-row${t.number === current ? ' active' : ''}${t.unread ? ' unread' : ''}" data-num="${esc(t.number)}" role="listitem">
+      <span class="sms-avatar">${esc(initials(t.name, t.number))}</span>
+      <span class="sms-row-main"><span class="sms-row-top"><strong>${esc(t.name || t.number)}</strong><small>${esc(t.time)}</small></span>
+      <span class="sms-row-prev">${esc(t.preview)}</span></span>${t.unread ? `<span class="sms-badge">${t.unread}</span>` : ''}</button>`).join('');
+  }
+  async function loadThreads() {
+    try { const r = await fetch('/api/sms/threads'); if (!r.ok) return; const d = await r.json(); threads = d.threads || []; renderThreads(); } catch (_) {}
+  }
+  function renderMessages(list, force) {
+    const sig = list.map(m => m.id + m.status).join('|');
+    if (!force && sig === lastSig) return; lastSig = sig;
+    const atBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 90;
+    if (!list.length) { msgsEl.innerHTML = '<p class="sms-empty">No messages yet. Say hello 👋</p>'; return; }
+    let day = '';
+    msgsEl.innerHTML = list.map(m => {
+      const d = (m.time || '').split(',')[0]; let sep = '';
+      if (d && d !== day) { day = d; sep = `<div class="sms-day">${esc(d)}</div>`; }
+      const media = (m.media || []).map(x => x && x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener" class="sms-media">📎 Attachment</a>` : '').join('');
+      const st = m.direction === 'out' ? ({delivered:'✓✓ Delivered', sent:'✓ Sent', queued:'Sending…', sending:'Sending…', failed:'⚠ Not sent', sending_failed:'⚠ Not sent', delivery_failed:'⚠ Not delivered', delivery_unconfirmed:'✓ Sent'}[m.status] || '✓ Sent') : '';
+      const bad = /fail/.test(m.status || '');
+      return sep + `<div class="sms-msg ${m.direction}${bad ? ' bad' : ''}"><div class="sms-bubble">${esc(m.body)}${media}</div><small>${esc((m.time || '').split(', ')[1] || '')}${st ? ' · ' + st : ''}</small></div>`;
+    }).join('');
+    if (atBottom || force) msgsEl.scrollTop = msgsEl.scrollHeight;
+  }
+  async function openThread(num, name) {
+    num = norm(num); if (!num) return;
+    current = num; currentName = name || (threads.find(t => t.number === num) || {}).name || '';
+    $('smsPlaceholder').hidden = true; $('smsThread').hidden = false; app.classList.add('in-thread');
+    $('smsName').textContent = currentName || num; $('smsNumber').textContent = currentName ? num : 'Not in contacts';
+    $('smsAvatar').textContent = initials(currentName, num);
+    $('smsCall').href = '/dialer?number=' + encodeURIComponent(num) + '&call=1';
+    $('smsSave').hidden = !!currentName; $('smsError').textContent = '';
+    msgsEl.innerHTML = '<p class="sms-empty">Loading…</p>'; lastSig = '';
+    history.replaceState(history.state, '', '/messages?to=' + encodeURIComponent(num));
+    renderThreads(); await loadThread(true); text.focus();
+  }
+  async function loadThread(force) {
+    if (!current) return;
+    try {
+      const r = await fetch('/api/sms/thread?number=' + encodeURIComponent(current)); if (!r.ok) return;
+      const d = await r.json(); if (d.number !== current) return;
+      renderMessages(d.messages || [], force);
+      const t = threads.find(x => x.number === current); if (t && t.unread) { t.unread = 0; renderThreads(); }
+    } catch (_) {}
+  }
+  function updateCount() {
+    const s = segments(text.value); $('smsCount').textContent = `${s.n} / ${s.max} · ${s.parts} SMS`;
+    text.style.height = 'auto'; text.style.height = Math.min(text.scrollHeight, 140) + 'px';
+  }
+  async function send(e) {
+    e && e.preventDefault(); const body = text.value.trim(); if (!body || sending || !current) return;
+    sending = true; $('smsSend').disabled = true; $('smsError').textContent = '';
+    try {
+      const r = await fetch('/api/sms/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ to: current, text: body }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) $('smsError').textContent = typeof d.detail === 'string' ? d.detail : 'Message could not be sent.';
+      if (d.message) { text.value = ''; updateCount(); }
+      await loadThread(true); loadThreads();
+    } catch (_) { $('smsError').textContent = 'Connection problem. Please try again.'; }
+    finally { sending = false; $('smsSend').disabled = false; text.focus(); }
+  }
+  threadsEl.addEventListener('click', e => { const b = e.target.closest('[data-num]'); if (b) openThread(b.dataset.num); });
+  $('smsSearch').addEventListener('input', renderThreads);
+  $('smsCompose').addEventListener('submit', send);
+  text.addEventListener('input', updateCount);
+  text.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) send(e); });
+  $('smsBack').addEventListener('click', () => { app.classList.remove('in-thread'); current = ''; renderThreads(); history.replaceState(history.state, '', '/messages'); });
+  $('smsNewBtn').addEventListener('click', () => { $('smsNewTo').value = ''; $('smsNewErr').textContent = ''; $('smsNewDialog').showModal(); $('smsNewTo').focus(); });
+  $('smsNewForm').addEventListener('submit', e => {
+    if (e.submitter && e.submitter.value === 'cancel') return;
+    const num = norm($('smsNewTo').value);
+    if (!num) { e.preventDefault(); $('smsNewErr').textContent = 'Enter the number with country code, e.g. +12025550123'; return; }
+    openThread(num);
+  });
+  $('smsSave').addEventListener('click', async () => {
+    const name = prompt('Contact name for ' + current); if (!name || !name.trim()) return;
+    const r = await fetch('/api/contacts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim(), number: current }) });
+    if (r.ok) { currentName = name.trim(); $('smsName').textContent = currentName; $('smsNumber').textContent = current; $('smsAvatar').textContent = initials(currentName, current); $('smsSave').hidden = true; loadThreads(); }
+  });
+  $('smsDelete').addEventListener('click', async () => {
+    if (!confirm('Delete this whole conversation? This cannot be undone.')) return;
+    const r = await fetch('/api/sms/thread?number=' + encodeURIComponent(current), { method: 'DELETE' });
+    if (r.ok) { $('smsBack').click(); $('smsThread').hidden = true; $('smsPlaceholder').hidden = false; loadThreads(); }
+  });
+  updateCount();
+  loadThreads().then(() => { if (app.dataset.open) openThread(app.dataset.open); });
+  setInterval(() => { if (!document.hidden) { loadThreads(); loadThread(false); } }, 5000);
+})();
+</script>
+{% endif %}
 {% endblock %}

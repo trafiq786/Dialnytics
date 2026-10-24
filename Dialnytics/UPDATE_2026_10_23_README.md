@@ -85,3 +85,17 @@ Agar deploy ke baad koi page ya dialer CSP ki wajah se na chale: Render mein `CS
 - **Owner ka Team page** (`/team`): har member ka live status (Online / On call + number + timer / Ringing / Offline), aaj ki calls, answered, talk time, last call; har 5 second update. Member kholne par uski call logs aur recordings.
 - **Resellers** (admin sidebar): reseller ki companies assign/remove. Reseller login karke sirf "My Clients" dekhta hai: companies, users, online, calls (view only). Telnyx/Twilio ka naam, cost, recordings ya call details nahi.
 - Database: app start par khud update hota hai (`SUPABASE_MIGRATION_08_COMPANIES_RESELLERS.sql` manual backup ke liye).
+
+## Text messages (SMS) — sirf allowed users
+- **Kaun use kar sakta hai:** sirf woh user jis ka admin ne **SMS add-on** ON kiya ho (Users → Edit → Calling → "Toggle SMS") aur jis ke paas apna Telnyx calling number ho. Baqi users ko Messages page par "Text messages are not enabled" dikhta hai.
+- **Number:** SMS user ke apne calling number se jata aur aata hai.
+- **Messages page:** WhatsApp jaisa inbox — conversations list, search, ＋ New, chat bubbles, Sent/Delivered status, SMS count (160 characters = 1 SMS), Call button, contact save, conversation delete. Har 5 second update; sidebar mein unread badge.
+- **Text buttons:** Contacts, Call Logs (details panel) aur CRM (Do-Not-Call leads ke ilawa) par "💬 Text".
+- **Limits:** 20 SMS per minute, 500 per day per user (`SMS_DAILY_LIMIT` se badal sakte hain), 1600 characters max.
+- **Setup (ek dafa):**
+  1. Telnyx → Messaging → naya messaging profile "Dialnytics SMS", Inbound webhook: `https://dialnytics.co.uk/webhooks/telnyx/sms` (API v2). Allowed destinations: jin countries ko SMS bhejna hai.
+  2. Render (dialer) → Environment: `TELNYX_SMS_PROFILE_ID` = us profile ki ID.
+  3. Users page par user ka SMS ON karte hi us ka number khud is profile se jud jata hai.
+- **Zaroori:** USA local numbers se business SMS ke liye Telnyx mein **10DLC** (brand + campaign) approval chahiye, warna carriers messages block karte hain. Toll-free numbers ke liye "Toll-Free Verification".
+- Twilio users ke liye SMS abhi nahi (Twilio account ready hone par add hoga).
+- Database: app start par khud update (`SUPABASE_MIGRATION_09_SMS.sql` manual backup).

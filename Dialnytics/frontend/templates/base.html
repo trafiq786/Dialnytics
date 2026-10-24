@@ -56,7 +56,7 @@
                     <a href="/dashboard" class="{% if request.url.path == '/dashboard' %}active{% endif %}"><span class="ni">▦</span><span>Dashboard</span></a>
                     {% if is_owner(user) %}<a href="/team" class="{% if request.url.path.startswith('/team') %}active{% endif %}"><span class="ni">🟢</span><span>Team</span></a>{% endif %}
                     <a href="/call-logs" class="{% if request.url.path == '/call-logs' %}active{% endif %}"><span class="ni">☎</span><span>Call Logs</span></a>
-                    <a href="/messages" class="{% if request.url.path == '/messages' %}active{% endif %}"><span class="ni">💬</span><span>Messages</span></a>
+                    <a href="/messages" class="{% if request.url.path == '/messages' %}active{% endif %}"><span class="ni">💬</span><span>Messages</span>{% if has_sms(user) %}<span class="nav-sms-badge" data-sms-badge hidden></span>{% endif %}</a>
                     <a href="/voicemails" class="{% if request.url.path == '/voicemails' %}active{% endif %}"><span class="ni">◎</span><span>Voicemails</span></a>
                     <a href="/recordings" class="{% if request.url.path == '/recordings' %}active{% endif %}"><span class="ni">⏺</span><span>Recordings</span></a>
                     <a href="/contacts" class="{% if request.url.path == '/contacts' %}active{% endif %}"><span class="ni">👤</span><span>Contacts</span></a>
@@ -115,6 +115,11 @@
     <script src="/static/js/ui-enhancements.js"></script>
     <script src="/static/js/session-guard.js"></script>
     <script src="/static/js/mobile-nav.js"></script>
+    {% if has_sms(user) %}<script>
+    (function(){async function smsBadge(){try{const r=await fetch('/api/sms/unread');if(!r.ok)return;const d=await r.json();
+      document.querySelectorAll('[data-sms-badge]').forEach(function(b){b.textContent=d.unread>99?'99+':String(d.unread);b.hidden=!d.unread;});}catch(_){}}
+      smsBadge();setInterval(function(){if(!document.hidden)smsBadge();},15000);})();
+    </script>{% endif %}
     <div id="pageScripts" hidden><script data-nav-marker>window.DialnyticsNav&&DialnyticsNav.capture(true)</script>{% block scripts %}{% endblock %}<script data-nav-marker>window.DialnyticsNav&&DialnyticsNav.capture(false)</script></div>
 </body>
 </html>

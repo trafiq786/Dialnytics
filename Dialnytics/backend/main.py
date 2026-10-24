@@ -174,6 +174,7 @@ def _db_user(row):
         "plan_renewal": row["plan_renewal"].isoformat() if row["plan_renewal"] else "",
         "recording_premium": row["recording_premium"],
         "dnd_enabled": row["dnd_enabled"],
+        "sms_enabled": bool(row.get("sms_enabled", False)),
         "is_demo": bool(row.get("is_demo", False)),
         "account_id": str(row["account_id"]) if row.get("account_id") else "",
         "account_role": "owner" if row.get("account_role") == "owner" else "agent",
@@ -308,6 +309,27 @@ ALTER TABLE public.dialnytics_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_presence ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.dialnytics_accounts FROM anon, authenticated;
 REVOKE ALL ON public.user_presence FROM anon, authenticated;
+-- 09: text messages (SMS), only for users with the SMS add-on
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS sms_enabled boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS public.sms_messages (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id uuid REFERENCES public.dialnytics_users(id) ON DELETE CASCADE,
+    our_number text NOT NULL,
+    contact_number text NOT NULL,
+    direction text NOT NULL CHECK (direction IN ('in','out')),
+    body text NOT NULL DEFAULT '',
+    media jsonb NOT NULL DEFAULT '[]'::jsonb,
+    status text NOT NULL DEFAULT '',
+    error text NOT NULL DEFAULT '',
+    provider text NOT NULL DEFAULT 'telnyx',
+    provider_id text UNIQUE,
+    is_read boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sms_messages_thread_idx ON public.sms_messages(user_id, contact_number, created_at DESC);
+CREATE INDEX IF NOT EXISTS sms_messages_unread_idx ON public.sms_messages(user_id) WHERE direction = 'in' AND is_read = false;
+ALTER TABLE public.sms_messages ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.sms_messages FROM anon, authenticated;
 """
 
 def ensure_schema():
@@ -1307,6 +1329,11 @@ async def toggle_recording(request: Request, email: str = Form(...)):
 def has_recording(user):
     return user.get("role") == "admin" or bool(user.get("recording_premium"))
 
+def has_sms(user):
+    """Text messages: only users with the SMS add-on switched on by admin, and a number of their own."""
+    return bool(user and user.get("sms_enabled") and user.get("phone_number")
+                and user.get("user_type") != "reseller" and (user.get("provider") or "telnyx") == "telnyx")
+
 def plan_status(user):
     if user.get("is_demo"):
         expires = user.get("trial_expires_at")
@@ -1327,6 +1354,7 @@ def plan_status(user):
     }
 
 templates.env.globals["has_recording"] = has_recording
+templates.env.globals["has_sms"] = has_sms
 templates.env.globals["plan_status"] = plan_status
 
 @app.get("/logout")
@@ -2526,12 +2554,264 @@ async def delete_script(request: Request, script_id: str = Form(...)):
     _save_scripts(data)
     return RedirectResponse(url="/scripts", status_code=303)
 
+# ---------------------------------------------------------------- Text messages (SMS)
+# Only users with the SMS add-on (admin switch) and their own Telnyx number can text.
+# Messages are sent from the user's own calling number. Customers never see provider names.
+TELNYX_SMS_PROFILE_ID = os.getenv("TELNYX_SMS_PROFILE_ID", "").strip()
+SMS_DAILY_LIMIT = int(os.getenv("SMS_DAILY_LIMIT", "500"))
+SMS_MAX_CHARS = 1600
+SMS_UNAVAILABLE = "Message could not be sent. Please check the number and try again, or contact support."
+_sms_burst = {}
+
+def _sms_number(raw):
+    value = re.sub(r"[\s().-]", "", str(raw or ""))
+    if value.startswith("00"):
+        value = "+" + value[2:]
+    return value if re.fullmatch(r"\+[1-9]\d{7,14}", value) else ""
+
+def _sms_segments(text):
+    gsm = re.fullmatch(r"[A-Za-z0-9 \r\n@£$¥èéùìòÇØøÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ!\"#¤%&'()*+,\-./:;<=>?¡ÄÖÑÜ§¿äöñüà^{}\\\[~\]|€]*", text or "")
+    per, single = (153, 160) if gsm else (67, 70)
+    n = len(text or "")
+    return 1 if n <= single else -(-n // per)
+
+def _sms_row(r, contacts=None):
+    local = _to_local(r["created_at"])
+    return {"id": str(r["id"]), "direction": r["direction"], "body": r["body"] or "",
+            "media": r.get("media") or [], "status": r.get("status") or "",
+            "at": r["created_at"].isoformat() if r["created_at"] else "",
+            "time": local.strftime("%d %b, %I:%M %p") if local else ""}
+
+def _sms_require(request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required")
+    if not has_sms(user):
+        raise HTTPException(status_code=403, detail="Text messages are not enabled on your account.")
+    return user
+
+def _telnyx_sms_send(from_number, to_number, text):
+    """Returns (provider_id, status, error_detail)."""
+    body = {"from": from_number, "to": to_number, "text": text,
+            "webhook_url": PUBLIC_BASE_URL + "/webhooks/telnyx/sms"}
+    if TELNYX_SMS_PROFILE_ID:
+        body["messaging_profile_id"] = TELNYX_SMS_PROFILE_ID
+    status, data = vh.http_json("POST", "https://api.telnyx.com/v2/messages", body=body,
+                                headers={"Authorization": f"Bearer {TELNYX_API_KEY}"})
+    if status >= 400 or not isinstance(data, dict):
+        errors = (data.get("errors") if isinstance(data, dict) else None) or []
+        detail = "; ".join(str(e.get("detail") or e.get("title") or "") for e in errors) or str(data)[:300]
+        return None, "failed", f"HTTP {status}: {detail}"[:500]
+    msg = data.get("data") or {}
+    to = (msg.get("to") or [{}])[0] if isinstance(msg.get("to"), list) else {}
+    return msg.get("id"), to.get("status") or "queued", ""
+
+def _link_number_to_sms_profile(number):
+    """Assign the number to the SMS messaging profile so inbound texts reach the dialer. Returns error or ''."""
+    if not (TELNYX_API_KEY and TELNYX_SMS_PROFILE_ID):
+        return "TELNYX_SMS_PROFILE_ID is not set, link the number to the messaging profile in Telnyx."
+    auth = {"Authorization": f"Bearer {TELNYX_API_KEY}"}
+    try:
+        status, data = vh.http_json("GET", "https://api.telnyx.com/v2/phone_numbers?" +
+                                    urllib.parse.urlencode({"filter[phone_number]": number}), headers=auth)
+        rows = data.get("data") if isinstance(data, dict) else None
+        if status >= 400 or not rows:
+            return f"Number {number} not found in the Telnyx account."
+        status, data = vh.http_json("PATCH", f"https://api.telnyx.com/v2/phone_numbers/{rows[0]['id']}/messaging",
+                                    body={"messaging_profile_id": TELNYX_SMS_PROFILE_ID}, headers=auth)
+        if status >= 400:
+            errors = (data.get("errors") if isinstance(data, dict) else None) or []
+            return "Telnyx refused: " + ("; ".join(str(e.get("detail") or e.get("title")) for e in errors) or str(status))
+    except vh.ProviderError as exc:
+        return str(exc)
+    return ""
+
 @app.get("/messages", response_class=HTMLResponse)
 async def messages_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
-    return templates.TemplateResponse(request=request, name="messages.html", context={"user": user})
+    return templates.TemplateResponse(request=request, name="messages.html", context={
+        "user": user, "sms_ok": has_sms(user), "open_number": _sms_number(request.query_params.get("to", "")),
+        "is_admin": user.get("role") == "admin"})
+
+@app.get("/api/sms/unread")
+async def sms_unread(request: Request):
+    user = get_current_user(request)
+    if not user or not has_sms(user):
+        return {"unread": 0}
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT COUNT(*) AS n FROM public.sms_messages
+                WHERE user_id=%s AND direction='in' AND is_read=false""", (user["id"],))
+            return {"unread": int(cur.fetchone()["n"])}
+
+@app.get("/api/sms/threads")
+async def sms_threads(request: Request):
+    user = _sms_require(request)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT t.contact_number, t.body, t.direction, t.status, t.created_at, u.unread
+                FROM (SELECT DISTINCT ON (contact_number) contact_number, body, direction, status, created_at
+                      FROM public.sms_messages WHERE user_id=%s
+                      ORDER BY contact_number, created_at DESC) t
+                LEFT JOIN (SELECT contact_number, COUNT(*) AS unread FROM public.sms_messages
+                      WHERE user_id=%s AND direction='in' AND is_read=false GROUP BY contact_number) u
+                  ON u.contact_number=t.contact_number
+                ORDER BY t.created_at DESC LIMIT 300""", (user["id"], user["id"]))
+            rows = cur.fetchall()
+    contacts = _contact_names(user["id"])
+    out = []
+    for r in rows:
+        local = _to_local(r["created_at"])
+        c = contacts.get(r["contact_number"])
+        out.append({"number": r["contact_number"], "name": c["name"] if c else "",
+                    "preview": (("You: " if r["direction"] == "out" else "") + (r["body"] or "[media]"))[:90],
+                    "unread": int(r["unread"] or 0), "at": r["created_at"].isoformat() if r["created_at"] else "",
+                    "time": local.strftime("%d %b, %I:%M %p") if local else ""})
+    return {"threads": out, "from": user.get("phone_number", "")}
+
+@app.get("/api/sms/thread")
+async def sms_thread(request: Request, number: str = ""):
+    user = _sms_require(request)
+    contact = _sms_number(number)
+    if not contact:
+        raise HTTPException(status_code=422, detail="Enter a number with country code, e.g. +12025550123")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT * FROM (SELECT id,direction,body,media,status,created_at FROM public.sms_messages
+                WHERE user_id=%s AND contact_number=%s ORDER BY created_at DESC LIMIT 300) x
+                ORDER BY created_at ASC""", (user["id"], contact))
+            rows = cur.fetchall()
+            cur.execute("""UPDATE public.sms_messages SET is_read=true
+                WHERE user_id=%s AND contact_number=%s AND direction='in' AND is_read=false""", (user["id"], contact))
+    c = _contact_names(user["id"]).get(contact)
+    return {"number": contact, "name": c["name"] if c else "", "messages": [_sms_row(r) for r in rows]}
+
+@app.post("/api/sms/send")
+async def sms_send(request: Request):
+    user = _sms_require(request)
+    data = await request.json()
+    to = _sms_number(data.get("to"))
+    text = str(data.get("text") or "").replace("\r\n", "\n").strip()
+    if not to:
+        raise HTTPException(status_code=422, detail="Enter a number with country code, e.g. +12025550123")
+    if to == _sms_number(user.get("phone_number")):
+        raise HTTPException(status_code=422, detail="You cannot text your own number.")
+    if not text:
+        raise HTTPException(status_code=422, detail="Type a message first.")
+    if len(text) > SMS_MAX_CHARS:
+        raise HTTPException(status_code=422, detail=f"Message is too long (max {SMS_MAX_CHARS} characters).")
+    now_ts = time.time()
+    recent = [t for t in _sms_burst.get(user["id"], []) if now_ts - t < 60]
+    if len(recent) >= 20:
+        raise HTTPException(status_code=429, detail="Too many messages in a minute. Please wait a moment.")
+    recent.append(now_ts); _sms_burst[user["id"]] = recent
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT COUNT(*) AS n FROM public.sms_messages WHERE user_id=%s AND direction='out'
+                AND created_at > NOW() - INTERVAL '24 hours'""", (user["id"],))
+            if int(cur.fetchone()["n"]) >= SMS_DAILY_LIMIT:
+                raise HTTPException(status_code=429, detail="Daily message limit reached. Please contact support.")
+    if not TELNYX_API_KEY:
+        raise HTTPException(status_code=503, detail=SMS_UNAVAILABLE)
+    try:
+        provider_id, status, error = _telnyx_sms_send(user["phone_number"], to, text)
+    except vh.ProviderError as exc:
+        provider_id, status, error = None, "failed", str(exc)[:500]
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO public.sms_messages(user_id,our_number,contact_number,direction,body,status,error,provider_id,is_read)
+                VALUES(%s,%s,%s,'out',%s,%s,%s,%s,true) RETURNING id,direction,body,media,status,created_at""",
+                (user["id"], user["phone_number"], to, text, status, error, provider_id))
+            row = cur.fetchone()
+    if error:
+        log.warning("SMS send failed for %s: %s", user["email"], error)
+        detail = error if user.get("role") == "admin" else SMS_UNAVAILABLE
+        return JSONResponse({"ok": False, "detail": detail, "message": _sms_row(row)}, status_code=502)
+    return {"ok": True, "message": _sms_row(row), "segments": _sms_segments(text)}
+
+@app.delete("/api/sms/thread")
+async def sms_delete_thread(request: Request, number: str = ""):
+    user = _sms_require(request)
+    contact = _sms_number(number)
+    if not contact:
+        raise HTTPException(status_code=422, detail="Invalid number")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public.sms_messages WHERE user_id=%s AND contact_number=%s", (user["id"], contact))
+    return {"ok": True}
+
+@app.post("/webhooks/telnyx/sms")
+async def telnyx_sms_webhook(request: Request):
+    raw = await request.body()
+    if not verify_telnyx_webhook(raw, request.headers.get("telnyx-signature-ed25519", ""),
+                                 request.headers.get("telnyx-timestamp", "")):
+        raise HTTPException(status_code=401, detail="Invalid Telnyx webhook signature")
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    data = body.get("data") or {}
+    event = data.get("event_type") or ""
+    p = data.get("payload") or {}
+    if event == "message.received":
+        if str(p.get("type") or "SMS").upper() not in ("SMS", "MMS"):
+            return {"ok": True}
+        to_list = p.get("to") or []
+        ours = _sms_number((to_list[0] or {}).get("phone_number") if isinstance(to_list, list) and to_list else "")
+        sender = _sms_number((p.get("from") or {}).get("phone_number")) or str((p.get("from") or {}).get("phone_number") or "")[:40]
+        if not ours or not sender:
+            return {"ok": True}
+        media = [{"url": m.get("url"), "type": m.get("content_type")} for m in (p.get("media") or []) if isinstance(m, dict)]
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT id FROM public.dialnytics_users WHERE phone_number=%s AND is_active=TRUE
+                    ORDER BY sms_enabled DESC, created_at ASC LIMIT 1""", (ours,))
+                owner = cur.fetchone()
+                if not owner:
+                    log.info("Inbound SMS to unassigned number %s ignored", ours)
+                    return {"ok": True}
+                cur.execute("""INSERT INTO public.sms_messages(user_id,our_number,contact_number,direction,body,media,status,provider_id)
+                    VALUES(%s,%s,%s,'in',%s,%s::jsonb,'received',%s) ON CONFLICT (provider_id) DO NOTHING""",
+                    (owner["id"], ours, sender, str(p.get("text") or "")[:5000], json.dumps(media), p.get("id")))
+    elif event.startswith("message.") and p.get("id"):
+        to_list = p.get("to") or []
+        status = (to_list[0] or {}).get("status") if isinstance(to_list, list) and to_list else ""
+        errors = p.get("errors") or []
+        error = "; ".join(str(e.get("detail") or e.get("title") or "") for e in errors if isinstance(e, dict))[:500]
+        if status:
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""UPDATE public.sms_messages SET status=%s, error=CASE WHEN %s<>'' THEN %s ELSE error END
+                        WHERE provider_id=%s AND direction='out'""", (status, error, error, p["id"]))
+    return {"ok": True}
+
+@app.post("/users/sms")
+async def toggle_sms(request: Request, email: str = Form(...)):
+    admin = get_current_user(request)
+    if not admin or admin.get("role") != "admin":
+        return RedirectResponse(url="/login", status_code=302)
+    email = email.strip().lower()
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE public.dialnytics_users SET sms_enabled = NOT sms_enabled
+                WHERE email=%s RETURNING sms_enabled, phone_number, provider""", (email,))
+            row = cur.fetchone()
+    if not row:
+        return RedirectResponse(url="/users?error=User+not+found", status_code=302)
+    if email in users_db:
+        users_db[email]["sms_enabled"] = bool(row["sms_enabled"])
+    back = urllib.parse.urlsplit(request.headers.get("referer") or "").path or "/users"
+    if not (back.startswith("/users") or back.startswith("/customers/")):
+        back = "/users"
+    sep = "?"
+    if row["sms_enabled"] and row["phone_number"] and (row["provider"] or "telnyx") == "telnyx":
+        problem = _link_number_to_sms_profile(row["phone_number"])
+        if problem:
+            log.warning("SMS profile link for %s: %s", email, problem)
+            return RedirectResponse(url=back + sep + "error=" + urllib.parse.quote("SMS turned ON, but: " + problem), status_code=302)
+    return RedirectResponse(url=back + sep + "created=1", status_code=302)
 
 # CRM and power dialer: user-scoped, opt-in only, PostgreSQL persistence.
 CRM_STATUSES = {"new", "interested", "callback", "converted", "not_interested"}
