@@ -224,6 +224,7 @@ def _db_user(row):
         "sms_enabled": bool(row.get("sms_enabled", False)),
         "adv_calling": bool(row.get("adv_calling", False)),
         "telnyx_account": tx_key(row.get("telnyx_account") or "t1"),
+        "call_countries": row.get("call_countries") or "",
         "is_demo": bool(row.get("is_demo", False)),
         "account_id": str(row["account_id"]) if row.get("account_id") else "",
         "account_role": "owner" if row.get("account_role") == "owner" else "agent",
@@ -382,6 +383,8 @@ ALTER TABLE public.sms_messages ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.sms_messages FROM anon, authenticated;
 -- 11: second Telnyx account
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS telnyx_account text NOT NULL DEFAULT 't1';
+-- 12: countries a user may call ('' = only the country of their own number)
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS call_countries text NOT NULL DEFAULT '';
 """ + ct.SCHEMA_SQL
 
 def ensure_schema():
@@ -1450,6 +1453,43 @@ def provider_label(u):
         return tx_conf(u.get("telnyx_account") or "t1")["label"]
     return "Telnyx"
 templates.env.globals["provider_label"] = provider_label
+
+# ---- Calling countries: a UK line calls only the UK, a US line only US/Canada,
+# unless the admin allows more for that user.
+CALL_ZONES = {"US": ("1", "US / Canada"), "UK": ("44", "United Kingdom")}
+
+def number_zone(number):
+    digits = re.sub(r"\D", "", str(number or ""))
+    if digits.startswith("00"):
+        digits = digits[2:]
+    for zone, (prefix, _label) in CALL_ZONES.items():
+        if digits.startswith(prefix):
+            return zone
+    return ""
+
+def call_zones(user):
+    """Zones this user may call. Empty list = no limit (admin, or a line outside the known zones)."""
+    if not user or user.get("role") == "admin":
+        return []
+    chosen = [z for z in str(user.get("call_countries") or "").split(",") if z in CALL_ZONES]
+    if chosen:
+        return chosen
+    own = number_zone(user.get("phone_number"))
+    return [own] if own else []
+
+def call_allowed(user, to_number):
+    zones = call_zones(user)
+    return not zones or number_zone(to_number) in zones
+
+def call_zone_text(user):
+    zones = call_zones(user)
+    return " and ".join(CALL_ZONES[z][1] for z in zones) if zones else "any country"
+
+def call_block_message(user):
+    return "Your line can only call " + call_zone_text(user) + ". Ask the admin to allow more countries."
+
+templates.env.globals["call_zones"] = call_zones
+templates.env.globals["call_zone_text"] = call_zone_text
 templates.env.globals["has_sms"] = has_sms
 templates.env.globals["plan_status"] = plan_status
 
@@ -1730,6 +1770,8 @@ async def log_webrtc_call(request: Request):
     data = await request.json()
     to_number = str(data.get("to_number") or "").strip()[:40]
     status = str(data.get("status") or "initiated")[:60]
+    if not call_allowed(user, to_number):
+        return JSONResponse({"success": False, "blocked": True, "error": call_block_message(user)}, status_code=403)
     from_number = user.get("phone_number") or TELNYX_FROM_NUMBER
     provider = user.get("provider") or "telnyx"
     with db_connect() as conn:
@@ -2265,6 +2307,7 @@ def _handle_voicemail_event(event, payload, group_id, background):
 
 ct.setup(db_connect=db_connect, telnyx=_telnyx_request, cs_encode=_cs_encode,
          conf=tx_conf, current_account=tx_current, account_ctx=tx_ctx,
+         call_allowed=call_allowed, call_block_message=call_block_message,
          base_url=PUBLIC_BASE_URL, presence_timeout=40,
          no_worker=os.getenv("TRANSFER_WORKER", "1") == "0")
 
@@ -2537,6 +2580,8 @@ async def twilio_voice(request: Request):
         return _twiml_response(_say("The number you dialed is not valid."), "<Hangup/>")
     if not user.get("phone_number"):
         return _twiml_response(_say("No caller ID is assigned to this account."), "<Hangup/>")
+    if not call_allowed(user, to_number):
+        return _twiml_response(_say("Your line is not allowed to call this country."), "<Hangup/>")
     return _twiml_response(
         f'<Dial callerId="{vh.xml_attr(user["phone_number"])}" answerOnBridge="true" timeLimit="14400">'
         f'<Number>{vh.xml_attr(to_number)}</Number></Dial>')
@@ -3026,6 +3071,29 @@ async def toggle_advanced_calling(request: Request, email: str = Form(...)):
             log.info("Old calling login %s was not deleted", row["credential_id"])
     return RedirectResponse(url=back + "?created=1", status_code=302)
 
+@app.post("/users/call-countries")
+async def set_call_countries(request: Request):
+    """Admin: which countries a user may call. Nothing ticked = country of their own number."""
+    admin = get_current_user(request)
+    if not admin or admin.get("role") != "admin":
+        return RedirectResponse(url="/login", status_code=302)
+    form = await request.form()
+    email = str(form.get("email") or "").strip().lower()
+    zones = [z for z in CALL_ZONES if z in form.getlist("zones")]
+    back = urllib.parse.urlsplit(request.headers.get("referer") or "").path or "/users"
+    if not (back.startswith("/users") or back.startswith("/customers/")):
+        back = "/users"
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE public.dialnytics_users SET call_countries=%s WHERE email=%s RETURNING id",
+                        (",".join(zones), email))
+            row = cur.fetchone()
+    if not row:
+        return RedirectResponse(url=back + "?error=User+not+found", status_code=302)
+    if email in users_db:
+        users_db[email]["call_countries"] = ",".join(zones)
+    return RedirectResponse(url=back + "?created=1", status_code=302)
+
 @app.post("/users/sms")
 async def toggle_sms(request: Request, email: str = Form(...)):
     admin = get_current_user(request)
@@ -3280,6 +3348,7 @@ async def power_queue_authorize(queue_id: uuid.UUID, request: Request):
                 (queue_id,user["id"],item_id))
             row=cur.fetchone()
     if not row: raise HTTPException(status_code=409, detail="Lead is not eligible for calling")
+    if not call_allowed(user, row["phone"]): raise HTTPException(status_code=409, detail=call_block_message(user))
     return {"authorized":True,"phone":row["phone"]}
 
 @app.post("/api/power/queue/{queue_id}/skip")

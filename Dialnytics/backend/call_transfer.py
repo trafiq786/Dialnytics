@@ -440,6 +440,8 @@ def start(user, number, to_user=None, to_number=None):
                 state = "ringing" if status == "free" else "queued"
             elif not to_number:
                 raise TransferError("Pick an agent or enter a valid number", 422)
+            elif D.get("call_allowed") and not D["call_allowed"](user, to_number):
+                raise TransferError(D["call_block_message"](user), 403)
             elif _same_number(to_number, leg["customer_number"]):
                 raise TransferError("That is the same number as the caller", 422)
             group_id = leg["ref_id"] if leg["kind"] == "in" else None
@@ -666,6 +668,8 @@ def on_parked_outbound(payload, find_user):
         reason = "No caller ID"
     elif not number:
         reason = "Invalid number"
+    elif D.get("call_allowed") and not D["call_allowed"](user, number):
+        reason = "Country not allowed"
     if reason:
         log.warning("Advanced outbound refused (%s) for leg %s", reason, agent_leg)
         _hangup(agent_leg)

@@ -27,6 +27,16 @@ const input = document.getElementById('numberInput');
     const MAX_LINES = 4;
     const ADV = cfg.dataset.adv === '1';
     const LEGTAG = cfg.dataset.legtag || '';
+    // Countries this line may call (empty = no limit). US = +1, UK = +44.
+    const ZONES = (cfg.dataset.zones || '').split(',').filter(Boolean);
+    const ZONE_TEXT = cfg.dataset.zonetext || '';
+    function zoneOf(num) {
+        const d = String(num || '').replace(/\D/g, '');
+        if (d.startsWith('44')) return 'UK';
+        if (d.startsWith('1')) return 'US';
+        return '';
+    }
+    function zoneAllowed(num) { return !ZONES.length || ZONES.includes(zoneOf(num)); }
     let ringback = null;
     let onHold = false;
     let muted = false;
@@ -597,6 +607,7 @@ function markEnded(reason) {
         // Country code is added from the user's own line (US line -> +1, UK line -> +44).
         number = window.DNNumber ? window.DNNumber.toE164(number) : (number.startsWith('+') ? number : '+' + number.replace(/\D/g, ''));
         if (!/^\+[1-9]\d{6,14}$/.test(number)) return setStatus('Check the number: ' + number, 'var(--danger)');
+        if (!zoneAllowed(number)) return setStatus('Your line can only call ' + ZONE_TEXT, 'var(--danger)');
         if (!client) return setStatus('WebRTC is not ready', 'var(--danger)');
         ended = false;
         lastState = '';
@@ -658,6 +669,12 @@ function markEnded(reason) {
             body: JSON.stringify({ to_number: number, status: 'initiated' })
         });
         const saved = await res.json();
+        if (res.status === 403 && saved.blocked) {
+            try { if (placed && placed.hangup) placed.hangup(); } catch (e) {}
+            markEnded('Not allowed');
+            setStatus(saved.error || 'This country is not allowed', 'var(--danger)');
+            return;
+        }
         logId = saved.id || (saved.call && saved.call.id) || null;
         if (placed) {
             placed._dnLog = logId;
