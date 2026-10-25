@@ -19,7 +19,15 @@ const input = document.getElementById('numberInput');
     const declinedGroupIds = new Set();   // incoming calls the user already declined
     let incomingSequence = 0;
     let placing = false;
-    let heldCall = null;
+    let heldCall = null;          // newest held call (kept for older code / Power Dialer)
+    const heldCalls = [];         // every call on hold, newest last
+    let confCalls = [];           // other calls merged with activeCall (conference)
+    let mixer = null;             // WebAudio mix used for the conference
+    let xfer = null;              // transfer in progress {id, call, name, timer}
+    const MAX_LINES = 4;
+    const ADV = cfg.dataset.adv === '1';
+    const LEGTAG = cfg.dataset.legtag || '';
+    let ringback = null;
     let onHold = false;
     let muted = false;
     let client = null;
@@ -55,15 +63,18 @@ const input = document.getElementById('numberInput');
         timerId = null;
     }
     function startTimer() {
-        if (talkStart) return;
-        talkStart = Date.now();
-        // Calling Preferences: record every call automatically.
-        if (cfg.dataset.autorec === '1' && RECORDING_OK) {
-            setTimeout(() => {
-                if (activeCall && !ended && (!recorder || recorder.state === 'inactive')) toggleRec();
-            }, 800);
+        stopRingback();
+        if (!talkStart) {
+            talkStart = Date.now();
+            // Calling Preferences: record every call automatically.
+            if (cfg.dataset.autorec === '1' && RECORDING_OK) {
+                setTimeout(() => {
+                    if (activeCall && !ended && (!recorder || recorder.state === 'inactive')) toggleRec();
+                }, 800);
+            }
         }
-        document.getElementById('activitySub').textContent = '00:00';
+        if (timerId) return;
+        document.getElementById('activitySub').textContent = clock(Math.floor((Date.now() - talkStart) / 1000));
         timerId = setInterval(() => {
             const sec = Math.floor((Date.now() - talkStart) / 1000);
             document.getElementById('activitySub').textContent = clock(sec);
@@ -92,6 +103,12 @@ function markEnded(reason) {
 
     stopRing();
     stopTimer();
+    stopRingback();
+    if (xfer && (!activeCall || xfer.call === activeCall)) {
+        if (!reason || reason === 'Call ended') reason = xfer.done ? 'Transferred to ' + xfer.name : reason;
+        clearXfer();
+    }
+    const wasAdvOut = ADV && activeCall && !talkStart && !String(activeCall.direction || '').toLowerCase().startsWith('in');
 
     if (answerHold) {
         clearInterval(answerHold);
@@ -134,8 +151,17 @@ function markEnded(reason) {
     window.dispatchEvent(new CustomEvent('dialnytics:call-ended', {
         detail: { reason: message, seconds: sec || 0 }
     }));
+    if (wasAdvOut) showAdvancedResult();
 
-    if (heldCall) {
+    // Conference: the next person becomes the main line, the others stay.
+    if (confCalls.length) {
+        const next = confCalls.shift();
+        promoteLeg(next);
+        return;
+    }
+    teardownMixer();
+
+    if (heldCalls.length) {
         resumeHeld();
         return;
     }
@@ -166,7 +192,15 @@ function markEnded(reason) {
         if (!call || call._endWatch) return;
         call._endWatch = true;
         const pc = findPc(call);
-        const end = () => { if (!ended && !onHold) markEnded(endReason(call)); };
+        const end = () => {
+            // Only end the line this listener belongs to (other lines may be on hold / in a conference).
+            if (activeCall !== call) {
+                const side = sideLegById(call.id);
+                if (side) dropLeg(side, 'left the call');
+                return;
+            }
+            if (!ended && !onHold) markEnded(endReason(call));
+        };
         if (pc) {
             pc.addEventListener('connectionstatechange', () => {
                 if (pc.connectionState === 'closed' || pc.connectionState === 'failed') end();
@@ -489,11 +523,12 @@ function markEnded(reason) {
                     showIncoming(call);
                     return;
                 }
-                if (ended && !heldCall) return;
-                if (heldCall && call.id === heldCall.id) {
-                    if (callIsDead(call)) heldCall = null;
+                const sideLeg = sideLegById(call.id);
+                if (sideLeg) {
+                    if (callIsDead(call)) dropLeg(sideLeg, 'left the call');
                     return;
                 }
+                if (ended && !heldCalls.length && !confCalls.length) return;
                 if (!activeCall || activeCall.id === call.id) activeCall = call;
                 if (!onHold && callIsDead(call)) markEnded(endReason(call));
                 else showState(st);
@@ -545,12 +580,16 @@ function markEnded(reason) {
                 }
                 activeCall = twilioShim(tw, number, false);
             } else {
-                activeCall = client.newCall({
+                const opts = {
                     destinationNumber: number,
                     callerNumber: FROM,
                     audio: true,
                     remoteElement: 'remoteAudio'
-                });
+                };
+                // Advanced calling: the server places the call, so it can be transferred.
+                if (ADV && LEGTAG) opts.customHeaders = [{ name: 'X-DN-Leg', value: LEGTAG }];
+                activeCall = client.newCall(opts);
+                if (ADV) startRingback();
             }
         } catch (err) {
             placing = false;
@@ -559,7 +598,10 @@ function markEnded(reason) {
             return;
         }
         placing = false;
+        const placed = activeCall;
+        if (activeCall) activeCall._dnNumber = number;
         watchCall(activeCall);
+        renderLines();
         const res = await fetch('/api/call-log', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -567,11 +609,24 @@ function markEnded(reason) {
         });
         const saved = await res.json();
         logId = saved.id || (saved.call && saved.call.id) || null;
+        if (placed) {
+            placed._dnLog = logId;
+            if (placed._dn && !placed._dn.logId) placed._dn.logId = logId;
+        }
         if (ended && logId) saveDuration('failed');
     }
     
 function hangup() {
     const call = activeCall;
+    if (confCalls.length) {
+        const others = confCalls.splice(0);
+        teardownMixer();
+        others.forEach((leg) => {
+            detachLegAudio(leg);
+            try { if (leg.hangup) leg.hangup(); } catch (err) {}
+            finishLeg(leg);
+        });
+    }
 
     if (call && typeof call.hangup === 'function') {
         try {
@@ -587,16 +642,168 @@ function hangup() {
     function transferCall() {
         if (!activeCall) return setStatus('Transfer works only during a call', 'var(--danger)');
         if (activeCall._twilio) return setStatus('Transfer is not available on this line yet', 'var(--danger)');
-        const st = String(activeCall.state || '').toLowerCase();
-        if (st && st !== 'active' && st !== 'held' && st !== 'ringing' && st !== 'early') {
-            setStatus('Transfer works only when the call is active', 'var(--danger)');
+        if (xfer) return setStatus('A transfer is already in progress');
+        if (confCalls.length) return setStatus('End the conference before transferring', 'var(--danger)');
+        if (!talkStart) return setStatus('Transfer works once the call is answered', 'var(--danger)');
+        openTransferPicker();
+    }
+    function esc(text) {
+        return String(text == null ? '' : text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    async function openTransferPicker() {
+        composeMode = 'transfer';
+        hidePanels();
+        document.getElementById('transferView').hidden = false;
+        const box = document.getElementById('transferList');
+        box.innerHTML = '<p class="xfer-empty">Loading team...</p>';
+        try {
+            const res = await fetch('/api/transfer/targets', { cache: 'no-store' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Could not load the team');
+            const agents = data.agents || [];
+            const labels = { free: 'Available', busy: 'On a call · will wait', offline: 'Offline' };
+            box.innerHTML = agents.length ? agents.map((a) =>
+                '<button type="button" class="xfer-agent" data-id="' + esc(a.id) + '" data-name="' + esc(a.name) + '"' + (a.status === 'offline' ? ' disabled' : '') + '>' +
+                '<div class="call-avatar">' + esc((a.name || '?').trim().charAt(0).toUpperCase()) + '</div>' +
+                '<div class="call-meta"><strong>' + esc(a.name) + '</strong><span><i class="xfer-dot ' + esc(a.status) + '"></i>' + esc(labels[a.status] || a.status) + '</span></div></button>'
+            ).join('') : '<p class="xfer-empty">No other agents in your company yet.</p>';
+            box.querySelectorAll('.xfer-agent:not([disabled])').forEach((b) => b.addEventListener('click', () => {
+                startTransfer({ to_user: b.dataset.id }, b.dataset.name);
+            }));
+        } catch (err) {
+            box.innerHTML = '<p class="xfer-empty">' + esc(err.message) + '</p>';
+        }
+    }
+    async function startTransfer(body, name) {
+        const call = activeCall;
+        if (!call) return;
+        body.number = legNumber(call) || (document.getElementById('inCallNumber') || {}).textContent || '';
+        composeMode = '';
+        showInCall(legNumber(call) || body.number);
+        setStatus('Starting transfer...');
+        let data = {};
+        try {
+            const res = await fetch('/api/transfer', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+            });
+            data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || 'Transfer failed');
+        } catch (err) {
+            setStatus(err.message, 'var(--danger)');
             return;
         }
-        openCompose('transfer');
+        if (activeCall !== call) return;
+        xfer = { id: data.id, call: call, name: data.to_name || name || 'agent', done: false, timer: null };
+        if (!onHold) toggleHold();          // you step away; the caller hears hold music
+        renderXfer(data);
+        xfer.timer = setInterval(pollXfer, 2000);
+    }
+    function renderXfer(t) {
+        const bar = document.getElementById('xferBar');
+        if (!bar) return;
+        if (!xfer) { bar.hidden = true; bar.innerHTML = ''; return; }
+        if (t && t.status) xfer.last = t; else t = xfer.last || { status: 'ringing' };
+        let text = '';
+        if (t.status === 'queued') {
+            const left = Math.max(0, t.seconds_left || 0);
+            text = '<strong>' + esc(xfer.name) + ' is on another call</strong>Waiting for them to finish · ' + clock(left) + ' left. The caller hears hold music.';
+        } else {
+            text = '<strong>Transferring to ' + esc(xfer.name) + '...</strong>Ringing. The caller hears hold music.';
+        }
+        bar.innerHTML = text + '<div class="xfer-actions"><button type="button" onclick="cancelTransfer()">Cancel transfer</button></div>';
+        bar.hidden = false;
+        setStatus(t.status === 'queued' ? 'Waiting for ' + xfer.name : 'Transferring to ' + xfer.name);
+    }
+    async function pollXfer() {
+        if (!xfer) return;
+        const current = xfer;
+        let t = null;
+        try {
+            const res = await fetch('/api/transfer/' + encodeURIComponent(current.id), { cache: 'no-store' });
+            if (res.ok) t = await res.json();
+        } catch (e) {}
+        if (!t || xfer !== current) return;
+        if (t.status === 'queued' || t.status === 'ringing') return renderXfer(t);
+        if (t.status === 'answered' || t.status === 'done') {
+            current.done = true;
+            const call = current.call;
+            setStatus('Transferred to ' + current.name);
+            // The server already released your side of the call.
+            setTimeout(() => {
+                if (activeCall === call && !ended) {
+                    try { if (call.hangup) call.hangup(); } catch (e) {}
+                    markEnded('Transferred to ' + current.name);
+                }
+            }, 1500);
+            clearInterval(current.timer);
+            return;
+        }
+        // failed / cancelled: the caller is still with you
+        const why = t.reason || 'Transfer did not go through';
+        clearXfer();
+        if (/customer hung up/i.test(why)) {
+            if (activeCall === current.call) { onHold = false; markEnded('Caller hung up'); }
+            return;
+        }
+        if (activeCall === current.call && onHold) toggleHold();
+        setStatus(why + ' · the caller is back with you', 'var(--danger)');
+    }
+    async function cancelTransfer() {
+        if (!xfer) return;
+        const current = xfer;
+        try {
+            await fetch('/api/transfer/' + encodeURIComponent(current.id) + '/cancel', { method: 'POST' });
+        } catch (e) {}
+        clearXfer();
+        if (activeCall === current.call && onHold) toggleHold();
+        setStatus('Transfer cancelled · the caller is back with you');
+    }
+    function clearXfer() {
+        if (xfer && xfer.timer) clearInterval(xfer.timer);
+        xfer = null;
+        renderXfer({});
+    }
+    async function showAdvancedResult() {
+        try {
+            await new Promise((r) => setTimeout(r, 900));
+            const res = await fetch('/api/advanced-call/result', { cache: 'no-store' });
+            const data = await res.json();
+            if (data && data.status === 'failed' && data.reason && !activeCall) {
+                setStatus(data.reason);
+                const title = document.getElementById('activityTitle');
+                if (title) title.textContent = data.reason;
+            }
+        } catch (e) {}
+    }
+    // Ringback tone for Advanced calls (the server dials, so no carrier ringback).
+    function startRingback() {
+        stopRingback();
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        try {
+            const ctx = new Ctx();
+            const gain = ctx.createGain();
+            gain.gain.value = 0;
+            gain.connect(ctx.destination);
+            [440, 480].forEach((f) => { const o = ctx.createOscillator(); o.frequency.value = f; o.connect(gain); o.start(); });
+            const cycle = () => {
+                const t = ctx.currentTime;
+                gain.gain.setValueAtTime(0.035, t);
+                gain.gain.setValueAtTime(0, t + 2);
+            };
+            cycle();
+            ringback = { ctx: ctx, timer: setInterval(cycle, 6000) };
+        } catch (e) { ringback = null; }
+    }
+    function stopRingback() {
+        if (!ringback) return;
+        clearInterval(ringback.timer);
+        try { ringback.ctx.close(); } catch (e) {}
+        ringback = null;
     }
     function openCompose(mode) {
         composeMode = mode;
-        document.getElementById('composeTitle').textContent = mode === 'transfer' ? 'Transfer call' : 'New call';
+        document.getElementById('composeTitle').textContent = mode === 'transfer' ? 'Transfer to a number' : 'Add a call';
         document.getElementById('composeInput').value = '';
         hidePanels();
         document.getElementById('composeView').hidden = false;
@@ -611,7 +818,8 @@ function hangup() {
     function backToCall() {
         document.getElementById('composeView').hidden = true;
         document.getElementById('callsView').hidden = true;
-        if (composeMode === 'add' && heldCall && !activeCall) resumeHeld();
+        document.getElementById('transferView').hidden = true;
+        if (composeMode === 'add' && heldCalls.length && !activeCall) resumeHeld();
         else if (activeCall) showInCall(legNumber(activeCall) || input.value);
         else showDialPad();
         composeMode = '';
@@ -623,36 +831,95 @@ function hangup() {
         number = window.DNNumber ? window.DNNumber.toE164(number) : (number.startsWith('+') ? number : '+' + number.replace(/\D/g, ''));
         if (!/^\+[1-9]\d{6,14}$/.test(number)) return setStatus('Check the number: ' + number, 'var(--danger)');
         if (composeMode === 'transfer') {
-            if (activeCall && activeCall.transfer) activeCall.transfer(number);
-            composeMode = '';
-            showInCall(legNumber(activeCall) || input.value);
-            setStatus('Transferring to ' + number);
+            if (!activeCall) return backToCall();
+            startTransfer({ to_number: number }, number);
             return;
         }
         composeMode = '';
         input.value = number;
         makeCall();
     }
+    function syncHeld() {
+        heldCall = heldCalls.length ? heldCalls[heldCalls.length - 1] : null;
+    }
+    // Each line keeps its own log id, timer and mute state.
+    function stash(call) {
+        if (!call) return;
+        call._dn = { logId: logId, talkStart: talkStart, muted: muted };
+    }
+    function unstash(call) {
+        const d = (call && call._dn) || {};
+        logId = d.logId || (call && call._dnLog) || null;
+        talkStart = d.talkStart || Date.now();
+        muted = false;
+        if (call) call._dn = undefined;
+    }
+    function sideLegById(id) {
+        if (!id) return null;
+        return heldCalls.find((c) => c.id === id) || confCalls.find((c) => c.id === id) || null;
+    }
+    function finishLeg(call) {
+        const d = (call && call._dn) || {};
+        const id = d.logId || null;
+        if (!id) return;
+        const sec = d.talkStart ? Math.max(0, Math.round((Date.now() - d.talkStart) / 1000)) : 0;
+        call._dn.logId = null;
+        fetch('/api/call-log/' + id, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: sec ? 'completed' : 'failed', duration: sec })
+        }).catch(() => {});
+    }
+    function dropLeg(call, why) {
+        let i = heldCalls.indexOf(call);
+        if (i >= 0) { heldCalls.splice(i, 1); syncHeld(); }
+        i = confCalls.indexOf(call);
+        const wasConf = i >= 0;
+        if (wasConf) confCalls.splice(i, 1);
+        detachLegAudio(call);
+        finishLeg(call);
+        if (wasConf) buildMixer();
+        renderLines();
+        const view = document.getElementById('callsView');
+        if (view && !view.hidden) openCallList();
+        setStatus((legNumber(call) || 'A caller') + ' ' + (why || 'left the call'));
+    }
+    function lineCount() {
+        return (activeCall ? 1 : 0) + heldCalls.length + confCalls.length;
+    }
     function addCall() {
         if (!activeCall) return setStatus('No active call', 'var(--danger)');
         if (activeCall._twilio) return setStatus('Add Call is not available on this line yet', 'var(--danger)');
-        if (heldCall) return setStatus('A call is already on hold', 'var(--danger)');
-        try { if (activeCall.hold) activeCall.hold(); } catch (err) {}
-        heldCall = activeCall;
+        if (xfer) return setStatus('Finish the transfer first', 'var(--danger)');
+        if (lineCount() >= MAX_LINES) return setStatus('You can have up to ' + MAX_LINES + ' calls at once', 'var(--danger)');
+        // Everyone you are talking to (one person or a conference) goes on hold.
+        const group = [activeCall].concat(confCalls.splice(0));
+        teardownMixer();
+        stash(activeCall);
+        group.forEach((call) => {
+            try { if (call.hold) call.hold(); } catch (err) {}
+            detachLegAudio(call);
+            if (!call._dn) call._dn = { logId: call._dnLog || null, talkStart: Date.now(), muted: false };
+            heldCalls.push(call);
+        });
+        syncHeld();
+        stopTimer();
         activeCall = null;
         onHold = false;
         openCompose('add');
     }
-    function resumeHeld() {
-        if (!heldCall) return showDialPad();
-        activeCall = heldCall;
-        heldCall = null;
+    function resumeHeld(target) {
+        const call = (target && heldCalls.includes(target)) ? target : heldCalls[heldCalls.length - 1];
+        if (!call) return showDialPad();
+        heldCalls.splice(heldCalls.indexOf(call), 1);
+        syncHeld();
+        activeCall = call;
+        unstash(call);
         ended = false;
         activeConfirmed = true;
         lastState = '';
         onHold = false;
-        muted = false;
         try { if (activeCall.unhold) activeCall.unhold(); } catch (err) {}
+        setMic(activeCall, false);
         const audio = document.getElementById('remoteAudio');
         if (audio && activeCall.remoteStream) {
             audio.srcObject = activeCall.remoteStream;
@@ -660,36 +927,201 @@ function hangup() {
         }
         showInCall(legNumber(activeCall));
         showState('active');
-        setStatus('Resumed held call');
+        startTimer();
+        setStatus('Talking to ' + (legNumber(activeCall) || 'caller') + (heldCalls.length ? ' · ' + heldCalls.length + ' on hold' : ''));
+    }
+    // Put the current call on hold and talk to another held call.
+    function swapTo(id) {
+        const target = heldCalls.find((c) => c.id === id) || heldCalls[0];
+        if (!target) return;
+        if (confCalls.length) return setStatus('End the conference first, or merge everyone', 'var(--danger)');
+        if (xfer) return setStatus('Finish the transfer first', 'var(--danger)');
+        if (activeCall) {
+            const cur = activeCall;
+            stash(cur);
+            try { if (cur.hold) cur.hold(); } catch (err) {}
+            stopTimer();
+            heldCalls.unshift(cur);
+            activeCall = null;
+            onHold = false;
+        }
+        resumeHeld(target);
+    }
+    function swapCalls() {
+        if (heldCalls.length) swapTo(heldCalls[heldCalls.length - 1].id);
+    }
+    // Conference: everyone on the call list hears everyone.
+    function mergeCalls() {
+        if (!activeCall || !heldCalls.length) return setStatus('Add a second call first, then merge', 'var(--danger)');
+        if (activeCall._twilio) return setStatus('Conference is not available on this line yet', 'var(--danger)');
+        if (xfer) return setStatus('Finish the transfer first', 'var(--danger)');
+        if (onHold) toggleHold();
+        heldCalls.splice(0).forEach((call) => {
+            try { if (call.unhold) call.unhold(); } catch (err) {}
+            confCalls.push(call);
+        });
+        syncHeld();
+        setTimeout(buildMixer, 700);       // let the un-hold finish first
+        showInCall(legNumber(activeCall));
+        setStatus('Conference · ' + (confCalls.length + 1) + ' callers');
+    }
+    function promoteLeg(call) {
+        activeCall = call;
+        unstash(call);
+        ended = false;
+        activeConfirmed = true;
+        lastState = '';
+        onHold = false;
+        detachLegAudio(call);
+        const audio = document.getElementById('remoteAudio');
+        if (audio && call.remoteStream) { audio.srcObject = call.remoteStream; audio.play().catch(() => {}); }
+        buildMixer();
+        showInCall(legNumber(call));
+        showState('active');
+        startTimer();
+        setStatus(confCalls.length ? 'Conference · ' + (confCalls.length + 1) + ' callers' : 'Talking to ' + (legNumber(call) || 'caller'));
+    }
+    function audioSender(call) {
+        const pc = findPc(call);
+        if (!pc || !pc.getSenders) return null;
+        return pc.getSenders().find((s) => s.track ? s.track.kind === 'audio' : false) ||
+               pc.getSenders().find((s) => !s.track) || null;
+    }
+    function attachLegAudio(call) {
+        if (!call || !call.remoteStream || call._audioEl) return;
+        const el = document.createElement('audio');
+        el.autoplay = true;
+        el.setAttribute('playsinline', '');
+        el.srcObject = call.remoteStream;
+        el.style.display = 'none';
+        document.body.appendChild(el);
+        el.play().catch(() => {});
+        call._audioEl = el;
+    }
+    function detachLegAudio(call) {
+        if (!call || !call._audioEl) return;
+        try { call._audioEl.pause(); call._audioEl.srcObject = null; call._audioEl.remove(); } catch (e) {}
+        call._audioEl = null;
+    }
+    function teardownMixer() {
+        if (!mixer) return;
+        mixer.legs.forEach((leg) => {
+            const sender = audioSender(leg);
+            if (sender && leg._origTrack && leg._origTrack.readyState === 'live') {
+                try { sender.replaceTrack(leg._origTrack); } catch (e) {}
+            }
+        });
+        try { mixer.ctx.close(); } catch (e) {}
+        mixer.legs.forEach(detachLegAudio);
+        mixer = null;
+    }
+    // Each caller is sent: your microphone + every other caller.
+    function buildMixer() {
+        teardownMixer();
+        const legs = [activeCall].concat(confCalls).filter(Boolean);
+        renderLines();
+        if (legs.length < 2) return;
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return setStatus('This browser cannot mix a conference', 'var(--danger)');
+        legs.forEach((leg) => {
+            const sender = audioSender(leg);
+            if (sender && sender.track && !leg._origTrack) leg._origTrack = sender.track;
+        });
+        const mic = activeCall._origTrack;
+        if (!mic) return setStatus('Microphone not ready for the conference', 'var(--danger)');
+        try {
+            const ctx = new Ctx();
+            const micSrc = ctx.createMediaStreamSource(new MediaStream([mic]));
+            const remotes = legs.map((leg) => {
+                if (leg !== activeCall) attachLegAudio(leg);     // you hear every caller
+                try { return leg.remoteStream ? ctx.createMediaStreamSource(leg.remoteStream) : null; }
+                catch (e) { return null; }
+            });
+            legs.forEach((leg, i) => {
+                const dest = ctx.createMediaStreamDestination();
+                micSrc.connect(dest);
+                remotes.forEach((r, j) => { if (r && j !== i) r.connect(dest); });
+                const sender = audioSender(leg);
+                if (sender) sender.replaceTrack(dest.stream.getAudioTracks()[0]).catch(() => {});
+            });
+            const rec = ctx.createMediaStreamDestination();
+            micSrc.connect(rec);
+            remotes.forEach((r) => { if (r) r.connect(rec); });
+            if (ctx.state !== 'running') ctx.resume().catch(() => {});
+            mixer = { ctx: ctx, legs: legs, rec: rec.stream };
+            const main = document.getElementById('remoteAudio');
+            if (main && activeCall.remoteStream && main.srcObject !== activeCall.remoteStream) {
+                main.srcObject = activeCall.remoteStream;
+                main.play().catch(() => {});
+            }
+        } catch (err) {
+            setStatus('Conference audio failed: ' + err.message, 'var(--danger)');
+        }
+    }
+    // Small bar under the number: lines on hold / conference + quick actions.
+    function renderLines() {
+        const bar = document.getElementById('lineBar');
+        if (!bar) return;
+        const parts = [];
+        if (confCalls.length) parts.push('<span class="line-chip">Conference · ' + (confCalls.length + 1) + ' callers</span>');
+        if (heldCalls.length) {
+            parts.push('<span class="line-chip">' + heldCalls.length + ' on hold</span>');
+            if (activeCall && !confCalls.length) parts.push('<button type="button" onclick="swapCalls()">Swap</button>');
+            if (activeCall) parts.push('<button type="button" class="primary" onclick="mergeCalls()">Merge</button>');
+        }
+        bar.innerHTML = parts.join('');
+        bar.hidden = !parts.length;
+        const num = document.getElementById('inCallNumber');
+        if (num && activeCall) {
+            if (confCalls.length) num.textContent = 'Conference';
+            else if (num.textContent === 'Conference') num.textContent = legNumber(activeCall) || callerOf(activeCall);
+        }
     }
     function closeCalls() {
         if (activeCall) showInCall(legNumber(activeCall) || input.value);
-        else if (heldCall) resumeHeld();
+        else if (heldCalls.length) resumeHeld();
         else showDialPad();
     }
-    function hangupLeg(role) {
-        if (role === 'held' && heldCall) {
-            try { if (heldCall.hangup) heldCall.hangup(); } catch (err) {}
-            heldCall = null;
-            openCallList();
+    function hangupLeg(id) {
+        if (activeCall && (id === 'active' || id === activeCall.id)) {
+            if (confCalls.length) {         // leave the others talking
+                const call = activeCall;
+                try { if (call.hangup) call.hangup(); } catch (err) {}
+                markEnded('Call ended');
+                return;
+            }
+            hangup();
             return;
         }
-        hangup();
+        const leg = sideLegById(id);
+        if (!leg) return openCallList();
+        try { if (leg.hangup) leg.hangup(); } catch (err) {}
+        dropLeg(leg, 'ended');
+        if (activeCall || heldCalls.length) openCallList();
+        else showDialPad();
     }
     function openCallList() {
-        const legs = [];
-        if (activeCall) legs.push({ role: 'active', number: legNumber(activeCall) || input.value, status: onHold ? 'On hold' : 'Active' });
-        if (heldCall) legs.push({ role: 'held', number: legNumber(heldCall), status: 'On hold' });
+        const row = (call, status, buttons) => '<div class="call-row"><div class="call-avatar"><svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-3.3 0-8 1.7-8 5v1h16v-1c0-3.3-4.7-5-8-5z"/></svg></div><div class="call-meta"><strong>' +
+            esc(legNumber(call) || 'Caller') + '</strong><span>' + status + '</span></div>' + buttons +
+            '<button type="button" class="call-hang" title="End this call" onclick="hangupLeg(\'' + esc(call.id || 'active') + '\')"><svg width="16" height="16" viewBox="0 0 24 24" fill="#fb7185"><path d="M12 9c-1.7 0-3.2.25-4.6.72v2.7c0 .4-.24.76-.6.92-.9.4-1.7.95-2.4 1.6-.2.18-.46.28-.74.28-.27 0-.53-.11-.71-.29L.54 12.5a1 1 0 0 1 0-1.41C3.3 8.4 7.45 7 12 7s8.7 1.4 11.46 4.09a1 1 0 0 1 0 1.41l-2.41 2.43c-.18.18-.44.29-.71.29-.28 0-.54-.1-.74-.28-.7-.65-1.5-1.2-2.4-1.6a1 1 0 0 1-.6-.92V9.72A15.2 15.2 0 0 0 12 9z"/></svg></button></div>';
+        const rows = [];
+        if (activeCall) rows.push(row(activeCall, confCalls.length ? 'In conference' : (onHold ? 'On hold' : 'Talking'), ''));
+        confCalls.forEach((c) => rows.push(row(c, 'In conference', '')));
+        heldCalls.slice().reverse().forEach((c) => rows.push(row(c, 'On hold',
+            confCalls.length ? '' : '<button type="button" class="call-swap" onclick="swapTo(\'' + esc(c.id) + '\')">Talk</button>')));
+        const actions = [];
+        if (activeCall && heldCalls.length) actions.push('<button type="button" class="primary" onclick="mergeCalls()">Merge all into conference</button>');
+        if (activeCall && lineCount() < MAX_LINES && !activeCall._twilio) actions.push('<button type="button" onclick="addCall()">+ Add call</button>');
         const box = document.getElementById('callsList');
-        box.innerHTML = legs.length ? legs.map((leg) =>
-            '<div class="call-row"><div class="call-avatar"><svg width="18" height="18" viewBox="0 0 24 24" fill="#fff"><path d="M12 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0 2c-3.3 0-8 1.7-8 5v1h16v-1c0-3.3-4.7-5-8-5z"/></svg></div><div class="call-meta"><strong>' +
-            leg.number + '</strong><span>' + leg.status + '</span></div><button type="button" class="call-hang" onclick="hangupLeg(\'' + leg.role + '\')"><svg width="16" height="16" viewBox="0 0 24 24" fill="#fb7185"><path d="M12 9c-1.7 0-3.2.25-4.6.72v2.7c0 .4-.24.76-.6.92-.9.4-1.7.95-2.4 1.6-.2.18-.46.28-.74.28-.27 0-.53-.11-.71-.29L.54 12.5a1 1 0 0 1 0-1.41C3.3 8.4 7.45 7 12 7s8.7 1.4 11.46 4.09a1 1 0 0 1 0 1.41l-2.41 2.43c-.18.18-.44.29-.71.29-.28 0-.54-.1-.74-.28-.7-.65-1.5-1.2-2.4-1.6a1 1 0 0 1-.6-.92V9.72A15.2 15.2 0 0 0 12 9z"/></svg></button></div>'
-        ).join('') : '<p style="color:var(--text-muted)">No calls in this session</p>';
+        box.innerHTML = rows.length
+            ? rows.join('') + (actions.length ? '<div class="calls-actions">' + actions.join('') + '</div>' : '')
+            : '<p style="color:var(--text-muted)">No calls in this session</p>';
         hidePanels();
         document.getElementById('callsView').hidden = false;
     }
     // Record both sides of the call (caller + agent) into one track.
     function recordingStream(call) {
+        if (mixer && mixer.rec) return mixer.rec;
         const remote = call.remoteStream;
         const local = call.localStream || (call.options && call.options.localStream) || null;
         const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -781,13 +1213,15 @@ function hangup() {
     }
     let composeMode = '';
     function legNumber(call) {
-        return (call && call.options && call.options.destinationNumber) || '';
+        return (call && (call._dnNumber || (call.options && call.options.destinationNumber))) || '';
     }
     function hidePanels() {
         document.getElementById('padBody').hidden = true;
         document.getElementById('inCallView').hidden = true;
         document.getElementById('composeView').hidden = true;
         document.getElementById('callsView').hidden = true;
+        const tv = document.getElementById('transferView');
+        if (tv) tv.hidden = true;
         const incoming = document.getElementById('incomingView');
         if (incoming) incoming.hidden = true;
     }
@@ -874,6 +1308,9 @@ function hangup() {
                 ? group.from : callerOf(call);
             const num = document.getElementById('incomingNumber');
             if (num) num.textContent = number;
+            const label = document.getElementById('incomingState');
+            if (label) label.textContent = group.transfer_from ? 'Transferred call · from ' + group.transfer_from : 'Incoming call';
+            call._dnNumber = number;
             rtcStatus.textContent = 'Incoming';
             rtcStatus.style.color = 'var(--success)';
             setStatus('Incoming call');
@@ -897,7 +1334,8 @@ function hangup() {
         onHold = false;
         muted = false;
         activeCall = call;
-        const num = callerOf(call);
+        const num = call._dnNumber || callerOf(call);
+        call._dnNumber = num;
         if (num && /^\+?\d[\d\s()-]{5,}$/.test(num)) input.value = num;
         try { call.answer(); } catch (err) {
             setStatus(err.message || 'Could not answer', 'var(--danger)');
@@ -922,6 +1360,20 @@ function hangup() {
         }
         if (!call || !groupId) return;
         stopRing();
+        if (String(groupId).startsWith('x-')) {
+            // A teammate's transfer: only your leg ends, the caller goes back to them.
+            if (call.id) declinedIncomingIds.add(call.id);
+            fetch('/api/transfer/' + encodeURIComponent(String(groupId).slice(2)) + '/decline', { method: 'POST' }).catch(() => {});
+            try { if (call.hangup) call.hangup(); } catch (e) {}
+            incomingSequence++;
+            incomingCall = null;
+            incomingGroupId = null;
+            incomingLookup = null;
+            showDialPad();
+            rtcStatus.textContent = 'Ready';
+            setStatus('Transfer declined · it went back to your teammate');
+            return;
+        }
         declinedGroupIds.add(String(groupId));
         if (call.id) declinedIncomingIds.add(call.id);
         setStatus('Declining incoming call...');
@@ -961,6 +1413,8 @@ function hangup() {
         document.getElementById('dtmfDisplay').textContent = '';
         document.getElementById('dtmfPad').hidden = true;
         document.getElementById('keypadBtn').classList.remove('on');
+        renderLines();
+        if (xfer) renderXfer(null);
     }
     function showDialPad() {
         hidePanels();
@@ -976,7 +1430,10 @@ function hangup() {
         const muteLabel = document.getElementById('muteLabel');
         if (muteLabel) muteLabel.textContent = 'Mute';
         const back = document.getElementById('backHeld');
-        if (back) back.hidden = !heldCall;
+        if (back) {
+            back.hidden = !heldCalls.length;
+            back.textContent = heldCalls.length > 1 ? 'Back to held calls (' + heldCalls.length + ')' : 'Back to held call';
+        }
         onHold = false;
         muted = false;
     }
@@ -990,6 +1447,7 @@ function hangup() {
     function toggleHold() {
         if (!activeCall) return;
         if (activeCall._twilio) return setStatus('Hold is not available on this line yet', 'var(--danger)');
+        if (confCalls.length) return setStatus('Use Add Call to put the whole conference on hold', 'var(--danger)');
         onHold = !onHold;
         rtpStall = 0;
         iceStall = 0;
@@ -1086,6 +1544,12 @@ function hangup() {
         if (!ended) rtcStatus.textContent = document.getElementById('activityTitle').textContent;
     }
     setInterval(() => {
+        heldCalls.concat(confCalls).forEach((leg) => { if (callIsDead(leg)) dropLeg(leg, 'left the call'); });
+        if (mixer && activeCall && activeCall.remoteStream) {
+            // Un-hold of another line can steal the main speaker: put it back.
+            const main = document.getElementById('remoteAudio');
+            if (main && main.srcObject !== activeCall.remoteStream) { main.srcObject = activeCall.remoteStream; main.play().catch(() => {}); }
+        }
         if (!activeCall || ended) return;
         if (!onHold && callIsDead(activeCall)) {
             markEnded(endReason(activeCall));
@@ -1111,7 +1575,7 @@ function hangup() {
 window.addEventListener('dialnytics:session-revoked', () => {
     try { if (incomingCall?.hangup) incomingCall.hangup(); } catch (_) {}
     try { if (activeCall?.hangup) activeCall.hangup(); } catch (_) {}
-    try { if (heldCall?.hangup) heldCall.hangup(); } catch (_) {}
+    heldCalls.concat(confCalls).forEach((c) => { try { if (c?.hangup) c.hangup(); } catch (_) {} });
     try { if (client?.disconnect) client.disconnect(); } catch (_) {}
     try { if (client?.destroy) client.destroy(); } catch (_) {}
 });

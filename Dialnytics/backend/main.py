@@ -35,6 +35,7 @@ import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_helpers as vh  # noqa: E402  (sibling module; works for both start commands)
+import call_transfer as ct  # noqa: E402  (agent transfer + advanced calling)
 
 app = FastAPI(title="Dialnytics", version="1.2.0")
 log = logging.getLogger("dialnytics")
@@ -175,6 +176,7 @@ def _db_user(row):
         "recording_premium": row["recording_premium"],
         "dnd_enabled": row["dnd_enabled"],
         "sms_enabled": bool(row.get("sms_enabled", False)),
+        "adv_calling": bool(row.get("adv_calling", False)),
         "is_demo": bool(row.get("is_demo", False)),
         "account_id": str(row["account_id"]) if row.get("account_id") else "",
         "account_role": "owner" if row.get("account_role") == "owner" else "agent",
@@ -331,7 +333,7 @@ CREATE INDEX IF NOT EXISTS sms_messages_thread_idx ON public.sms_messages(user_i
 CREATE INDEX IF NOT EXISTS sms_messages_unread_idx ON public.sms_messages(user_id) WHERE direction = 'in' AND is_read = false;
 ALTER TABLE public.sms_messages ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.sms_messages FROM anon, authenticated;
-"""
+""" + ct.SCHEMA_SQL
 
 def ensure_schema():
     """Idempotent additive migration (same SQL as SUPABASE_MIGRATION_07)."""
@@ -1355,6 +1357,7 @@ def plan_status(user):
     }
 
 templates.env.globals["has_recording"] = has_recording
+templates.env.globals["leg_tag"] = ct.leg_tag
 templates.env.globals["has_sms"] = has_sms
 templates.env.globals["plan_status"] = plan_status
 
@@ -2132,8 +2135,15 @@ def _handle_voicemail_event(event, payload, group_id, background):
             ref = "telnyx:" + str(payload.get("recording_id") or payload.get("call_leg_id") or call_id)
             background.add_task(_telnyx_save_voicemail, group_id, mp3, duration, ref, call_id)
 
-def _handle_ring_leg_event(event, group_id, background):
+ct.setup(db_connect=db_connect, telnyx=_telnyx_request, cs_encode=_cs_encode,
+         base_url=PUBLIC_BASE_URL, presence_timeout=40,
+         no_worker=os.getenv("TRANSFER_WORKER", "1") == "0")
+
+def _handle_ring_leg_event(event, group_id, background, payload=None):
     """Events from the SIP leg that rings the agent's browser."""
+    ring_leg = (payload or {}).get("call_control_id") or ""
+    if event == "call.answered" and ring_leg:
+        ct.on_ring_answered(group_id, ring_leg)
     with db_connect() as conn:
         with conn.cursor() as cur:
             if event in ("call.answered", "call.bridged"):
@@ -2153,9 +2163,16 @@ def _handle_ring_leg_event(event, group_id, background):
     if group["status"] == "ringing":
         # Agent did not pick up (timeout, rejected, offline): go to voicemail.
         background.add_task(_telnyx_start_voicemail, group["telnyx_call_id"], group_id)
-    elif group["status"] == "answered":
-        # Agent hung up first: do not leave the caller in silence.
-        background.add_task(_telnyx_hangup_quietly, group["telnyx_call_id"])
+    elif group["status"] in ("answered", "transferred"):
+        # Agent hung up first: do not leave the caller in silence -- unless the
+        # call was transferred and another agent is talking to the caller now.
+        try:
+            someone_else = ct.agent_leg_gone(ring_leg)
+        except Exception:
+            log.exception("Transfer check failed for group %s", group_id)
+            someone_else = group["status"] == "transferred"
+        if not someone_else:
+            background.add_task(_telnyx_hangup_quietly, group["telnyx_call_id"])
 
 @app.post("/webhooks/telnyx")
 async def telnyx_webhook(request: Request, background: BackgroundTasks):
@@ -2174,12 +2191,17 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
     payload = data.get("payload") or {}
     event = data.get("event_type") or ""
     client_state = _cs_decode(payload.get("client_state"))
+    try:
+        if ct.handle_webhook(event, payload, client_state, lambda uid: _db_user_by_id(uid)):
+            return JSONResponse({"ok": True})
+    except Exception:
+        log.exception("Transfer/advanced-calling webhook handling failed (%s)", event)
     if client_state.startswith("vm:"):
         _handle_voicemail_event(event, payload, client_state[3:], background)
         if event != "call.hangup":
             return JSONResponse({"ok": True})
     elif client_state.startswith("ring:"):
-        _handle_ring_leg_event(event, client_state[5:], background)
+        _handle_ring_leg_event(event, client_state[5:], background, payload)
         return JSONResponse({"ok": True})
     # Single-number/single-user Voice API routing.
     # Telnyx Voice API originates a SIP leg to the assigned WebRTC credential,
@@ -2819,6 +2841,57 @@ async def telnyx_sms_webhook(request: Request):
                     cur.execute("""UPDATE public.sms_messages SET status=%s, error=CASE WHEN %s<>'' THEN %s ELSE error END
                         WHERE provider_id=%s AND direction='out'""", (status, error, error, p["id"]))
     return {"ok": True}
+
+@app.post("/users/advanced-calling")
+async def toggle_advanced_calling(request: Request, email: str = Form(...)):
+    """Advanced calling = outgoing calls go through the server (needed to
+    transfer OUTGOING calls). The user gets a new calling login on the
+    "Dialnytics Advanced" Telnyx connection; turning it off moves them back."""
+    admin = get_current_user(request)
+    if not admin or admin.get("role") != "admin":
+        return RedirectResponse(url="/login", status_code=302)
+    email = email.strip().lower()
+    back = urllib.parse.urlsplit(request.headers.get("referer") or "").path or "/users"
+    if not (back.startswith("/users") or back.startswith("/customers/")):
+        back = "/users"
+    def fail(msg):
+        return RedirectResponse(url=back + "?error=" + urllib.parse.quote(msg), status_code=302)
+    if not ct.ADV_CONN:
+        return fail("Add TELNYX_ADV_CONNECTION_ID in Render first (see the update notes).")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id,adv_calling,credential_id,provider FROM public.dialnytics_users
+                WHERE email=%s""", (email,))
+            row = cur.fetchone()
+    if not row:
+        return fail("User not found")
+    if (row["provider"] or "telnyx") != "telnyx":
+        return fail("Advanced calling is only for Telnyx lines")
+    turn_on = not bool(row["adv_calling"])
+    connection = ct.ADV_CONN if turn_on else TELNYX_CONNECTION_ID
+    try:
+        created = _telnyx_request("POST", "/v2/telephony_credentials", {
+            "connection_id": connection, "name": f"dialnytics-{email}"[:60],
+            "tag": "dialnytics-adv" if turn_on else "dialnytics"})
+    except HTTPException as exc:
+        log.warning("Advanced calling credential failed for %s: %s", email, exc.detail)
+        return fail("Telnyx did not create the calling login. Check the Advanced connection id.")
+    data = created.get("data", {})
+    if not data.get("id"):
+        return fail("Telnyx did not create the calling login")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE public.dialnytics_users SET adv_calling=%s, credential_id=%s, sip_username=%s
+                WHERE id=%s""", (turn_on, data["id"], data.get("sip_username", ""), row["id"]))
+    if email in users_db:
+        users_db[email].update(adv_calling=turn_on, credential_id=data["id"],
+                               sip_username=data.get("sip_username", ""))
+    if row["credential_id"]:
+        try:
+            _telnyx_request("DELETE", f"/v2/telephony_credentials/{row['credential_id']}")
+        except Exception:
+            log.info("Old calling login %s was not deleted", row["credential_id"])
+    return RedirectResponse(url=back + "?created=1", status_code=302)
 
 @app.post("/users/sms")
 async def toggle_sms(request: Request, email: str = Form(...)):
@@ -3739,9 +3812,14 @@ async def pending_incoming_for_user(request: Request):
                   AND g.created_at > NOW() - INTERVAL '3 minutes'
                 ORDER BY g.created_at DESC LIMIT 5""", (user["email"],))
             rows = cur.fetchall()
-    return {"pending": [{"id":str(r["id"]),"from":r["caller_number"],
-                         "to":r["destination_number"],"created_at":r["created_at"].isoformat()}
-                        for r in rows]}
+    pending = [{"id":str(r["id"]),"from":r["caller_number"],
+                "to":r["destination_number"],"created_at":r["created_at"].isoformat()}
+               for r in rows]
+    try:
+        pending = ct.pending_for(user) + pending      # transfers from a teammate
+    except Exception:
+        log.exception("Pending transfer lookup failed")
+    return {"pending": pending}
 
 
 @app.get("/api/incoming-groups/{group_id}/status")
@@ -3759,6 +3837,56 @@ async def incoming_group_status(group_id: uuid.UUID, request: Request):
     if not row:
         raise HTTPException(status_code=404,detail="Group not found")
     return {"status":row["status"],"answered_by":str(row["answered_by"]) if row["answered_by"] else None}
+
+# ==================== CALL TRANSFER (agent -> agent) ====================
+def _xfer_user(request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return user
+
+@app.get("/api/transfer/targets")
+async def transfer_targets(request: Request):
+    user = _xfer_user(request)
+    return {"agents": ct.targets(user), "adv_calling": bool(user.get("adv_calling"))}
+
+@app.post("/api/transfer")
+async def transfer_start(request: Request):
+    user = _xfer_user(request)
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    try:
+        result = ct.start(user, str(data.get("number") or "")[:40],
+                          to_user=data.get("to_user") or None,
+                          to_number=str(data.get("to_number") or "")[:40] or None)
+    except ct.TransferError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    return result
+
+@app.get("/api/transfer/{tid}")
+async def transfer_status(tid: uuid.UUID, request: Request):
+    user = _xfer_user(request)
+    result = ct.status_of(str(tid), user)
+    if not result:
+        raise HTTPException(status_code=404, detail="Transfer not found")
+    return result
+
+@app.post("/api/transfer/{tid}/cancel")
+async def transfer_cancel(tid: uuid.UUID, request: Request):
+    user = _xfer_user(request)
+    return {"cancelled": ct.cancel(str(tid), user)}
+
+@app.post("/api/transfer/{tid}/decline")
+async def transfer_decline(tid: uuid.UUID, request: Request):
+    user = _xfer_user(request)
+    return {"declined": ct.decline(str(tid), user)}
+
+@app.get("/api/advanced-call/result")
+async def advanced_call_result(request: Request):
+    user = _xfer_user(request)
+    return ct.last_result(user)
 
 @app.post("/api/admin/users/{user_id}/force-logout")
 async def admin_force_logout(user_id: uuid.UUID, request: Request):

@@ -133,7 +133,7 @@
  {% for u in users %}<tr class="premium-user-row" data-search="{{ (u.name ~ ' ' ~ u.email ~ ' ' ~ (u.phone_number or ''))|lower|e }}">
  <td><strong>{{ u.name }}</strong><small>{{ u.email }}</small>{% if u.user_type == 'reseller' %}<small><span class="dn-pill warn">Reseller</span></small>{% elif u.account_id and cmap.get(u.account_id) %}<small><a href="/companies/{{ u.account_id }}">{{ cmap.get(u.account_id) }}</a> · {{ 'Owner' if u.account_role == 'owner' else 'Agent' }}</small>{% endif %}</td><td class="number-cell">{{ u.phone_number or 'Unassigned' }}<small><span class="dn-pill {{ u.provider or 'telnyx' }}">{{ (u.provider or 'telnyx')|capitalize }}</span></small></td><td><span class="plan-pill">{{ u.plan_name or '—' }}</span></td>
  <td><span class="status-pill {{ 'status-demo' if u.is_demo else 'status-active' }}">{{ 'Demo' if u.is_demo else 'Active' }}</span></td><td>{{ u.plan_renewal or '—' }}</td>
- <td><button type="button" class="premium-edit" data-user='{{ {"name":u.name,"email":u.email,"number":u.phone_number,"provider":u.provider or "telnyx","plan":u.plan_name,"renewal":u.plan_renewal,"recording":u.recording_premium,"sms":(u.sms_enabled|default(false)),"demo":u.is_demo,"role":u.role}|tojson|forceescape }}'>Edit ✎</button></td></tr>{% endfor %}
+ <td><button type="button" class="premium-edit" data-user='{{ {"name":u.name,"email":u.email,"number":u.phone_number,"provider":u.provider or "telnyx","plan":u.plan_name,"renewal":u.plan_renewal,"recording":u.recording_premium,"sms":(u.sms_enabled|default(false)),"adv":(u.adv_calling|default(false)),"demo":u.is_demo,"role":u.role}|tojson|forceescape }}'>Edit ✎</button></td></tr>{% endfor %}
  </tbody></table></div>
 </section>
 <div id="userDrawerBackdrop" class="user-drawer-backdrop" hidden></div>
@@ -144,13 +144,14 @@
   <form id="drawerEditForm" method="POST" action="/users/edit">
    <input type="hidden" name="email" id="editOriginalEmail"><input type="hidden" name="account_active" value="yes">
    <div class="drawer-pane" data-pane="account"><label>Full Name<input id="editName" name="name" required></label><label>Email Address<input id="editEmail" name="new_email" type="email" required></label><div class="drawer-info">Account is active. Use Delete User below to disable access and release its number.</div></div>
-   <div class="drawer-pane" data-pane="calling" hidden><label>Assigned Caller ID<input id="editNumberDisplay" readonly></label><a id="changeNumberLink" class="drawer-link" href="#">Change number in Customer Details →</a><div class="drawer-setting"><span>Recording & Campaigns <small id="recordingState"></small></span><button type="submit" id="recordingButton" form="recordingForm" class="drawer-action">Toggle Access</button></div><div class="drawer-setting"><span>SMS add-on (text messages) <small id="smsState"></small></span><button type="submit" id="smsButton" form="smsForm" class="drawer-action">Toggle SMS</button></div><label>Calling Provider<input id="editProviderDisplay" readonly></label><div class="drawer-info">To switch this user between Telnyx and Twilio, open Customer Details and pick a number from the other provider.</div></div>
+   <div class="drawer-pane" data-pane="calling" hidden><label>Assigned Caller ID<input id="editNumberDisplay" readonly></label><a id="changeNumberLink" class="drawer-link" href="#">Change number in Customer Details →</a><div class="drawer-setting"><span>Recording & Campaigns <small id="recordingState"></small></span><button type="submit" id="recordingButton" form="recordingForm" class="drawer-action">Toggle Access</button></div><div class="drawer-setting"><span>SMS add-on (text messages) <small id="smsState"></small></span><button type="submit" id="smsButton" form="smsForm" class="drawer-action">Toggle SMS</button></div><div class="drawer-setting"><span>Advanced calling (transfer outgoing calls) <small id="advState"></small></span><button type="submit" id="advButton" form="advForm" class="drawer-action">Toggle Advanced</button></div><label>Calling Provider<input id="editProviderDisplay" readonly></label><div class="drawer-info">To switch this user between Telnyx and Twilio, open Customer Details and pick a number from the other provider.</div></div>
    <div class="drawer-pane" data-pane="billing" hidden><label>Plan Name<input id="editPlan" name="plan_name" required></label><label>Renewal Date<input id="editRenewal" name="plan_renewal" type="date" required></label><button type="submit" form="extendForm" class="drawer-action">+30 Days</button></div>
    <div class="drawer-footer"><button class="drawer-save" type="submit">Save Changes</button></div>
   </form>
   <form id="extendForm" method="POST" action="/users/extend"><input type="hidden" name="email" class="drawer-target-email"><input type="hidden" name="days" value="30"></form>
   <form id="recordingForm" method="POST" action="/users/recording"><input type="hidden" name="email" class="drawer-target-email"></form>
   <form id="smsForm" method="POST" action="/users/sms"><input type="hidden" name="email" class="drawer-target-email"></form>
+  <form id="advForm" method="POST" action="/users/advanced-calling"><input type="hidden" name="email" class="drawer-target-email"></form>
   <form id="deleteForm" method="POST" action="/users/delete"><input type="hidden" name="email" class="drawer-target-email"><button type="submit" class="drawer-delete">Delete User</button></form>
  </div>
 </aside>
@@ -173,6 +174,7 @@
   document.getElementById('editPlan').value=u.plan||'';document.getElementById('editRenewal').value=u.renewal||'';
   document.getElementById('recordingState').textContent=u.recording?'Enabled':'Disabled';
   document.getElementById('smsState').textContent=u.sms?'Enabled':(u.number?'Disabled':'Disabled · needs a calling number');
+  document.getElementById('advState').textContent=u.provider==='twilio'?'Telnyx lines only':(u.adv?'Enabled · user must refresh the dialer':'Disabled · incoming calls can still be transferred');
   document.getElementById('changeNumberLink').href='/customers/'+encodeURIComponent(u.email);
   tab('account');backdrop.hidden=false;drawer.classList.add('open');drawer.setAttribute('aria-hidden','false');document.body.style.overflow='hidden';
  }));
