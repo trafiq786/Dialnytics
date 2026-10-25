@@ -187,6 +187,7 @@ function markEnded(reason) {
         return;
     }
 
+    sawOtherLines = false;
     showDialPad();
 }
 
@@ -522,13 +523,20 @@ function markEnded(reason) {
                 if (!endedNow) return;
                 const params = msg.params || {};
                 // With several lines, only end the line this message is about.
-                const msgCall = params.callID || params.callId || (params.dialogParams && params.dialogParams.callID) || '';
+                const res = msg.result || {};
+                const msgCall = params.callID || params.callId || (params.dialogParams && params.dialogParams.callID) ||
+                    res.callID || res.callId || (res.dialogParams && res.dialogParams.callID) || '';
                 if (msgCall && msgCall !== activeCall.id) {
                     const side = sideLegById(msgCall);
                     if (side) dropLeg(side, 'left the call');
                     return;
                 }
-                if (!msgCall && (heldCalls.length || confCalls.length)) return;   // not sure which line: let the call events decide
+                if (!msgCall) {
+                    // A message without a call id (e.g. the reply to ending another line).
+                    // Only trust it when this is the only line and no other line ended just now.
+                    if (heldCalls.length || confCalls.length || Date.now() - lastSideEnd < 8000) return;
+                    if (!callIsDead(activeCall) && sawOtherLines) return;
+                }
                 markEnded(endReason({
                     cause: params.cause || params.sipReason || params.sip_reason || '',
                     sipCode: params.sipCode || params.sip_code || 0
@@ -929,7 +937,10 @@ function hangup() {
             try { if (call.unhold) call.unhold(); } catch (err) {}
         }
     }
+    let lastSideEnd = 0;
+    let sawOtherLines = false;      // this call has had more than one line
     function syncHeld() {
+        if (heldCalls.length || confCalls.length) sawOtherLines = true;
         heldCall = heldCalls.length ? heldCalls[heldCalls.length - 1] : null;
     }
     // Each line keeps its own log id, timer and mute state.
@@ -960,6 +971,7 @@ function hangup() {
         }).catch(() => {});
     }
     function dropLeg(call, why) {
+        lastSideEnd = Date.now();
         let i = heldCalls.indexOf(call);
         if (i >= 0) { heldCalls.splice(i, 1); syncHeld(); }
         i = confCalls.indexOf(call);
