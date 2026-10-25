@@ -822,6 +822,8 @@ async def customer_update(request:Request,email:str,name:str=Form(...),plan_name
             if not row: raise HTTPException(404,'Customer not found')
             if new_password:
                 cur.execute('UPDATE public.dialnytics_users SET password_hash=%s WHERE id=%s',(hash_password(new_password),row['id']))
+                # Password reset by admin: old logins stop working.
+                cur.execute('UPDATE public.user_sessions SET revoked_at=NOW() WHERE user_id=%s AND revoked_at IS NULL',(row['id'],))
             if is_active!='true':
                 cur.execute('UPDATE public.user_sessions SET revoked_at=NOW() WHERE user_id=%s AND revoked_at IS NULL',(row['id'],))
     refresh_users()
@@ -3206,7 +3208,9 @@ async def settings_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
-    context = {"user": user, "plan": plan_status(user)}
+    context = {"user": user, "plan": plan_status(user),
+               "profile_msg": request.query_params.get("profile", ""),
+               "profile_error": request.query_params.get("perror", "")}
     if user.get("role") == "admin":
         context.update({
             "rates": get_rates(),
@@ -3216,6 +3220,58 @@ async def settings_page(request: Request):
             "saved": request.query_params.get("saved"),
         })
     return templates.TemplateResponse(request=request, name="settings.html", context=context)
+
+def _settings_back(msg="", error=""):
+    query = urllib.parse.urlencode({"profile": msg} if msg else {"perror": error})
+    return RedirectResponse(url="/settings?" + query + "#profile", status_code=303)
+
+@app.post("/settings/profile")
+async def settings_profile(request: Request, name: str = Form(...)):
+    """The user changes their own display name."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    name = re.sub(r"\s+", " ", name or "").strip()
+    if not 2 <= len(name) <= 120:
+        return _settings_back(error="Name must be 2 to 120 characters")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE public.dialnytics_users SET name=%s WHERE id=%s", (name, user["id"]))
+    if user["email"] in users_db:
+        users_db[user["email"]]["name"] = name
+    return _settings_back(msg="Name updated")
+
+@app.post("/settings/password")
+async def settings_password(request: Request, current_password: str = Form(...),
+                            new_password: str = Form(...), confirm_password: str = Form(...)):
+    """The user changes their own password (current password required)."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=302)
+    if user.get("is_demo"):
+        return _settings_back(error="The password of a demo account cannot be changed")
+    if not verify_password(current_password, user.get("password") or ""):
+        return _settings_back(error="Current password is not correct")
+    if len(new_password) < 12:
+        return _settings_back(error="New password must be at least 12 characters")
+    if len(new_password) > 200:
+        return _settings_back(error="New password is too long")
+    if new_password != confirm_password:
+        return _settings_back(error="The two new passwords do not match")
+    if new_password == current_password:
+        return _settings_back(error="New password must be different from the current one")
+    new_hash = hash_password(new_password)
+    token = request.cookies.get("session_token") or ""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE public.dialnytics_users SET password_hash=%s WHERE id=%s", (new_hash, user["id"]))
+            # Sign out every other device; this browser stays logged in.
+            cur.execute("""UPDATE public.user_sessions SET revoked_at=NOW()
+                WHERE user_id=%s AND revoked_at IS NULL AND token_hash<>%s""",
+                (user["id"], hashlib.sha256(token.encode()).hexdigest()))
+    if user["email"] in users_db:
+        users_db[user["email"]]["password"] = new_hash
+    return _settings_back(msg="Password changed. Other devices were signed out.")
 
 # ==================== COMPANIES, TEAM, RESELLERS ====================
 PRESENCE_TIMEOUT_SECONDS = 40

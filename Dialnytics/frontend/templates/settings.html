@@ -9,6 +9,41 @@
     <p style="margin-top:12px;"><span class="muted">Plan renewal</span><br><strong>{{ plan.plan_renewal }}</strong> · {{ plan.days_left }} days left</p>
     <p style="margin-top:18px;"><a href="/logout" class="btn-blue">Log out</a></p>
 </section>
+<section class="panel profile-panel" id="profile" style="max-width:520px;margin-top:18px;">
+    <h2>My profile</h2>
+    {% if profile_msg %}<div class="success-msg">{{ profile_msg }}</div>{% endif %}
+    {% if profile_error %}<div class="error-msg profile-error">{{ profile_error }}</div>{% endif %}
+    <form method="post" action="/settings/profile" class="profile-form">
+        <label>Name<input name="name" value="{{ user.name }}" required minlength="2" maxlength="120" autocomplete="name"></label>
+        <button class="btn btn-primary" type="submit">Save name</button>
+    </form>
+    {% if not user.is_demo %}
+    <h3 style="margin:22px 0 4px;">Change password</h3>
+    <p class="muted" style="margin:0 0 10px;font-size:13px;">At least 12 characters. Other devices will be signed out.</p>
+    <form method="post" action="/settings/password" class="profile-form" id="pwForm">
+        <label>Current password<input type="password" name="current_password" required autocomplete="current-password"></label>
+        <label>New password<input type="password" name="new_password" id="pwNew" required minlength="12" maxlength="200" autocomplete="new-password"></label>
+        <label>Confirm new password<input type="password" name="confirm_password" id="pwConfirm" required minlength="12" maxlength="200" autocomplete="new-password"></label>
+        <label class="profile-show"><input type="checkbox" id="pwShow"> Show passwords</label>
+        <button class="btn btn-primary" type="submit">Change password</button>
+    </form>
+    {% endif %}
+</section>
+<style>
+.profile-form{display:flex;flex-direction:column;gap:12px;margin-top:10px}
+.profile-form label{display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--text-secondary)}
+.profile-form input:not([type=checkbox]){background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-primary);border-radius:10px;padding:11px 12px;font-size:14px}
+.profile-form .profile-show{flex-direction:row;align-items:center;gap:8px}
+.profile-form button{align-self:flex-start}
+.profile-error{background:rgba(225,29,72,.12);border:1px solid rgba(251,113,133,.5);color:#fda4af;border-radius:10px;padding:10px 12px;margin-bottom:6px}
+</style>
+<script>
+(function(){
+  const show=document.getElementById('pwShow'); if(!show) return;
+  show.addEventListener('change',()=>document.querySelectorAll('#pwForm input[type=password],#pwForm input[data-pw]').forEach(i=>{i.dataset.pw='1';i.type=show.checked?'text':'password';}));
+  document.getElementById('pwForm').addEventListener('submit',e=>{const a=document.getElementById('pwNew').value,b=document.getElementById('pwConfirm').value;if(a!==b){e.preventDefault();alert('The two new passwords do not match');}});
+})();
+</script>
 {% if user.role == 'admin' %}
 <section class="panel" style="max-width:720px;margin-top:18px;">
     <h2>Provider Rates (for estimated cost)</h2>
