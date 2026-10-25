@@ -3,11 +3,11 @@
 {% block content %}
 <div class="page-head">
     <h1>Dashboard</h1>
-    <div class="seg">
+    {% if user.role != 'admin' %}<div class="seg">
         <a href="/dashboard?period=today" class="{% if period == 'today' %}on{% endif %}">Today</a>
         <a href="/dashboard?period=week" class="{% if period == 'week' %}on{% endif %}">This Week</a>
         <a href="/dashboard?period=month" class="{% if period == 'month' %}on{% endif %}">This Month</a>
-    </div>
+    </div>{% endif %}
 </div>
 {% if user.role == 'admin' %}
 <div class="admin-revenue">
@@ -38,6 +38,7 @@
 </tbody></table></div>{% else %}<p class="empty-note">No renewals due in the next 7 days.</p>{% endif %}
 </section>
 {% endif %}
+{% if user.role != 'admin' %}
 <div class="stat-row">
     <div class="stat-card"><div class="stat-ico blue">☎</div><div class="value">{{ total_calls }}</div><div class="label">Total Calls</div></div>
     <div class="stat-card"><div class="stat-ico green">✓</div><div class="value">{{ answer_rate }}</div><div class="label">Answer Rate</div></div>
@@ -99,4 +100,5 @@
         </div>
     </section>
 </div>
+{% endif %}
 {% endblock %}

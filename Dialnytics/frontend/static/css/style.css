@@ -1418,3 +1418,11 @@ body.light-theme .dn-callcard { background:rgba(255,255,255,.97); color:#0b1633;
 .dial-rail { scrollbar-gutter: stable both-edges; }
 .dial-rail .pn-field #numberInput { min-height:54px; height:54px; line-height:24px; }
 .dial-rail .pn-hint { height:18px; line-height:18px; }
+
+/* 2026-10-25b: admin menu groups */
+.shell-nav .nav-group{font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text-muted);padding:16px 14px 6px;opacity:.85}
+.shell-nav .nav-group:first-child{padding-top:4px}
+.shell-nav .ni-svg{display:inline-flex;align-items:center;justify-content:center;width:22px}
+.shell-nav .ni-svg svg{display:block}
+body.nav-collapsed .shell-nav .nav-group{font-size:0;padding:10px 0 4px;margin:0 14px;border-top:1px solid var(--border)}
+body.nav-collapsed .shell-nav .nav-group:first-child{border-top:0}

@@ -946,7 +946,8 @@ async def invoice_create(request:Request,customer_email:str=Form(...),issue_date
 async def invoice_detail(request:Request,invoice_id:uuid.UUID):
     admin=require_admin(request)
     invoice,items=_invoice_row(invoice_id)
-    return templates.TemplateResponse(request=request,name='invoice_detail.html',context={'user':admin,'invoice':invoice,'items':items})
+    import invoice_pdf as ipdf
+    return templates.TemplateResponse(request=request,name='invoice_detail.html',context={'user':admin,'invoice':invoice,'items':items,'bank':ipdf.bank_details()})
 
 
 @app.post('/invoices/{invoice_id}/status')
@@ -966,8 +967,11 @@ async def invoice_delete(request:Request,invoice_id:uuid.UUID):
     require_admin(request)
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM public.dialnytics_invoices WHERE id=%s AND status IN ('draft','void')",(invoice_id,))
-            if cur.rowcount==0: raise HTTPException(409,'Only draft or void invoices can be deleted')
+            # Any invoice can be deleted (items go with it). Payments recorded on the
+            # customer page are separate and are not touched.
+            cur.execute("DELETE FROM public.dialnytics_invoice_items WHERE invoice_id=%s",(invoice_id,))
+            cur.execute("DELETE FROM public.dialnytics_invoices WHERE id=%s",(invoice_id,))
+            if cur.rowcount==0: raise HTTPException(404,'Invoice not found')
     return RedirectResponse('/invoices',status_code=303)
 
 
@@ -996,42 +1000,17 @@ async def invoice_duplicate(request:Request,invoice_id:uuid.UUID):
 async def invoice_pdf(request:Request,invoice_id:uuid.UUID):
     require_admin(request)
     inv,items=_invoice_row(invoice_id)
-    buffer=BytesIO()
-    doc=SimpleDocTemplate(buffer,pagesize=(595,842),rightMargin=42,leftMargin=42,topMargin=40,bottomMargin=40)
-    styles=getSampleStyleSheet()
-    styles.add(ParagraphStyle(name='DialTitle',parent=styles['Title'],fontSize=22,textColor=colors.HexColor('#111b37'),spaceAfter=16))
-    styles.add(ParagraphStyle(name='DialSmall',parent=styles['Normal'],fontSize=9,leading=14))
-    def esc(v):
-        import html
-        return html.escape(str(v or ''))
-    story=[Paragraph('DIALNYTICS  |  INVOICE',styles['DialTitle']),
-        Paragraph('Invoice: '+esc(inv['invoice_number'])+'  |  Status: '+esc(inv['status']).upper(),styles['DialSmall']),Spacer(1,18),
-        Paragraph('<b>BILL TO</b><br/>'+esc(inv['customer_name'])+'<br/>'+esc(inv['customer_email'])+'<br/>'+esc(inv['contact_phone']),styles['DialSmall']),Spacer(1,14),
-        Paragraph('Issued: '+str(inv['issue_date'])+'    Due: '+str(inv['due_date']),styles['DialSmall']),Spacer(1,18)]
-    rows=[['DESCRIPTION','QTY','UNIT PRICE','AMOUNT']]
-    for item in items:
-        rows.append([Paragraph(esc(item['description']),styles['DialSmall']),str(item['qty']),f"PKR {item['unit_price_pkr']:,.0f}",f"PKR {item['amount_pkr']:,.0f}"])
-    table=Table(rows,colWidths=[275,45,95,95],repeatRows=1,hAlign='LEFT')
-    table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#111b37')),
-        ('TEXTCOLOR',(0,0),(-1,0),colors.white),('BOTTOMPADDING',(0,0),(-1,0),11),('TOPPADDING',(0,0),(-1,0),11),
-        ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#f2f6fa')]),
-        ('VALIGN',(0,0),(-1,-1),'TOP'),('BOTTOMPADDING',(0,1),(-1,-1),10),('TOPPADDING',(0,1),(-1,-1),10)]))
-    story.extend([table,Spacer(1,20),Paragraph(f"Subtotal: PKR {inv['subtotal_pkr']:,.0f}",styles['DialSmall']),
-        Paragraph(f"Discount: PKR {inv['discount_pkr']:,.0f} | Tax ({inv['tax_percent']}%): PKR {inv['tax_pkr']:,.0f}",styles['DialSmall']),
-        Spacer(1,10),Paragraph(f"<b>AMOUNT DUE: PKR {inv['total_pkr']:,.0f}</b>",styles['Heading2']),Spacer(1,20),
-        Paragraph('<b>HOW TO PAY</b><br/>Contact us for payment.',styles['DialSmall']),Spacer(1,14),
-        Paragraph('<b>NOTES</b><br/>'+esc(inv['notes']),styles['DialSmall']),Spacer(1,10),
-        Paragraph('<b>TERMS</b><br/>'+esc(inv['terms']),styles['DialSmall'])])
-    doc.build(story)
-    return Response(buffer.getvalue(),media_type='application/pdf',headers={'Content-Disposition':f'attachment; filename="{inv["invoice_number"]}.pdf"','Cache-Control':'private, no-store'})
+    import invoice_pdf as ipdf
+    logo=os.path.join(FRONTEND_DIR,'static','img','dialnytics-logo-dark.png')
+    data=ipdf.build_invoice_pdf(inv,[dict(i) for i in items],logo)
+    return Response(data,media_type='application/pdf',headers={'Content-Disposition':f'attachment; filename="{inv["invoice_number"]}.pdf"','Cache-Control':'private, no-store'})
 
-@app.get("/users", response_class=HTMLResponse)
-async def users_page(request: Request):
+def _users_page(request, mode):
     user = get_current_user(request)
     if not user or user.get("role") != "admin":
         return RedirectResponse(url="/dashboard", status_code=302)
     return templates.TemplateResponse(request=request, name="users.html", context={
-        "user": user,
+        "user": user, "mode": mode,
         "users": list(users_db.values()),
         "companies": _all_companies(),
         "resellers": _all_resellers(),
@@ -1039,6 +1018,16 @@ async def users_page(request: Request):
         "created": request.query_params.get("created"),
         "deleted": request.query_params.get("deleted"),
     })
+
+@app.get("/users", response_class=HTMLResponse)
+async def users_page(request: Request):
+    """User Accounts: the list of every login."""
+    return _users_page(request, "list")
+
+@app.get("/users/new", response_class=HTMLResponse)
+async def users_new_page(request: Request):
+    """Create User: the form only."""
+    return _users_page(request, "create")
 
 @app.post("/users")
 async def create_user(
@@ -1067,7 +1056,7 @@ async def create_user(
         return RedirectResponse('/login', status_code=302)
 
     def fail(message):
-        return RedirectResponse('/users?' + urlencode({'error': message}), status_code=303)
+        return RedirectResponse('/users/new?' + urlencode({'error': message}), status_code=303)
 
     email = email.strip().lower()
     name = name.strip()
@@ -1192,7 +1181,7 @@ async def create_user(
                 _ensure_credential(email)
             except Exception:
                 log.exception('Telnyx credential creation failed for new user')
-    return RedirectResponse('/users?created=1', status_code=303)
+    return RedirectResponse('/users?created=new', status_code=303)
 
 
 @app.post("/users/edit")
@@ -3329,6 +3318,9 @@ def _all_companies():
                         AND p.updated_at > now() - make_interval(secs => %s) AND p.status <> 'offline') AS online
                 FROM public.dialnytics_accounts a
                 LEFT JOIN public.dialnytics_users r ON r.id=a.reseller_id
+                -- hide companies whose users were all deleted (disabled); keep brand-new empty ones
+                WHERE EXISTS (SELECT 1 FROM public.dialnytics_users u WHERE u.account_id=a.id AND u.is_active)
+                   OR NOT EXISTS (SELECT 1 FROM public.dialnytics_users u WHERE u.account_id=a.id)
                 ORDER BY lower(a.name)""", (PRESENCE_TIMEOUT_SECONDS,))
             return cur.fetchall()
 

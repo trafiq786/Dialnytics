@@ -3,10 +3,15 @@
 {% block page_title %}Users{% endblock %}
 
 {% block content %}
-<section class="users-hero"><div><span class="eyebrow">ACCOUNT MANAGEMENT</span><h1>Create New User</h1><p>Set up calling access, subscription and payment in one place.</p></div><span class="hero-symbol">✦</span></section>
+{% if mode == 'create' %}
+<section class="users-hero"><div><span class="eyebrow">ACCOUNT MANAGEMENT</span><h1>Create New User</h1><p>Set up calling access, subscription and payment in one place.</p></div><a class="btn btn-secondary" style="width:auto;flex:0 0 auto" href="/users">View all users →</a></section>
+{% else %}
+<section class="users-hero"><div><span class="eyebrow">ACCOUNT MANAGEMENT</span><h1>User Accounts</h1><p>Every login on the platform — edit plans, calling access, add-ons and passwords.</p></div><a class="btn btn-primary" style="width:auto;flex:0 0 auto" href="/users/new">＋ Create User</a></section>
+{% endif %}
 {% if error %}<div class="error-msg">{{ error }}</div>{% endif %}
 {% if deleted %}<div class="success-msg">User disabled, sessions revoked and Caller ID released. Payment history retained.</div>{% endif %}
-{% if created %}<div class="success-msg">User created successfully. Share login credentials securely.</div>{% endif %}
+{% if created %}<div class="success-msg">{{ 'User created successfully. Share login credentials securely.' if created == 'new' else 'Changes saved.' }}</div>{% endif %}
+{% if mode == 'create' %}
 <form method="POST" action="/users" class="user-form" id="createUserForm">
  <div class="user-form-grid">
  <section class="user-panel"><div class="panel-title"><span class="panel-icon">♙</span><div><h2>Account Details</h2><p>Personal details and calling access</p></div></div>
@@ -125,6 +130,7 @@
   loadCallerIds();
 })();
 </script>
+{% else %}
 <section class="premium-users">
  <div class="premium-users-head"><div><h2>User Management</h2><p>Manage accounts, subscriptions and calling access.</p></div><div class="premium-count">{{ users|length }} users</div></div>
  <div class="premium-search"><span>⌕</span><input id="userSearch" type="search" placeholder="Search name, email or number" aria-label="Search users"></div>
@@ -185,4 +191,5 @@
  document.getElementById('userSearch').addEventListener('input',e=>{const q=e.target.value.toLowerCase().trim();document.querySelectorAll('.premium-user-row').forEach(row=>row.hidden=!row.dataset.search.includes(q))});
 })();
 </script>
+{% endif %}
 {% endblock %}
