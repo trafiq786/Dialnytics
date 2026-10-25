@@ -302,10 +302,20 @@ function markEnded(reason) {
     function watchCall(call) {
         if (!call) return;
         activeCall = call;
-        if (call.on) call.on('telnyx.notification', () => {
-            if (callIsDead(call)) markEnded(endReason(call));
-            else showState(call.state);
-        });
+        if (call.on && !call._dnWatched) {
+            call._dnWatched = true;
+            call.on('telnyx.notification', () => {
+                // This listener belongs to ONE line. If that line is on hold / in a
+                // conference / already gone, it must not end the call you are on now.
+                if (activeCall !== call) {
+                    const side = sideLegById(call.id);
+                    if (side && callIsDead(call)) dropLeg(side, 'left the call');
+                    return;
+                }
+                if (callIsDead(call)) markEnded(endReason(call));
+                else showState(call.state);
+            });
+        }
         showState(call.state);
     }
     function RTC() {
