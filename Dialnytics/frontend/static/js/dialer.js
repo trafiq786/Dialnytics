@@ -54,9 +54,19 @@ const input = document.getElementById('numberInput');
         const s = String(sec % 60).padStart(2, '0');
         return m + ':' + s;
     }
+    let msgTimer = null;
     function setStatus(msg, color) {
         statusEl.textContent = msg;
         statusEl.style.color = color || 'var(--text-secondary)';
+        // The status line sits under the keypad; during a call show problems on the call screen.
+        const box = document.getElementById('inCallMsg');
+        const view = document.getElementById('inCallView');
+        if (box && view && !view.hidden && color === 'var(--danger)') {
+            box.textContent = msg;
+            box.hidden = false;
+            clearTimeout(msgTimer);
+            msgTimer = setTimeout(() => { box.hidden = true; }, 7000);
+        }
     }
     function stopTimer() {
         if (timerId) clearInterval(timerId);
@@ -105,8 +115,19 @@ function markEnded(reason) {
     stopTimer();
     stopRingback();
     if (xfer && (!activeCall || xfer.call === activeCall)) {
-        if (!reason || reason === 'Call ended') reason = xfer.done ? 'Transferred to ' + xfer.name : reason;
+        const pending = xfer;
+        if (!reason || reason === 'Call ended') reason = pending.done ? 'Transferred to ' + pending.name : reason;
         clearXfer();
+        if (!pending.done) {
+            fetch('/api/transfer/' + encodeURIComponent(pending.id), { cache: 'no-store' })
+                .then((r) => r.ok ? r.json() : null).then((t) => {
+                    if (t && (t.status === 'answered' || t.status === 'done') && !activeCall) {
+                        setStatus('Transferred to ' + pending.name);
+                        const title = document.getElementById('activityTitle');
+                        if (title) title.textContent = 'Transferred to ' + pending.name;
+                    }
+                }).catch(() => {});
+        }
     }
     const wasAdvOut = ADV && activeCall && !talkStart && !String(activeCall.direction || '').toLowerCase().startsWith('in');
 
@@ -245,6 +266,7 @@ function markEnded(reason) {
     function showState(st) {
         if (ended) return;
         st = String(st || '').toLowerCase();
+        if (onHold && st === 'active') st = 'held';          // browser-side hold
         if (st === 'active' && !activeConfirmed) {
             armAnswerCheck();
             st = 'ringing';
@@ -499,6 +521,14 @@ function markEnded(reason) {
                 const endedNow = blob.includes('telnyx_rtc.bye') || blob.includes('normal_clearing') || blob.includes('call_rejected') || blob.includes('user_busy') || blob.includes('originator_cancel') || blob.includes('no_answer') || blob.includes('no_user_response');
                 if (!endedNow) return;
                 const params = msg.params || {};
+                // With several lines, only end the line this message is about.
+                const msgCall = params.callID || params.callId || (params.dialogParams && params.dialogParams.callID) || '';
+                if (msgCall && msgCall !== activeCall.id) {
+                    const side = sideLegById(msgCall);
+                    if (side) dropLeg(side, 'left the call');
+                    return;
+                }
+                if (!msgCall && (heldCalls.length || confCalls.length)) return;   // not sure which line: let the call events decide
                 markEnded(endReason({
                     cause: params.cause || params.sipReason || params.sip_reason || '',
                     sipCode: params.sipCode || params.sip_code || 0
@@ -529,6 +559,8 @@ function markEnded(reason) {
                     return;
                 }
                 if (ended && !heldCalls.length && !confCalls.length) return;
+                // Events of a line that already ended (or any other line) must not touch the current call.
+                if (activeCall && call.id && activeCall.id && call.id !== activeCall.id) return;
                 if (!activeCall || activeCall.id === call.id) activeCall = call;
                 if (!onHold && callIsDead(call)) markEnded(endReason(call));
                 else showState(st);
@@ -656,6 +688,9 @@ function hangup() {
         document.getElementById('transferView').hidden = false;
         const box = document.getElementById('transferList');
         box.innerHTML = '<p class="xfer-empty">Loading team...</p>';
+        const outgoing = activeCall && !String(activeCall.direction || '').toLowerCase().startsWith('in');
+        if (outgoing && !ADV) pickerNote('Outgoing calls can be transferred after the admin turns on Advanced calling for your account. Incoming calls can be transferred now.', true);
+        else pickerNote('Pick a teammate. If they are on another call, the caller hears hold music and the call goes to them as soon as they are free (max 3 minutes).');
         try {
             const res = await fetch('/api/transfer/targets', { cache: 'no-store' });
             const data = await res.json();
@@ -674,13 +709,19 @@ function hangup() {
             box.innerHTML = '<p class="xfer-empty">' + esc(err.message) + '</p>';
         }
     }
+    function pickerNote(text, bad) {
+        const hint = document.getElementById('transferHint');
+        if (!hint) return;
+        hint.textContent = text;
+        hint.style.color = bad ? '#fb7185' : '';
+    }
     async function startTransfer(body, name) {
         const call = activeCall;
         if (!call) return;
         body.number = legNumber(call) || (document.getElementById('inCallNumber') || {}).textContent || '';
-        composeMode = '';
-        showInCall(legNumber(call) || body.number);
-        setStatus('Starting transfer...');
+        const fromPicker = !document.getElementById('transferView').hidden;
+        if (fromPicker) pickerNote('Transferring to ' + (name || 'agent') + '...');
+        else setStatus('Starting transfer...');
         let data = {};
         try {
             const res = await fetch('/api/transfer', {
@@ -689,10 +730,13 @@ function hangup() {
             data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.detail || 'Transfer failed');
         } catch (err) {
-            setStatus(err.message, 'var(--danger)');
+            if (fromPicker) pickerNote(err.message, true);
+            else { showInCall(legNumber(call) || body.number); setStatus(err.message, 'var(--danger)'); }
             return;
         }
+        composeMode = '';
         if (activeCall !== call) return;
+        showInCall(legNumber(call) || body.number);
         xfer = { id: data.id, call: call, name: data.to_name || name || 'agent', done: false, timer: null };
         if (!onHold) toggleHold();          // you step away; the caller hears hold music
         renderXfer(data);
@@ -839,6 +883,52 @@ function hangup() {
         input.value = number;
         makeCall();
     }
+    // Hold is done in the browser: the caller hears hold music and the line
+    // stays open, so the other lines keep working normally.
+    let holdAudio = null;
+    function holdTrack(music) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return null;
+        if (!holdAudio || holdAudio.ctx.state === 'closed') {
+            const ctx = new Ctx();
+            const musicDest = ctx.createMediaStreamDestination();
+            const quietDest = ctx.createMediaStreamDestination();
+            const gain = ctx.createGain();
+            gain.gain.value = 0.35;
+            gain.connect(musicDest);
+            fetch('/static/audio/hold-music.mp3').then((r) => r.arrayBuffer())
+                .then((b) => ctx.decodeAudioData(b))
+                .then((buf) => { const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true; src.connect(gain); src.start(); })
+                .catch(() => {});
+            holdAudio = { ctx: ctx, music: musicDest.stream.getAudioTracks()[0], quiet: quietDest.stream.getAudioTracks()[0] };
+        }
+        if (holdAudio.ctx.state !== 'running') holdAudio.ctx.resume().catch(() => {});
+        return music ? holdAudio.music : holdAudio.quiet;
+    }
+    function holdLine(call, music) {
+        if (!call) return;
+        const sender = audioSender(call);
+        const track = sender ? holdTrack(music !== false) : null;
+        if (sender && track) {
+            if (!call._origTrack && sender.track && sender.track !== holdAudio.music && sender.track !== holdAudio.quiet) call._origTrack = sender.track;
+            sender.replaceTrack(track).catch(() => {});
+            call._localHeld = true;
+        } else {
+            try { if (call.hold) call.hold(); } catch (err) {}
+            call._localHeld = false;
+        }
+        detachLegAudio(call);
+    }
+    function resumeLine(call) {
+        if (!call) return;
+        if (call._localHeld) {
+            const sender = audioSender(call);
+            if (sender && call._origTrack && call._origTrack.readyState === 'live') sender.replaceTrack(call._origTrack).catch(() => {});
+            call._localHeld = false;
+        } else {
+            try { if (call.unhold) call.unhold(); } catch (err) {}
+        }
+    }
     function syncHeld() {
         heldCall = heldCalls.length ? heldCalls[heldCalls.length - 1] : null;
     }
@@ -896,8 +986,7 @@ function hangup() {
         teardownMixer();
         stash(activeCall);
         group.forEach((call) => {
-            try { if (call.hold) call.hold(); } catch (err) {}
-            detachLegAudio(call);
+            holdLine(call, true);
             if (!call._dn) call._dn = { logId: call._dnLog || null, talkStart: Date.now(), muted: false };
             heldCalls.push(call);
         });
@@ -918,7 +1007,7 @@ function hangup() {
         activeConfirmed = true;
         lastState = '';
         onHold = false;
-        try { if (activeCall.unhold) activeCall.unhold(); } catch (err) {}
+        resumeLine(activeCall);
         setMic(activeCall, false);
         const audio = document.getElementById('remoteAudio');
         if (audio && activeCall.remoteStream) {
@@ -939,7 +1028,7 @@ function hangup() {
         if (activeCall) {
             const cur = activeCall;
             stash(cur);
-            try { if (cur.hold) cur.hold(); } catch (err) {}
+            holdLine(cur, true);
             stopTimer();
             heldCalls.unshift(cur);
             activeCall = null;
@@ -957,11 +1046,11 @@ function hangup() {
         if (xfer) return setStatus('Finish the transfer first', 'var(--danger)');
         if (onHold) toggleHold();
         heldCalls.splice(0).forEach((call) => {
-            try { if (call.unhold) call.unhold(); } catch (err) {}
+            resumeLine(call);
             confCalls.push(call);
         });
         syncHeld();
-        setTimeout(buildMixer, 700);       // let the un-hold finish first
+        setTimeout(buildMixer, 150);
         showInCall(legNumber(activeCall));
         setStatus('Conference · ' + (confCalls.length + 1) + ' callers');
     }
@@ -1069,8 +1158,13 @@ function hangup() {
             if (activeCall && !confCalls.length) parts.push('<button type="button" onclick="swapCalls()">Swap</button>');
             if (activeCall) parts.push('<button type="button" class="primary" onclick="mergeCalls()">Merge</button>');
         }
-        bar.innerHTML = parts.join('');
+        const html = parts.join('');
+        if (bar._html !== html) { bar.innerHTML = html; bar._html = html; }
         bar.hidden = !parts.length;
+        const swapBtn = document.getElementById('swapBtn');
+        const mergeBtn = document.getElementById('mergeBtn');
+        if (swapBtn) swapBtn.hidden = !(activeCall && heldCalls.length && !confCalls.length);
+        if (mergeBtn) mergeBtn.hidden = !(activeCall && heldCalls.length);
         const num = document.getElementById('inCallNumber');
         if (num && activeCall) {
             if (confCalls.length) num.textContent = 'Conference';
@@ -1451,10 +1545,9 @@ function hangup() {
         onHold = !onHold;
         rtpStall = 0;
         iceStall = 0;
-        try {
-            if (onHold && activeCall.hold) activeCall.hold();
-            if (!onHold && activeCall.unhold) activeCall.unhold();
-        } catch (err) {}
+        // During a transfer the server plays hold music, so send silence then.
+        if (onHold) holdLine(activeCall, !xfer);
+        else resumeLine(activeCall);
         document.getElementById('holdBtn').classList.toggle('on', onHold);
         document.getElementById('holdLabel').textContent = onHold ? 'Resume' : 'Hold';
         if (onHold) showState('held');
@@ -1545,6 +1638,7 @@ function hangup() {
     }
     setInterval(() => {
         heldCalls.concat(confCalls).forEach((leg) => { if (callIsDead(leg)) dropLeg(leg, 'left the call'); });
+        renderLines();
         if (mixer && activeCall && activeCall.remoteStream) {
             // Un-hold of another line can steal the main speaker: put it back.
             const main = document.getElementById('remoteAudio');
