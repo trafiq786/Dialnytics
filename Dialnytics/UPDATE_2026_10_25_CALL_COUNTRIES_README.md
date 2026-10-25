@@ -7,3 +7,4 @@
 - Database: column `dialnytics_users.call_countries` is added automatically on start (migration 12).
 - This update also contains the Telnyx 2 changes (main.py, call_transfer.py, users.html).
 - Telnyx Outbound Voice Profile must still allow every country you sell (UK, US, Canada).
+- Emergency and short numbers (999, 112, 911, 933, N11 and anything too short) are always blocked, also for admin, in the dialer, call log, Twilio, Power Dialer, advanced calling and transfers.

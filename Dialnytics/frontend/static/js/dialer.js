@@ -37,6 +37,16 @@ const input = document.getElementById('numberInput');
         return '';
     }
     function zoneAllowed(num) { return !ZONES.length || ZONES.includes(zoneOf(num)); }
+    // Emergency / short codes are never dialed (Telnyx charges $100 for an unregistered emergency call).
+    function isEmergency(num) {
+        let d = String(num || '').replace(/\D/g, '');
+        if (d.startsWith('00')) d = d.slice(2);
+        if (d.length < 8) return true;
+        const z = zoneOf(d);
+        if (z === 'US') { const n = d.slice(1); return n.length !== 10 || n.slice(1, 3) === '11' || ['933', '112'].includes(n.slice(0, 3)); }
+        if (z === 'UK') { const n = d.slice(2); return n.length < 9 || n.length > 10 || /^(999|112|911)/.test(n); }
+        return false;
+    }
     let ringback = null;
     let onHold = false;
     let muted = false;
@@ -607,6 +617,7 @@ function markEnded(reason) {
         // Country code is added from the user's own line (US line -> +1, UK line -> +44).
         number = window.DNNumber ? window.DNNumber.toE164(number) : (number.startsWith('+') ? number : '+' + number.replace(/\D/g, ''));
         if (!/^\+[1-9]\d{6,14}$/.test(number)) return setStatus('Check the number: ' + number, 'var(--danger)');
+        if (isEmergency(number)) return setStatus('Emergency and short numbers cannot be called', 'var(--danger)');
         if (!zoneAllowed(number)) return setStatus('Your line can only call ' + ZONE_TEXT, 'var(--danger)');
         if (!client) return setStatus('WebRTC is not ready', 'var(--danger)');
         ended = false;

@@ -1477,7 +1477,27 @@ def call_zones(user):
     own = number_zone(user.get("phone_number"))
     return [own] if own else []
 
+def is_emergency_number(number):
+    """True for emergency / short codes (999, 112, 911, 933 ...) and anything too short
+    to be a real phone number. These are never dialed: Telnyx charges $100 for an
+    emergency call from a number without a registered emergency address."""
+    digits = re.sub(r"\D", "", str(number or ""))
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if len(digits) < 8:
+        return True
+    zone = number_zone(digits)
+    if zone == "US":
+        national = digits[1:]
+        return len(national) != 10 or national[1:3] == "11" or national[:3] in ("933", "112")
+    if zone == "UK":
+        national = digits[2:]
+        return not (9 <= len(national) <= 10) or national.startswith(("999", "112", "911"))
+    return False
+
 def call_allowed(user, to_number):
+    if is_emergency_number(to_number):
+        return False
     zones = call_zones(user)
     return not zones or number_zone(to_number) in zones
 
@@ -1485,7 +1505,9 @@ def call_zone_text(user):
     zones = call_zones(user)
     return " and ".join(CALL_ZONES[z][1] for z in zones) if zones else "any country"
 
-def call_block_message(user):
+def call_block_message(user, to_number=None):
+    if to_number is not None and is_emergency_number(to_number):
+        return "Emergency and short numbers cannot be called from Dialnytics."
     return "Your line can only call " + call_zone_text(user) + ". Ask the admin to allow more countries."
 
 templates.env.globals["call_zones"] = call_zones
@@ -1771,7 +1793,7 @@ async def log_webrtc_call(request: Request):
     to_number = str(data.get("to_number") or "").strip()[:40]
     status = str(data.get("status") or "initiated")[:60]
     if not call_allowed(user, to_number):
-        return JSONResponse({"success": False, "blocked": True, "error": call_block_message(user)}, status_code=403)
+        return JSONResponse({"success": False, "blocked": True, "error": call_block_message(user, to_number)}, status_code=403)
     from_number = user.get("phone_number") or TELNYX_FROM_NUMBER
     provider = user.get("provider") or "telnyx"
     with db_connect() as conn:
@@ -2581,7 +2603,7 @@ async def twilio_voice(request: Request):
     if not user.get("phone_number"):
         return _twiml_response(_say("No caller ID is assigned to this account."), "<Hangup/>")
     if not call_allowed(user, to_number):
-        return _twiml_response(_say("Your line is not allowed to call this country."), "<Hangup/>")
+        return _twiml_response(_say("This number cannot be called from your line."), "<Hangup/>")
     return _twiml_response(
         f'<Dial callerId="{vh.xml_attr(user["phone_number"])}" answerOnBridge="true" timeLimit="14400">'
         f'<Number>{vh.xml_attr(to_number)}</Number></Dial>')
@@ -3348,7 +3370,7 @@ async def power_queue_authorize(queue_id: uuid.UUID, request: Request):
                 (queue_id,user["id"],item_id))
             row=cur.fetchone()
     if not row: raise HTTPException(status_code=409, detail="Lead is not eligible for calling")
-    if not call_allowed(user, row["phone"]): raise HTTPException(status_code=409, detail=call_block_message(user))
+    if not call_allowed(user, row["phone"]): raise HTTPException(status_code=409, detail=call_block_message(user, row["phone"]))
     return {"authorized":True,"phone":row["phone"]}
 
 @app.post("/api/power/queue/{queue_id}/skip")

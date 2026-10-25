@@ -441,7 +441,7 @@ def start(user, number, to_user=None, to_number=None):
             elif not to_number:
                 raise TransferError("Pick an agent or enter a valid number", 422)
             elif D.get("call_allowed") and not D["call_allowed"](user, to_number):
-                raise TransferError(D["call_block_message"](user), 403)
+                raise TransferError(D["call_block_message"](user, to_number), 403)
             elif _same_number(to_number, leg["customer_number"]):
                 raise TransferError("That is the same number as the caller", 422)
             group_id = leg["ref_id"] if leg["kind"] == "in" else None
