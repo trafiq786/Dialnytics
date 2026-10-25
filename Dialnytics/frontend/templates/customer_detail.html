@@ -69,7 +69,7 @@
       (data.numbers || []).forEach((item) => {
         const others = (item.assigned_to || []).filter((u) => String(u.email).toLowerCase() !== myEmail);
         const isCurrent = item.number === currentNumber && provider.value === currentProvider;
-        const opt = new Option(item.number + (isCurrent ? ' (Current)' : others.length ? ' — assigned to ' + others.map((u) => u.last_name).join(', ') : ''), item.number);
+        const opt = new Option(item.number + (item.account_label ? ' · ' + item.account_label : '') + (isCurrent ? ' (Current)' : others.length ? ' — assigned to ' + others.map((u) => u.last_name).join(', ') : ''), item.number);
         opt.disabled = others.length > 0;
         if (isCurrent) opt.selected = true;
         if (!opt.disabled) selectable++;

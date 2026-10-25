@@ -68,10 +68,12 @@ CREATE TABLE IF NOT EXISTS public.call_transfers (
     log_id uuid,
     created_at timestamptz NOT NULL DEFAULT now(),
     deadline timestamptz NOT NULL DEFAULT now() + interval '3 minutes',
+    tx_account text NOT NULL DEFAULT 't1',
     ring_started_at timestamptz,
     answered_at timestamptz,
     ended_at timestamptz
 );
+ALTER TABLE public.call_transfers ADD COLUMN IF NOT EXISTS tx_account text NOT NULL DEFAULT 't1';
 CREATE INDEX IF NOT EXISTS call_transfers_open_idx ON public.call_transfers(status) WHERE status IN ('queued','ringing');
 CREATE INDEX IF NOT EXISTS call_transfers_to_idx ON public.call_transfers(to_user, status);
 CREATE TABLE IF NOT EXISTS public.cc_calls (
@@ -128,13 +130,34 @@ def _hangup(leg):
         _quiet("POST", f"/v2/calls/{leg}/actions/hangup")
 
 
+def _conf():
+    if "conf" in D:
+        return D["conf"]()
+    return {"voice_app_id": os.getenv("TELNYX_VOICE_APP_ID", "").strip(), "adv_connection_id": ADV_CONN}
+
+
+def _acct():
+    return D["current_account"]() if "current_account" in D else "t1"
+
+
+def _in_acct(acct):
+    """Run Telnyx calls on the given account (used by the background worker)."""
+    import contextlib
+    return D["account_ctx"](acct or "t1") if "account_ctx" in D else contextlib.nullcontext()
+
+
 def voice_app():
-    return os.getenv("TELNYX_VOICE_APP_ID", "").strip()
+    return _conf()["voice_app_id"]
+
+
+def adv_conn():
+    """Advanced-calling connection of the current Telnyx account."""
+    return _conf()["adv_connection_id"]
 
 
 def pstn_connection():
     """Connection used to dial phone numbers (needs an Outbound Voice Profile)."""
-    return ADV_CONN or voice_app()
+    return adv_conn() or voice_app()
 
 
 def hold_music_url():
@@ -334,7 +357,8 @@ def targets(user):
                 FROM public.dialnytics_users u
                 WHERE u.account_id=%s AND u.is_active AND u.id<>%s
                   AND COALESCE(u.provider,'telnyx')='telnyx'
-                ORDER BY lower(u.name)""", (user["account_id"], user["id"]))
+                  AND COALESCE(u.telnyx_account,'t1')=%s
+                ORDER BY lower(u.name)""", (user["account_id"], user["id"], user.get("telnyx_account") or "t1"))
             rows = cur.fetchall()
             out = []
             for r in rows:
@@ -402,8 +426,9 @@ def start(user, number, to_user=None, to_number=None):
                 except ValueError:
                     raise TransferError("Agent not found", 404)
                 cur.execute("""SELECT id,name,email,sip_username,phone_number FROM public.dialnytics_users
-                    WHERE id=%s AND account_id=%s AND is_active AND COALESCE(provider,'telnyx')='telnyx'""",
-                    (to_user, user.get("account_id") or None))
+                    WHERE id=%s AND account_id=%s AND is_active AND COALESCE(provider,'telnyx')='telnyx'
+                      AND COALESCE(telnyx_account,'t1')=%s""",
+                    (to_user, user.get("account_id") or None, user.get("telnyx_account") or "t1"))
                 target = cur.fetchone()
                 if not target or str(target["id"]) == user["id"]:
                     raise TransferError("Agent not found", 404)
@@ -419,10 +444,10 @@ def start(user, number, to_user=None, to_number=None):
                 raise TransferError("That is the same number as the caller", 422)
             group_id = leg["ref_id"] if leg["kind"] == "in" else None
             cur.execute("""INSERT INTO public.call_transfers
-                (customer_leg,customer_number,from_user,from_leg,to_user,to_number,status,group_id,deadline)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s, now() + make_interval(secs => %s)) RETURNING id""",
+                (customer_leg,customer_number,from_user,from_leg,to_user,to_number,status,group_id,deadline,tx_account)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s, now() + make_interval(secs => %s), %s) RETURNING id""",
                 (leg["customer_leg"], leg["customer_number"], user["id"], leg["agent_leg"],
-                 target["id"] if target else None, to_number, state, group_id, TRANSFER_WAIT_SECONDS))
+                 target["id"] if target else None, to_number, state, group_id, TRANSFER_WAIT_SECONDS, _acct()))
             tid = str(cur.fetchone()["id"])
     _hold_on(leg["customer_leg"])
     if state == "ringing":
@@ -627,9 +652,9 @@ def on_parked_outbound(payload, find_user):
     """Browser call on the Advanced connection, parked by Telnyx. Dial the
     customer; bridge when they answer. Returns True if this event was ours."""
     agent_leg = payload.get("call_control_id") or ""
-    if not agent_leg or not ADV_CONN:
+    if not agent_leg or not adv_conn():
         return False
-    if str(payload.get("connection_id") or "") != ADV_CONN:
+    if str(payload.get("connection_id") or "") != adv_conn():
         return False
     uid = _uid_from_tag(_header(payload, "X-DN-Leg"))
     user = find_user(uid) if uid else None
@@ -750,8 +775,8 @@ def handle_webhook(event, payload, client_state, find_user):
             return True
         on_cc_event(event, cid, payload)
         return True
-    if event == "call.initiated" and not client_state and ADV_CONN \
-            and str(payload.get("connection_id") or "") == ADV_CONN:
+    if event == "call.initiated" and not client_state and adv_conn() \
+            and str(payload.get("connection_id") or "") == adv_conn():
         # Browser call from a user on the Advanced connection (parked by Telnyx).
         if on_parked_outbound(payload, find_user):
             return True
@@ -768,13 +793,13 @@ def tick():
     """Ring waiting transfers whose agent became free; give up after 3 min."""
     with _db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT id,to_user,deadline < now() AS late FROM public.call_transfers
+            cur.execute("""SELECT id,to_user,tx_account,deadline < now() AS late FROM public.call_transfers
                 WHERE status='queued' ORDER BY created_at LIMIT 50""")
             queued = cur.fetchall()
-            cur.execute("""SELECT id FROM public.call_transfers WHERE status='ringing'
+            cur.execute("""SELECT id,tx_account FROM public.call_transfers WHERE status='ringing'
                 AND COALESCE(ring_started_at, created_at) < now() - make_interval(secs => %s)""",
                 (TRANSFER_RING_SECONDS + 20,))
-            stuck = [r["id"] for r in cur.fetchall()]
+            stuck = cur.fetchall()
             ready = []
             for q in queued:
                 if q["late"]:
@@ -783,14 +808,17 @@ def tick():
                     cur.execute("""UPDATE public.call_transfers SET status='ringing'
                         WHERE id=%s AND status='queued' RETURNING id""", (q["id"],))
                     if cur.fetchone():
-                        ready.append(str(q["id"]))
+                        ready.append((str(q["id"]), q["tx_account"]))
     for q in queued:
         if q["late"]:
-            fail(str(q["id"]), "Agent stayed busy for 3 minutes")
-    for tid in stuck:
-        fail(str(tid), "No answer")
-    for tid in ready:
-        _ring(tid)
+            with _in_acct(q["tx_account"]):
+                fail(str(q["id"]), "Agent stayed busy for 3 minutes")
+    for r in stuck:
+        with _in_acct(r["tx_account"]):
+            fail(str(r["id"]), "No answer")
+    for tid, acct in ready:
+        with _in_acct(acct):
+            _ring(tid)
     return len(ready)
 
 

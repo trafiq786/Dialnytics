@@ -79,6 +79,52 @@ TELNYX_API_KEY = os.getenv("TELNYX_API_KEY", "")
 TELNYX_CONNECTION_ID = os.getenv("TELNYX_CONNECTION_ID", "")
 TELNYX_FROM_NUMBER = os.getenv("TELNYX_FROM_NUMBER", "")
 
+# ==================== TELNYX ACCOUNTS (1 = TELNYX_*, 2 = TELNYX2_*) ====================
+# Each user calls through the Telnyx account that owns their number. The
+# account for the current request is kept in a context variable, so every
+# Telnyx API call below automatically uses the right API key / connection.
+import contextlib
+import contextvars
+
+def _tx_env(prefix):
+    g = lambda k: os.getenv(prefix + k, "").strip()
+    return {"api_key": g("API_KEY"), "connection_id": g("CONNECTION_ID"), "voice_app_id": g("VOICE_APP_ID"),
+            "public_key": g("PUBLIC_KEY"), "sms_profile_id": g("SMS_PROFILE_ID"),
+            "adv_connection_id": g("ADV_CONNECTION_ID")}
+
+TELNYX_ACCOUNTS = {"t1": dict(_tx_env("TELNYX_"), label="Telnyx 1")}
+if os.getenv("TELNYX2_API_KEY", "").strip():
+    TELNYX_ACCOUNTS["t2"] = dict(_tx_env("TELNYX2_"), label="Telnyx 2")
+_TX = contextvars.ContextVar("dn_telnyx_account", default="t1")
+
+def tx_key(acct):
+    return acct if acct in TELNYX_ACCOUNTS else "t1"
+
+def tx_conf(acct=None):
+    return TELNYX_ACCOUNTS[tx_key(acct or _TX.get())]
+
+def tx_current():
+    return tx_key(_TX.get())
+
+def tx_use(acct):
+    _TX.set(tx_key(acct))
+
+@contextlib.contextmanager
+def tx_ctx(acct):
+    token = _TX.set(tx_key(acct))
+    try:
+        yield
+    finally:
+        _TX.reset(token)
+
+def _bg(background, fn, *args):
+    """Background task that keeps the Telnyx account of this request."""
+    acct = tx_current()
+    def run():
+        with tx_ctx(acct):
+            fn(*args)
+    background.add_task(run)
+
 # ==================== CONFIG (Twilio backup provider) ====================
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
@@ -177,6 +223,7 @@ def _db_user(row):
         "dnd_enabled": row["dnd_enabled"],
         "sms_enabled": bool(row.get("sms_enabled", False)),
         "adv_calling": bool(row.get("adv_calling", False)),
+        "telnyx_account": tx_key(row.get("telnyx_account") or "t1"),
         "is_demo": bool(row.get("is_demo", False)),
         "account_id": str(row["account_id"]) if row.get("account_id") else "",
         "account_role": "owner" if row.get("account_role") == "owner" else "agent",
@@ -333,6 +380,8 @@ CREATE INDEX IF NOT EXISTS sms_messages_thread_idx ON public.sms_messages(user_i
 CREATE INDEX IF NOT EXISTS sms_messages_unread_idx ON public.sms_messages(user_id) WHERE direction = 'in' AND is_read = false;
 ALTER TABLE public.sms_messages ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.sms_messages FROM anon, authenticated;
+-- 11: second Telnyx account
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS telnyx_account text NOT NULL DEFAULT 't1';
 """ + ct.SCHEMA_SQL
 
 def ensure_schema():
@@ -459,6 +508,14 @@ def _terminate_user_inbound_calls(user_id):
     """
     with db_connect() as conn:
         with conn.cursor() as cur:
+            cur.execute("SELECT telnyx_account FROM public.dialnytics_users WHERE id=%s", (user_id,))
+            r = cur.fetchone()
+    with tx_ctx((r or {}).get("telnyx_account") or "t1"):
+        return _terminate_user_inbound_calls_now(user_id)
+
+def _terminate_user_inbound_calls_now(user_id):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
             cur.execute("""SELECT g.id, g.telnyx_call_id
                 FROM public.incoming_call_groups g
                 JOIN public.call_participants p ON p.group_id=g.id
@@ -521,6 +578,7 @@ def get_current_user(request: Request):
     if not row:
         return None
     user=_db_user(row)
+    tx_use(user.get("telnyx_account"))   # this request talks to the user's Telnyx account
     if user.get("is_demo") and (not user.get("trial_expires_at") or datetime.fromisoformat(user["trial_expires_at"]) <= datetime.now().astimezone()):
         revoke_session(token)
         return None
@@ -577,9 +635,34 @@ async def login(request: Request, email: str = Form(...), password: str = Form(.
 async def signup_disabled():
     return RedirectResponse(url="/login", status_code=302)
 
+_tx_numbers_cache = {"at": 0, "map": {}}
+
+def telnyx_number_accounts(fresh=False):
+    """{number: account} for every configured Telnyx account (cached 60 s)."""
+    if not fresh and time.time() - _tx_numbers_cache["at"] < 60 and _tx_numbers_cache["map"]:
+        return dict(_tx_numbers_cache["map"])
+    mapping = {}
+    for acct in TELNYX_ACCOUNTS:
+        if not TELNYX_ACCOUNTS[acct]["api_key"]:
+            continue
+        with tx_ctx(acct):
+            try:
+                for n in _telnyx_numbers_one():
+                    mapping.setdefault(n, acct)
+            except HTTPException:
+                if acct == "t1":
+                    raise
+                log.exception("Could not list numbers of %s", acct)
+    _tx_numbers_cache.update(at=time.time(), map=mapping)
+    return dict(mapping)
+
 def get_telnyx_numbers():
-    """Fetch all account-owned numbers, including paginated results."""
-    if not TELNYX_API_KEY:
+    """All numbers owned by any of the Telnyx accounts."""
+    return sorted(telnyx_number_accounts(fresh=True))
+
+def _telnyx_numbers_one():
+    """Fetch all numbers of the current Telnyx account, including paginated results."""
+    if not tx_conf()["api_key"]:
         raise HTTPException(status_code=503, detail="Telnyx API key not configured")
     numbers = []
     page = 1
@@ -733,8 +816,11 @@ async def admin_caller_ids(request: Request):
                     'email': r['email'],
                     'last_name': (r['name'] or '').strip().split()[-1] if (r['name'] or '').strip() else 'Unknown'
                 })
+    owners = telnyx_number_accounts() if provider == "telnyx" and len(TELNYX_ACCOUNTS) > 1 else {}
     return JSONResponse({'numbers': [
-        {'number': n, 'assigned_to': assigned.get(n, [])} for n in numbers
+        {'number': n, 'assigned_to': assigned.get(n, []),
+         'account': owners.get(n, ''), 'account_label': TELNYX_ACCOUNTS[owners[n]]['label'] if n in owners else ''}
+        for n in numbers
     ]}, headers={'Cache-Control': 'no-store'})
 
 
@@ -860,6 +946,8 @@ async def customer_change_number(request: Request, email: str, phone_number: str
             cur.execute('INSERT INTO public.caller_id_assignments(user_id,phone_number) VALUES (%s,%s)', (target['id'],new_number))
             cur.execute('UPDATE public.dialnytics_users SET phone_number=%s,provider=%s WHERE id=%s',
                         (new_number,provider,target['id']))
+    if provider == 'telnyx':
+        _set_user_telnyx_account(target['id'], telnyx_number_accounts().get(new_number, 't1'))
     refresh_users()
     if provider == 'twilio':
         _twilio_configure_number(new_number)
@@ -1172,13 +1260,18 @@ async def create_user(
     except UniqueViolation:
         return fail('Email or Caller ID already assigned; refresh and retry')
 
+    acct = 't1'
+    if phone_number and provider == 'telnyx':
+        acct = telnyx_number_accounts().get(phone_number, 't1')
+        _set_user_telnyx_account(new_id, acct)
     refresh_users()
     if phone_number:
         if provider == 'twilio':
             _twilio_configure_number(phone_number)
         else:
             try:
-                _ensure_credential(email)
+                with tx_ctx(acct):
+                    _ensure_credential(email)
             except Exception:
                 log.exception('Telnyx credential creation failed for new user')
     return RedirectResponse('/users?created=new', status_code=303)
@@ -1349,6 +1442,14 @@ def plan_status(user):
 
 templates.env.globals["has_recording"] = has_recording
 templates.env.globals["leg_tag"] = ct.leg_tag
+def provider_label(u):
+    """'Twilio', 'Telnyx', or 'Telnyx 1' / 'Telnyx 2' when two Telnyx accounts are set up."""
+    if (u.get("provider") or "telnyx") == "twilio":
+        return "Twilio"
+    if len(TELNYX_ACCOUNTS) > 1:
+        return tx_conf(u.get("telnyx_account") or "t1")["label"]
+    return "Telnyx"
+templates.env.globals["provider_label"] = provider_label
 templates.env.globals["has_sms"] = has_sms
 templates.env.globals["plan_status"] = plan_status
 
@@ -1482,15 +1583,16 @@ async def dialer_page(request: Request):
     return RedirectResponse(url="/dashboard", status_code=302)
 
 def _telnyx_request(method: str, path: str, body: dict = None):
-    if not TELNYX_API_KEY:
-        raise HTTPException(status_code=500, detail="TELNYX_API_KEY missing")
+    api_key = tx_conf()["api_key"]
+    if not api_key:
+        raise HTTPException(status_code=500, detail=f"{tx_conf()['label']} API key missing")
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(
         "https://api.telnyx.com" + path,
         data=data,
         method=method,
         headers={
-            "Authorization": f"Bearer {TELNYX_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         },
@@ -1507,12 +1609,37 @@ def _telnyx_request(method: str, path: str, body: dict = None):
         detail = e.read().decode()
         raise HTTPException(status_code=502, detail=f"Telnyx error: {detail}")
 
+def _set_user_telnyx_account(user_id, acct):
+    """Put the user on the Telnyx account that owns their number. Their calling
+    login belongs to one account, so switching accounts makes a new one."""
+    acct = tx_key(acct)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT telnyx_account, credential_id FROM public.dialnytics_users WHERE id=%s""", (user_id,))
+            row = cur.fetchone()
+            if not row or tx_key(row["telnyx_account"]) == acct:
+                if row and row["telnyx_account"] != acct:
+                    cur.execute("UPDATE public.dialnytics_users SET telnyx_account=%s WHERE id=%s", (acct, user_id))
+                return
+            cur.execute("""UPDATE public.dialnytics_users SET telnyx_account=%s, credential_id=NULL,
+                sip_username=NULL, adv_calling=false WHERE id=%s""", (acct, user_id))
+    old_acct, old_cred = tx_key(row["telnyx_account"]), row["credential_id"]
+    for u in users_db.values():
+        if str(u.get("id")) == str(user_id):
+            u.update(telnyx_account=acct, credential_id="", sip_username="", adv_calling=False)
+    if old_cred:
+        try:
+            with tx_ctx(old_acct):
+                _telnyx_request("DELETE", f"/v2/telephony_credentials/{old_cred}")
+        except Exception:
+            log.info("Old calling login %s on %s was not deleted", old_cred, old_acct)
+
 def _ensure_credential(email: str) -> str:
     user = users_db.get(email) or {}
     if user.get("credential_id"):
         return user["credential_id"]
     created = _telnyx_request("POST", "/v2/telephony_credentials", {
-        "connection_id": TELNYX_CONNECTION_ID,
+        "connection_id": tx_conf()["connection_id"],
         "name": f"dialnytics-{email}"[:60],
         "tag": "dialnytics",
     })
@@ -2006,21 +2133,31 @@ async def voicemails_page(request: Request):
 
 
 # ==================== TELNYX WEBHOOK (incoming + voicemail) ====================
-def verify_telnyx_webhook(raw: bytes, signature: str, timestamp: str) -> bool:
-    """Validate Telnyx API v2 Ed25519 signature with a 5-minute replay window."""
-    public_key = os.getenv("TELNYX_PUBLIC_KEY", "").strip()
-    if not public_key or not signature or not timestamp:
-        return False
+def verify_telnyx_webhook(raw: bytes, signature: str, timestamp: str):
+    """Validate the Telnyx API v2 Ed25519 signature (5-minute replay window).
+    Returns the Telnyx account ("t1"/"t2") whose key signed it, or None.
+    The account is also made current for the rest of the request."""
+    if not signature or not timestamp:
+        return None
     try:
         ts = int(timestamp)
         if abs(time.time() - ts) > 300:
-            return False
-        key = Ed25519PublicKey.from_public_bytes(base64.b64decode(public_key, validate=True))
-        signed_message = timestamp.encode("ascii") + b"|" + raw
-        key.verify(base64.b64decode(signature, validate=True), signed_message)
-        return True
-    except (ValueError, TypeError, InvalidSignature):
-        return False
+            return None
+        sig = base64.b64decode(signature, validate=True)
+    except (ValueError, TypeError):
+        return None
+    signed_message = timestamp.encode("ascii") + b"|" + raw
+    for acct, conf in TELNYX_ACCOUNTS.items():
+        if not conf["public_key"]:
+            continue
+        try:
+            key = Ed25519PublicKey.from_public_bytes(base64.b64decode(conf["public_key"], validate=True))
+            key.verify(sig, signed_message)
+        except (ValueError, TypeError, InvalidSignature):
+            continue
+        tx_use(acct)
+        return acct
+    return None
 
 def _cs_encode(text):
     return base64.b64encode(text.encode()).decode()
@@ -2124,9 +2261,10 @@ def _handle_voicemail_event(event, payload, group_id, background):
         if mp3:
             duration = _seconds_between(payload.get("recording_started_at"), payload.get("recording_ended_at"))
             ref = "telnyx:" + str(payload.get("recording_id") or payload.get("call_leg_id") or call_id)
-            background.add_task(_telnyx_save_voicemail, group_id, mp3, duration, ref, call_id)
+            _bg(background, _telnyx_save_voicemail, group_id, mp3, duration, ref, call_id)
 
 ct.setup(db_connect=db_connect, telnyx=_telnyx_request, cs_encode=_cs_encode,
+         conf=tx_conf, current_account=tx_current, account_ctx=tx_ctx,
          base_url=PUBLIC_BASE_URL, presence_timeout=40,
          no_worker=os.getenv("TRANSFER_WORKER", "1") == "0")
 
@@ -2153,7 +2291,7 @@ def _handle_ring_leg_event(event, group_id, background, payload=None):
         return
     if group["status"] == "ringing":
         # Agent did not pick up (timeout, rejected, offline): go to voicemail.
-        background.add_task(_telnyx_start_voicemail, group["telnyx_call_id"], group_id)
+        _bg(background, _telnyx_start_voicemail, group["telnyx_call_id"], group_id)
     elif group["status"] in ("answered", "transferred"):
         # Agent hung up first: do not leave the caller in silence -- unless the
         # call was transferred and another agent is talking to the caller now.
@@ -2163,7 +2301,7 @@ def _handle_ring_leg_event(event, group_id, background, payload=None):
             log.exception("Transfer check failed for group %s", group_id)
             someone_else = group["status"] == "transferred"
         if not someone_else:
-            background.add_task(_telnyx_hangup_quietly, group["telnyx_call_id"])
+            _bg(background, _telnyx_hangup_quietly, group["telnyx_call_id"])
 
 @app.post("/webhooks/telnyx")
 async def telnyx_webhook(request: Request, background: BackgroundTasks):
@@ -2255,15 +2393,15 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
                                     (group_id,recipient["id"]))
                                 ring_user = recipient
             if retry_of_declined:
-                background.add_task(_telnyx_reject_declined, call_id)
+                _bg(background, _telnyx_reject_declined, call_id)
             if group_id:
                 # Do not create new SIP credentials in a webhook: the user must
                 # have logged in once and obtained a WebRTC credential already.
                 sip_username = (ring_user or {}).get("sip_username", "")
-                if sip_username and TELNYX_API_KEY and os.getenv("TELNYX_VOICE_APP_ID"):
+                if sip_username and tx_conf()["api_key"] and tx_conf()["voice_app_id"]:
                     try:
                         ring_resp = _telnyx_request("POST", "/v2/calls", {
-                            "connection_id": os.environ["TELNYX_VOICE_APP_ID"],
+                            "connection_id": tx_conf()["voice_app_id"],
                             "to": f"sip:{sip_username}@sip.telnyx.com",
                             "from": origin or destination,
                             "link_to": call_id,
@@ -2288,10 +2426,10 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
                     except Exception:
                         # Do not expose provider credentials or error bodies in responses.
                         log.exception("Inbound SIP dial failed for call group %s", group_id)
-                        background.add_task(_telnyx_start_voicemail, call_id, group_id)
-                elif voicemail_ok and TELNYX_API_KEY:
+                        _bg(background, _telnyx_start_voicemail, call_id, group_id)
+                elif voicemail_ok and tx_conf()["api_key"]:
                     # Agent is on Do Not Disturb or has never logged in: voicemail.
-                    background.add_task(_telnyx_start_voicemail, call_id, group_id)
+                    _bg(background, _telnyx_start_voicemail, call_id, group_id)
                 else:
                     # Unassigned number or expired plan. Do not leave a caller
                     # ringing indefinitely.
@@ -2299,7 +2437,7 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
                         with conn.cursor() as cur:
                             cur.execute("""UPDATE public.incoming_call_groups
                                 SET status='missed',ended_at=NOW() WHERE id=%s""", (group_id,))
-                    background.add_task(_telnyx_hangup_quietly, call_id)
+                    _bg(background, _telnyx_hangup_quietly, call_id)
         if call_id and event in ("call.answered", "call.bridged", "call.hangup"):
             with db_connect() as conn:
                 with conn.cursor() as cur:
@@ -2640,10 +2778,11 @@ def _telnyx_sms_send(from_number, to_number, text):
     """Returns (provider_id, status, error_detail)."""
     body = {"from": from_number, "to": to_number, "text": text,
             "webhook_url": PUBLIC_BASE_URL + "/webhooks/telnyx/sms"}
-    if TELNYX_SMS_PROFILE_ID:
-        body["messaging_profile_id"] = TELNYX_SMS_PROFILE_ID
+    profile = tx_conf()["sms_profile_id"]
+    if profile:
+        body["messaging_profile_id"] = profile
     status, data = vh.http_json("POST", "https://api.telnyx.com/v2/messages", body=body,
-                                headers={"Authorization": f"Bearer {TELNYX_API_KEY}"})
+                                headers={"Authorization": f"Bearer {tx_conf()['api_key']}"})
     if status >= 400 or not isinstance(data, dict):
         errors = (data.get("errors") if isinstance(data, dict) else None) or []
         detail = "; ".join(str(e.get("detail") or e.get("title") or "") for e in errors) or str(data)[:300]
@@ -2654,9 +2793,10 @@ def _telnyx_sms_send(from_number, to_number, text):
 
 def _link_number_to_sms_profile(number):
     """Assign the number to the SMS messaging profile so inbound texts reach the dialer. Returns error or ''."""
-    if not (TELNYX_API_KEY and TELNYX_SMS_PROFILE_ID):
-        return "TELNYX_SMS_PROFILE_ID is not set, link the number to the messaging profile in Telnyx."
-    auth = {"Authorization": f"Bearer {TELNYX_API_KEY}"}
+    conf = tx_conf()
+    if not (conf["api_key"] and conf["sms_profile_id"]):
+        return f"The SMS profile id for {conf['label']} is not set; link the number to the messaging profile in Telnyx."
+    auth = {"Authorization": f"Bearer {conf['api_key']}"}
     try:
         status, data = vh.http_json("GET", "https://api.telnyx.com/v2/phone_numbers?" +
                                     urllib.parse.urlencode({"filter[phone_number]": number}), headers=auth)
@@ -2664,7 +2804,7 @@ def _link_number_to_sms_profile(number):
         if status >= 400 or not rows:
             return f"Number {number} not found in the Telnyx account."
         status, data = vh.http_json("PATCH", f"https://api.telnyx.com/v2/phone_numbers/{rows[0]['id']}/messaging",
-                                    body={"messaging_profile_id": TELNYX_SMS_PROFILE_ID}, headers=auth)
+                                    body={"messaging_profile_id": conf["sms_profile_id"]}, headers=auth)
         if status >= 400:
             errors = (data.get("errors") if isinstance(data, dict) else None) or []
             return "Telnyx refused: " + ("; ".join(str(e.get("detail") or e.get("title")) for e in errors) or str(status))
@@ -2759,7 +2899,7 @@ async def sms_send(request: Request):
                 AND created_at > NOW() - INTERVAL '24 hours'""", (user["id"],))
             if int(cur.fetchone()["n"]) >= SMS_DAILY_LIMIT:
                 raise HTTPException(status_code=429, detail="Daily message limit reached. Please contact support.")
-    if not TELNYX_API_KEY:
+    if not tx_conf()["api_key"]:
         raise HTTPException(status_code=503, detail=SMS_UNAVAILABLE)
     try:
         provider_id, status, error = _telnyx_sms_send(user["phone_number"], to, text)
@@ -2847,19 +2987,21 @@ async def toggle_advanced_calling(request: Request, email: str = Form(...)):
         back = "/users"
     def fail(msg):
         return RedirectResponse(url=back + "?error=" + urllib.parse.quote(msg), status_code=302)
-    if not ct.ADV_CONN:
-        return fail("Add TELNYX_ADV_CONNECTION_ID in Render first (see the update notes).")
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT id,adv_calling,credential_id,provider FROM public.dialnytics_users
+            cur.execute("""SELECT id,adv_calling,credential_id,provider,telnyx_account FROM public.dialnytics_users
                 WHERE email=%s""", (email,))
             row = cur.fetchone()
+    if row:
+        tx_use(row["telnyx_account"])        # work on the user's Telnyx account
+    if not ct.adv_conn():
+        return fail(f"Add the Advanced connection id for {tx_conf()['label']} in Render first (see the update notes).")
     if not row:
         return fail("User not found")
     if (row["provider"] or "telnyx") != "telnyx":
         return fail("Advanced calling is only for Telnyx lines")
     turn_on = not bool(row["adv_calling"])
-    connection = ct.ADV_CONN if turn_on else TELNYX_CONNECTION_ID
+    connection = ct.adv_conn() if turn_on else tx_conf()["connection_id"]
     try:
         created = _telnyx_request("POST", "/v2/telephony_credentials", {
             "connection_id": connection, "name": f"dialnytics-{email}"[:60],
@@ -2904,7 +3046,8 @@ async def toggle_sms(request: Request, email: str = Form(...)):
         back = "/users"
     sep = "?"
     if row["sms_enabled"] and row["phone_number"] and (row["provider"] or "telnyx") == "telnyx":
-        problem = _link_number_to_sms_profile(row["phone_number"])
+        with tx_ctx(telnyx_number_accounts().get(row["phone_number"], "t1")):
+            problem = _link_number_to_sms_profile(row["phone_number"])
         if problem:
             log.warning("SMS profile link for %s: %s", email, problem)
             return RedirectResponse(url=back + sep + "error=" + urllib.parse.quote("SMS turned ON, but: " + problem), status_code=302)

@@ -67,7 +67,7 @@
       select.replaceChildren(new Option('Select Caller ID', ''));
       callerIds.forEach(item => {
         const names = item.assigned_to.map(person => person.last_name).join(', ');
-        const label = item.number + (names ? ' — Assigned (' + names + ')' : ' — Available');
+        const label = item.number + (item.account_label ? ' · ' + item.account_label : '') + (names ? ' — Assigned (' + names + ')' : ' — Available');
         select.add(new Option(label, item.number));
       });
       if (!callerIds.length) message.textContent = 'No phone numbers found in your ' + providerName + ' account.';
@@ -137,9 +137,9 @@
  <div class="premium-scroll"><table class="premium-table"><thead><tr><th>USER</th><th>CALLER ID</th><th>PLAN</th><th>STATUS</th><th>RENEWAL</th><th>ACTION</th></tr></thead><tbody>
  {% set cmap = {} %}{% for c in companies %}{% set _ = cmap.update({c.id|string: c.name}) %}{% endfor %}
  {% for u in users %}<tr class="premium-user-row" data-search="{{ (u.name ~ ' ' ~ u.email ~ ' ' ~ (u.phone_number or ''))|lower|e }}">
- <td><strong>{{ u.name }}</strong><small>{{ u.email }}</small>{% if u.user_type == 'reseller' %}<small><span class="dn-pill warn">Reseller</span></small>{% elif u.account_id and cmap.get(u.account_id) %}<small><a href="/companies/{{ u.account_id }}">{{ cmap.get(u.account_id) }}</a> · {{ 'Owner' if u.account_role == 'owner' else 'Agent' }}</small>{% endif %}</td><td class="number-cell">{{ u.phone_number or 'Unassigned' }}<small><span class="dn-pill {{ u.provider or 'telnyx' }}">{{ (u.provider or 'telnyx')|capitalize }}</span></small></td><td><span class="plan-pill">{{ u.plan_name or '—' }}</span></td>
+ <td><strong>{{ u.name }}</strong><small>{{ u.email }}</small>{% if u.user_type == 'reseller' %}<small><span class="dn-pill warn">Reseller</span></small>{% elif u.account_id and cmap.get(u.account_id) %}<small><a href="/companies/{{ u.account_id }}">{{ cmap.get(u.account_id) }}</a> · {{ 'Owner' if u.account_role == 'owner' else 'Agent' }}</small>{% endif %}</td><td class="number-cell">{{ u.phone_number or 'Unassigned' }}<small><span class="dn-pill {{ u.provider or 'telnyx' }}">{{ provider_label(u) }}</span></small></td><td><span class="plan-pill">{{ u.plan_name or '—' }}</span></td>
  <td><span class="status-pill {{ 'status-demo' if u.is_demo else 'status-active' }}">{{ 'Demo' if u.is_demo else 'Active' }}</span></td><td>{{ u.plan_renewal or '—' }}</td>
- <td><button type="button" class="premium-edit" data-user='{{ {"name":u.name,"email":u.email,"number":u.phone_number,"provider":u.provider or "telnyx","plan":u.plan_name,"renewal":u.plan_renewal,"recording":u.recording_premium,"sms":(u.sms_enabled|default(false)),"adv":(u.adv_calling|default(false)),"demo":u.is_demo,"role":u.role}|tojson|forceescape }}'>Edit ✎</button></td></tr>{% endfor %}
+ <td><button type="button" class="premium-edit" data-user='{{ {"name":u.name,"email":u.email,"number":u.phone_number,"provider":u.provider or "telnyx","provider_label":provider_label(u),"plan":u.plan_name,"renewal":u.plan_renewal,"recording":u.recording_premium,"sms":(u.sms_enabled|default(false)),"adv":(u.adv_calling|default(false)),"demo":u.is_demo,"role":u.role}|tojson|forceescape }}'>Edit ✎</button></td></tr>{% endfor %}
  </tbody></table></div>
 </section>
 <div id="userDrawerBackdrop" class="user-drawer-backdrop" hidden></div>
@@ -176,7 +176,7 @@
   document.querySelectorAll('.drawer-target-email').forEach(x=>x.value=u.email);
   document.getElementById('editName').value=u.name;document.getElementById('editEmail').value=u.email;
   document.getElementById('editNumberDisplay').value=u.number||'Unassigned';
-  document.getElementById('editProviderDisplay').value=(u.provider==='twilio'?'Twilio (backup)':'Telnyx (main)');
+  document.getElementById('editProviderDisplay').value=(u.provider==='twilio'?'Twilio (backup)':(u.provider_label||'Telnyx'));
   document.getElementById('editPlan').value=u.plan||'';document.getElementById('editRenewal').value=u.renewal||'';
   document.getElementById('recordingState').textContent=u.recording?'Enabled':'Disabled';
   document.getElementById('smsState').textContent=u.sms?'Enabled':(u.number?'Disabled':'Disabled · needs a calling number');
