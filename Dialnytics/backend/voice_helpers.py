@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import math
+import re
 import os
 import secrets
 import time
@@ -160,12 +161,45 @@ def http_bytes(url, *, headers=None, basic_auth=None, timeout=30, max_bytes=50 *
 # --------------------------------------------------------------------------
 DEFAULT_RATES = {
     # USD per billable minute. Editable by the admin in Settings.
+    # Keys without a country suffix are US / Canada (+1), as before.
     "telnyx_out": 0.0070,
     "telnyx_in": 0.0055,
     "twilio_out": 0.0140,
     "twilio_in": 0.0085,
+    # United Kingdom landline / geographic (+44 1, 2, 3 ...)
+    "telnyx_out_uk": 0.0060, "telnyx_in_uk": 0.0060,
+    "twilio_out_uk": 0.0135, "twilio_in_uk": 0.0130,
+    # United Kingdom mobile (+44 7)
+    "telnyx_out_uk_mobile": 0.0160, "telnyx_in_uk_mobile": 0.0100,
+    "twilio_out_uk_mobile": 0.0270, "twilio_in_uk_mobile": 0.0130,
+    # Every other country
+    "telnyx_out_other": 0.0500, "telnyx_in_other": 0.0150,
+    "twilio_out_other": 0.0600, "twilio_in_other": 0.0150,
+    # Twilio also bills the browser (Client) leg of every call
+    "twilio_client": 0.0040,
     "usd_to_pkr": 280.0,
 }
+RATE_ZONES = (("us", "US / Canada"), ("uk", "UK landline"), ("uk_mobile", "UK mobile"), ("other", "Other countries"))
+
+
+def rate_zone(number) -> str:
+    """Price zone of a phone number: us, uk, uk_mobile or other."""
+    d = re.sub(r"\D", "", str(number or ""))
+    if d.startswith("00"):
+        d = d[2:]
+    if d.startswith("1"):
+        return "us"
+    if d.startswith("447"):
+        return "uk_mobile"
+    if d.startswith("44"):
+        return "uk"
+    return "other"
+
+
+def rate_key(provider, direction, zone) -> str:
+    provider = provider if provider in ("telnyx", "twilio") else "telnyx"
+    leg = "in" if direction == "incoming" else "out"
+    return f"{provider}_{leg}" if zone == "us" else f"{provider}_{leg}_{zone}"
 
 
 def billable_minutes(seconds) -> int:
@@ -173,10 +207,12 @@ def billable_minutes(seconds) -> int:
     return math.ceil(seconds / 60) if seconds > 0 else 0
 
 
-def call_cost(seconds, provider, direction, rates) -> float:
-    provider = provider if provider in ("telnyx", "twilio") else "telnyx"
-    leg = "in" if direction == "incoming" else "out"
-    rate = float(rates.get(f"{provider}_{leg}", DEFAULT_RATES[f"{provider}_{leg}"]))
+def call_cost(seconds, provider, direction, rates, number=None) -> float:
+    """number = the dialed number for outgoing calls, our own number for incoming calls."""
+    key = rate_key(provider, direction, rate_zone(number) if number else "us")
+    rate = float(rates.get(key, DEFAULT_RATES[key]))
+    if provider == "twilio":
+        rate += float(rates.get("twilio_client", DEFAULT_RATES["twilio_client"]))
     return round(billable_minutes(seconds) * rate, 6)
 
 

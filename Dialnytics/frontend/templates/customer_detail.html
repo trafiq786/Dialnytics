@@ -10,7 +10,7 @@
 <section class="cm-card">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
     <div><h2 style="margin:0">Estimated Provider Cost</h2>
-    <p class="cm-muted" style="margin:6px 0 0;font-size:13px">Based on this customer's calls, {{ prov|capitalize }} rates (incoming ${{ '%.4f'|format(costs.rates[prov ~ '_in']) }}/min, outgoing ${{ '%.4f'|format(costs.rates[prov ~ '_out']) }}/min). Change rates in Settings.</p></div>
+    <p class="cm-muted" style="margin:6px 0 0;font-size:13px">Based on this customer's calls and the per-country {{ provider_label(customer) }} rates (each call priced by the country it went to). Change rates in Settings.</p></div>
     <span class="dn-pill {{ prov }}">{{ prov|capitalize }}</span>
   </div>
   <div class="cm-metrics" style="margin-top:16px">

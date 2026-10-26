@@ -397,6 +397,11 @@ function markEnded(reason) {
             options: { destinationNumber: number, remoteCallerNumber: number },
             get remoteStream() { try { return tw.getRemoteStream ? tw.getRemoteStream() : null; } catch (e) { return null; } },
             get localStream() { try { return tw.getLocalStream ? tw.getLocalStream() : null; } catch (e) { return null; } },
+            // Twilio keeps its RTCPeerConnection here (used for hold).
+            get peerConnection() {
+                try { const pc = tw._mediaHandler && tw._mediaHandler.version && tw._mediaHandler.version.pc; return pc instanceof RTCPeerConnection ? pc : null; } catch (e) { return null; }
+            },
+            get callSid() { try { return (tw.parameters && tw.parameters.CallSid) || ''; } catch (e) { return ''; } },
             answer() { tw.accept(); },
             reject() { tw.reject(); },
             hangup() {
@@ -719,7 +724,6 @@ function hangup() {
 
     function transferCall() {
         if (!activeCall) return setStatus('Transfer works only during a call', 'var(--danger)');
-        if (activeCall._twilio) return setStatus('Transfer is not available on this line yet', 'var(--danger)');
         if (xfer) return setStatus('A transfer is already in progress');
         if (confCalls.length) return setStatus('End the conference before transferring', 'var(--danger)');
         if (!talkStart) return setStatus('Transfer works once the call is answered', 'var(--danger)');
@@ -735,10 +739,12 @@ function hangup() {
         const box = document.getElementById('transferList');
         box.innerHTML = '<p class="xfer-empty">Loading team...</p>';
         const outgoing = activeCall && !String(activeCall.direction || '').toLowerCase().startsWith('in');
-        if (outgoing && !ADV) pickerNote('Outgoing calls can be transferred after the admin turns on Advanced calling for your account. Incoming calls can be transferred now.', true);
+        const twilioLine = !!(activeCall && activeCall._twilio);
+        if (twilioLine) pickerNote('Pick a teammate. The caller is moved to them right away and your side of the call ends. If they do not answer, the caller can leave them a voicemail.');
+        else if (outgoing && !ADV) pickerNote('Outgoing calls can be transferred after the admin turns on Advanced calling for your account. Incoming calls can be transferred now.', true);
         else pickerNote('Pick a teammate. If they are on another call, the caller hears hold music and the call goes to them as soon as they are free (max 3 minutes).');
         try {
-            const res = await fetch('/api/transfer/targets', { cache: 'no-store' });
+            const res = await fetch(twilioLine ? '/api/twilio/transfer/targets' : '/api/transfer/targets', { cache: 'no-store' });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || 'Could not load the team');
             const agents = data.agents || [];
@@ -768,6 +774,7 @@ function hangup() {
         const fromPicker = !document.getElementById('transferView').hidden;
         if (fromPicker) pickerNote('Transferring to ' + (name || 'agent') + '...');
         else setStatus('Starting transfer...');
+        if (call._twilio) return twilioTransfer(call, body, name, fromPicker);
         let data = {};
         try {
             const res = await fetch('/api/transfer', {
@@ -787,6 +794,30 @@ function hangup() {
         if (!onHold) toggleHold();          // you step away; the caller hears hold music
         renderXfer(data);
         xfer.timer = setInterval(pollXfer, 2000);
+    }
+    // Twilio: blind transfer. The server moves the caller; then this side ends.
+    async function twilioTransfer(call, body, name, fromPicker) {
+        body.call_sid = call.callSid;
+        try {
+            const res = await fetch('/api/twilio/transfer', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || 'Transfer failed');
+            name = data.to_name || name;
+        } catch (err) {
+            if (fromPicker) pickerNote(err.message, true);
+            else { showInCall(legNumber(call) || body.number); setStatus(err.message, 'var(--danger)'); }
+            return;
+        }
+        composeMode = '';
+        setStatus('Transferred to ' + (name || 'agent'));
+        setTimeout(() => {
+            if (activeCall === call && !ended) {
+                try { call.hangup(); } catch (e) {}
+                markEnded('Transferred to ' + (name || 'agent'));
+            }
+        }, 1200);
     }
     function renderXfer(t) {
         const bar = document.getElementById('xferBar');
@@ -1590,19 +1621,26 @@ function hangup() {
     }
     function toggleHold() {
         if (!activeCall) return;
-        if (activeCall._twilio) return setStatus('Hold is not available on this line yet', 'var(--danger)');
         if (confCalls.length) return setStatus('Use Add Call to put the whole conference on hold', 'var(--danger)');
+        if (activeCall._twilio && !onHold && !audioSender(activeCall)) return setStatus('Hold is not available on this call', 'var(--danger)');
         onHold = !onHold;
         rtpStall = 0;
         iceStall = 0;
         // During a transfer the server plays hold music, so send silence then.
         if (onHold) holdLine(activeCall, !xfer);
         else resumeLine(activeCall);
+        if (activeCall._twilio) twilioListen(activeCall, !onHold);
         document.getElementById('holdBtn').classList.toggle('on', onHold);
         document.getElementById('holdLabel').textContent = onHold ? 'Resume' : 'Hold';
         if (onHold) showState('held');
         else { lastState = ''; activeConfirmed = true; showState('active'); }
         setStatus(onHold ? 'On hold' : 'Call resumed');
+    }
+    // Twilio plays the caller's audio itself; mute it while they are on hold.
+    function twilioListen(call, on) {
+        const pc = findPc(call);
+        if (!pc || !pc.getReceivers) return;
+        pc.getReceivers().forEach((r) => { if (r.track && r.track.kind === 'audio') r.track.enabled = on; });
     }
     function findPc(call) {
         if (!call) return null;

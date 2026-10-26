@@ -494,20 +494,34 @@ def cost_summary(user_id=None):
     """
     rates = get_rates()
     starts = _period_starts()
-    params = {"tx_in": rates["telnyx_in"], "tx_out": rates["telnyx_out"],
-              "tw_in": rates["twilio_in"], "tw_out": rates["twilio_out"],
-              "since": min(starts.values()), "today": starts["today"],
-              "week": starts["week"], "month": starts["month"], "uid": user_id}
+    params = {"since": min(starts.values()), "today": starts["today"],
+              "week": starts["week"], "month": starts["month"], "uid": user_id,
+              "tw_client": float(rates["twilio_client"])}
+    # Rate per provider / direction / country zone (outgoing: dialed number,
+    # incoming: our own number). Values come from get_rates() as floats.
+    rows = []
+    for prov in ("telnyx", "twilio"):
+        for direction, leg in (("incoming", "in"), ("outgoing", "out")):
+            for zone, _label in vh.RATE_ZONES:
+                rows.append("('%s','%s','%s',%r::float8)" % (prov, leg, zone,
+                            float(rates[vh.rate_key(prov, direction, zone)])))
     sql = """
-        WITH c AS (
+        WITH r(prov, leg, zone, rate) AS (VALUES """ + ",".join(rows) + """),
+        c0 AS (
             SELECT created_at, direction,
                    CEIL(GREATEST(COALESCE(duration_seconds,0),0)/60.0)::float8 AS mins,
-                   CASE WHEN COALESCE(provider,'telnyx')='twilio'
-                        THEN CASE WHEN direction='incoming' THEN %(tw_in)s::float8 ELSE %(tw_out)s::float8 END
-                        ELSE CASE WHEN direction='incoming' THEN %(tx_in)s::float8 ELSE %(tx_out)s::float8 END
-                   END AS rate
+                   CASE WHEN COALESCE(provider,'telnyx')='twilio' THEN 'twilio' ELSE 'telnyx' END AS prov,
+                   CASE WHEN direction='incoming' THEN 'in' ELSE 'out' END AS leg,
+                   regexp_replace(regexp_replace(COALESCE(to_number,''), '\\D', '', 'g'), '^00', '') AS d
             FROM public.calls
             WHERE created_at >= %(since)s AND (%(uid)s::uuid IS NULL OR user_id=%(uid)s::uuid)
+        ),
+        c AS (
+            SELECT c0.created_at, c0.direction, c0.mins,
+                   r.rate + CASE WHEN c0.prov='twilio' THEN %(tw_client)s::float8 ELSE 0 END AS rate
+            FROM c0 JOIN r ON r.prov=c0.prov AND r.leg=c0.leg AND r.zone =
+                 CASE WHEN c0.d LIKE '1%%' THEN 'us' WHEN c0.d LIKE '447%%' THEN 'uk_mobile'
+                      WHEN c0.d LIKE '44%%' THEN 'uk' ELSE 'other' END
         )
         SELECT
           COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(today)s),0) AS today_cost,
@@ -538,6 +552,7 @@ def cost_summary(user_id=None):
     return out
 
 templates.env.globals["call_cost"] = vh.call_cost
+templates.env.globals["rate_zones"] = vh.RATE_ZONES
 
 
 class CampaignCreate(BaseModel):
@@ -2073,7 +2088,8 @@ async def call_logs_page(request: Request):
             recording_kind=r["recording_kind"] or "",
         )
         if rates is not None:
-            entry["cost_usd"] = vh.call_cost(entry["duration"], entry["provider"], entry["direction"], rates)
+            entry["cost_usd"] = vh.call_cost(entry["duration"], entry["provider"], entry["direction"], rates,
+                                             entry["to_number"])
         user_calls.append(entry)
     selected = request.query_params.get('filter', 'all')
     if selected not in ('all','incoming','outgoing','missed'):
@@ -2859,6 +2875,103 @@ async def twilio_recording(request: Request, background: BackgroundTasks):
         duration = int(params.get("RecordingDuration") or 0) if str(params.get("RecordingDuration") or "0").isdigit() else 0
         _tw_bg(background, _twilio_save_voicemail, log_id, url, sid, duration)
     return JSONResponse({"ok": True})
+
+
+# ==================== TWILIO TRANSFER ====================
+# Blind transfer for Twilio lines: the customer's leg is redirected to new TwiML
+# that rings the teammate's browser (or dials a phone number). Your own browser
+# leg ends; nothing else on the account is touched.
+def _twilio_targets(user):
+    if not user.get("account_id"):
+        return []
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id,name,email,account_role FROM public.dialnytics_users
+                WHERE account_id=%s AND is_active AND id<>%s AND provider='twilio'
+                  AND COALESCE(twilio_account,'w1')=%s AND COALESCE(phone_number,'')<>''
+                ORDER BY lower(name)""", (user["account_id"], user["id"], user.get("twilio_account") or "w1"))
+            rows = cur.fetchall()
+            out = [{"id": str(r["id"]), "name": r["name"] or r["email"], "email": r["email"],
+                    "role": r["account_role"], "status": ct._free(cur, r["id"])} for r in rows]
+    order = {"free": 0, "busy": 1, "offline": 2}
+    out.sort(key=lambda a: (order.get(a["status"], 3), a["name"].lower()))
+    return out
+
+@app.get("/api/twilio/transfer/targets")
+async def twilio_transfer_targets(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"agents": _twilio_targets(user)}
+
+def _twilio_customer_leg(user, call_sid):
+    """The customer's call leg for this user's browser leg, after checking it is theirs."""
+    leg = _twilio_request("GET", f"/Calls/{call_sid}.json")
+    me = "client:" + vh.identity_for_user(user["id"])
+    if me not in (str(leg.get("from") or ""), str(leg.get("to") or "")):
+        raise HTTPException(status_code=403, detail="This is not your call")
+    if leg.get("status") != "in-progress":
+        raise HTTPException(status_code=409, detail="The call is not connected")
+    if leg.get("parent_call_sid"):                 # incoming: customer is the parent leg
+        return leg["parent_call_sid"], str(leg.get("from") or "")
+    kids = _twilio_request("GET", f"/Calls.json?ParentCallSid={call_sid}&Status=in-progress&PageSize=5")
+    for kid in kids.get("calls") or []:            # outgoing: customer is the dialed child leg
+        return kid["sid"], str(kid.get("to") or "")
+    raise HTTPException(status_code=409, detail="The other side is not connected yet")
+
+@app.post("/api/twilio/transfer")
+async def twilio_transfer(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if user.get("provider") != "twilio":
+        raise HTTPException(status_code=409, detail="This line is not a Twilio line")
+    data = await request.json()
+    call_sid = str(data.get("call_sid") or "")
+    if not re.fullmatch(r"CA[0-9a-f]{32}", call_sid):
+        raise HTTPException(status_code=422, detail="Call not found")
+    to_user = str(data.get("to_user") or "")
+    to_number = re.sub(r"[\s().-]", "", str(data.get("to_number") or ""))
+    with tw_ctx(user.get("twilio_account") or "w1"):
+        if to_user:
+            target = next((a for a in _twilio_targets(user) if a["id"] == to_user), None)
+            if not target:
+                raise HTTPException(status_code=404, detail="Agent not found")
+            if target["status"] == "offline":
+                raise HTTPException(status_code=409, detail=f"{target['name']} is offline right now")
+            customer, customer_number = _twilio_customer_leg(user, call_sid)
+            caller = _clean_number(data.get("number")) or _clean_number(customer_number) or "Unknown"
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT phone_number FROM public.dialnytics_users WHERE id=%s", (target["id"],))
+                    tnum = (cur.fetchone() or {}).get("phone_number") or ""
+                    cur.execute("""INSERT INTO public.calls
+                        (user_id,from_number,to_number,direction,status,provider,provider_call_id,created_at)
+                        VALUES (%s,%s,%s,'incoming','ringing','twilio',%s,NOW()) RETURNING id""",
+                        (target["id"], caller, tnum, customer))
+                    log_id = cur.fetchone()["id"]
+            twiml = vh.twiml(
+                f'<Dial timeout="25" answerOnBridge="true" action="/twilio/dial-status?log={log_id}" method="POST">'
+                f'<Client><Identity>{vh.identity_for_user(target["id"])}</Identity>'
+                f'<Parameter name="logId" value="{log_id}"/></Client></Dial>')
+            name = target["name"]
+        elif to_number:
+            if not re.fullmatch(r"\+[1-9]\d{6,14}", to_number):
+                raise HTTPException(status_code=422, detail="Enter a valid number with country code")
+            if not call_allowed(user, to_number):
+                raise HTTPException(status_code=403, detail=call_block_message(user, to_number))
+            if not user.get("phone_number"):
+                raise HTTPException(status_code=409, detail="No caller ID on this account")
+            customer, _num = _twilio_customer_leg(user, call_sid)
+            twiml = vh.twiml(
+                f'<Dial callerId="{vh.xml_attr(user["phone_number"])}" answerOnBridge="true" timeout="30" timeLimit="14400">'
+                f'<Number>{vh.xml_attr(to_number)}</Number></Dial>')
+            name = to_number
+        else:
+            raise HTTPException(status_code=422, detail="Pick an agent or enter a number")
+        _twilio_request("POST", f"/Calls/{customer}.json", {"Twiml": twiml})
+    log.info("Twilio transfer by %s to %s", user["email"], name)
+    return {"ok": True, "to_name": name}
 
 
 @app.get("/campaigns", response_class=HTMLResponse)

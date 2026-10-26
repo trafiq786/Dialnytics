@@ -47,13 +47,17 @@
 {% if user.role == 'admin' %}
 <section class="panel" style="max-width:720px;margin-top:18px;">
     <h2>Provider Rates (for estimated cost)</h2>
-    <p class="muted" style="margin-bottom:14px">USD per minute. Each call is rounded up to whole minutes. Check your Telnyx and Twilio pricing pages for the countries you call most.</p>
+    <p class="muted" style="margin-bottom:14px">USD per minute, by country. Outgoing calls use the country of the dialed number, incoming calls the country of your own number. Each call is rounded up to whole minutes. Check your Telnyx and Twilio pricing pages and adjust.</p>
     {% if saved %}<div class="success-msg">Rates saved.</div>{% endif %}
     <form method="post" action="/settings/rates" class="rates-form">
-        <label>Telnyx — outgoing ($/min)<input type="number" name="telnyx_out" step="0.0001" min="0" max="5" value="{{ rates.telnyx_out }}" required></label>
-        <label>Telnyx — incoming ($/min)<input type="number" name="telnyx_in" step="0.0001" min="0" max="5" value="{{ rates.telnyx_in }}" required></label>
-        <label>Twilio — outgoing ($/min)<input type="number" name="twilio_out" step="0.0001" min="0" max="5" value="{{ rates.twilio_out }}" required></label>
-        <label>Twilio — incoming ($/min)<input type="number" name="twilio_in" step="0.0001" min="0" max="5" value="{{ rates.twilio_in }}" required></label>
+        <div class="rate-grid">
+            <span></span><strong>Telnyx out</strong><strong>Telnyx in</strong><strong>Twilio out</strong><strong>Twilio in</strong>
+            {% for zone, zlabel in rate_zones %}{% set sfx = '' if zone == 'us' else '_' ~ zone %}
+            <span>{{ zlabel }}</span>
+            {% for key in ['telnyx_out', 'telnyx_in', 'twilio_out', 'twilio_in'] %}<input type="number" name="{{ key ~ sfx }}" aria-label="{{ key ~ sfx }}" step="0.0001" min="0" max="5" value="{{ rates[key ~ sfx] }}" required>{% endfor %}
+            {% endfor %}
+        </div>
+        <label>Twilio browser (Client) leg — added to every Twilio call ($/min)<input type="number" name="twilio_client" step="0.0001" min="0" max="5" value="{{ rates.twilio_client }}" required></label>
         <label>1 USD = PKR<input type="number" name="usd_to_pkr" step="0.01" min="1" max="1000" value="{{ rates.usd_to_pkr }}" required></label>
         <div style="display:flex;align-items:flex-end"><button class="btn btn-primary" type="submit">Save Rates</button></div>
     </form>
@@ -65,4 +69,5 @@
     <div class="dn-detail"><span>Public URL for webhooks</span><strong>{{ public_base_url }}</strong></div>
 </section>
 {% endif %}
+<style>.rate-grid{grid-column:1/-1;display:grid;grid-template-columns:1.3fr repeat(4,1fr);gap:8px;align-items:center;font-size:13px}.rate-grid strong{font-size:11px;color:var(--muted,#8aa0c0);text-transform:uppercase;letter-spacing:.04em}.rate-grid input{width:100%;box-sizing:border-box}@media(max-width:640px){.rate-grid{grid-template-columns:1fr 1fr}.rate-grid>span{grid-column:1/-1}.rate-grid strong{display:none}}</style>
 {% endblock %}
