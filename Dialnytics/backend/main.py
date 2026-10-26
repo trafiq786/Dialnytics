@@ -128,6 +128,44 @@ def _bg(background, fn, *args):
 # ==================== CONFIG (Twilio backup provider) ====================
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+
+# ==================== TWILIO ACCOUNTS (1 = TWILIO_*, 2 = TWILIO2_*) ====================
+# Same idea as the Telnyx accounts: each Twilio user calls through the account
+# that owns their number. Keys live only in Render environment variables.
+def _tw_env(prefix):
+    g = lambda k: os.getenv(prefix + k, "").strip()
+    return {"sid": g("ACCOUNT_SID"), "token": g("AUTH_TOKEN"), "api_key_sid": g("API_KEY_SID"),
+            "api_key_secret": g("API_KEY_SECRET"), "app_sid": g("TWIML_APP_SID")}
+
+TWILIO_ACCOUNTS = {"w1": dict(_tw_env("TWILIO_"), label="Twilio 1", settings="twilio_")}
+if os.getenv("TWILIO2_ACCOUNT_SID", "").strip():
+    TWILIO_ACCOUNTS["w2"] = dict(_tw_env("TWILIO2_"), label="Twilio 2", settings="twilio2_")
+_TW = contextvars.ContextVar("dn_twilio_account", default="w1")
+
+def tw_key(acct):
+    return acct if acct in TWILIO_ACCOUNTS else "w1"
+
+def tw_conf(acct=None):
+    return TWILIO_ACCOUNTS[tw_key(acct or _TW.get())]
+
+def tw_current():
+    return tw_key(_TW.get())
+
+@contextlib.contextmanager
+def tw_ctx(acct):
+    token = _TW.set(tw_key(acct))
+    try:
+        yield
+    finally:
+        _TW.reset(token)
+
+def _tw_bg(background, fn, *args):
+    """Background task that keeps the Twilio account of this request."""
+    acct = tw_current()
+    def run():
+        with tw_ctx(acct):
+            fn(*args)
+    background.add_task(run)
 # Public URL Twilio calls back to (also used for webhook signature checks).
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://dialnytics.co.uk").strip().rstrip("/")
 VOICEMAIL_GREETING = os.getenv(
@@ -225,6 +263,7 @@ def _db_user(row):
         "adv_calling": bool(row.get("adv_calling", False)),
         "telnyx_account": tx_key(row.get("telnyx_account") or "t1"),
         "call_countries": row.get("call_countries") or "",
+        "twilio_account": tw_key(row.get("twilio_account") or "w1"),
         "is_demo": bool(row.get("is_demo", False)),
         "account_id": str(row["account_id"]) if row.get("account_id") else "",
         "account_role": "owner" if row.get("account_role") == "owner" else "agent",
@@ -385,6 +424,8 @@ REVOKE ALL ON public.sms_messages FROM anon, authenticated;
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS telnyx_account text NOT NULL DEFAULT 't1';
 -- 12: countries a user may call ('' = only the country of their own number)
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS call_countries text NOT NULL DEFAULT '';
+-- 13: second Twilio account
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS twilio_account text NOT NULL DEFAULT 'w1';
 """ + ct.SCHEMA_SQL
 
 def ensure_schema():
@@ -692,15 +733,20 @@ def _telnyx_numbers_one():
 # ==================== TWILIO ====================
 TWILIO_API = "https://api.twilio.com/2010-04-01"
 
-def twilio_enabled():
-    return bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN)
+def twilio_enabled(acct=None):
+    """acct=None: is ANY Twilio account set up?"""
+    if acct is None:
+        return any(c["sid"] and c["token"] for c in TWILIO_ACCOUNTS.values())
+    c = tw_conf(acct)
+    return bool(c["sid"] and c["token"])
 
 def _twilio_request(method, path, form=None):
-    if not twilio_enabled():
-        raise HTTPException(status_code=503, detail="Twilio is not configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN)")
-    url = path if path.startswith("https://") else f"{TWILIO_API}/Accounts/{TWILIO_ACCOUNT_SID}{path}"
+    c = tw_conf()
+    if not (c["sid"] and c["token"]):
+        raise HTTPException(status_code=503, detail=f"{c['label']} is not configured on Render")
+    url = path if path.startswith("https://") else f"{TWILIO_API}/Accounts/{c['sid']}{path}"
     try:
-        status, data = vh.http_json(method, url, form=form, basic_auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+        status, data = vh.http_json(method, url, form=form, basic_auth=(c["sid"], c["token"]))
     except vh.ProviderError:
         log.exception("Twilio network error")
         raise HTTPException(status_code=502, detail="Twilio is unreachable")
@@ -720,17 +766,57 @@ def _twilio_number_records():
         path = "https://api.twilio.com" + next_uri
     return records
 
+_tw_numbers_cache = {"at": 0.0, "map": {}}
+
+def twilio_number_accounts(fresh=False):
+    """{number: account} for every configured Twilio account (cached 60 s)."""
+    if not fresh and time.time() - _tw_numbers_cache["at"] < 60 and _tw_numbers_cache["map"]:
+        return dict(_tw_numbers_cache["map"])
+    mapping, errors = {}, []
+    for acct in TWILIO_ACCOUNTS:
+        if not twilio_enabled(acct):
+            continue
+        with tw_ctx(acct):
+            try:
+                for r in _twilio_number_records():
+                    if r.get("phone_number"):
+                        mapping.setdefault(r["phone_number"], acct)
+            except HTTPException as exc:
+                errors.append(exc)
+                log.warning("Could not list numbers of %s: %s", acct, exc.detail)
+    if errors and not mapping:
+        raise errors[0]
+    _tw_numbers_cache.update(at=time.time(), map=mapping)
+    return dict(mapping)
+
 def get_twilio_numbers():
-    return sorted({r.get("phone_number") for r in _twilio_number_records() if r.get("phone_number")})
+    """All numbers owned by any of the Twilio accounts."""
+    return sorted(twilio_number_accounts(fresh=True))
 
 def get_provider_numbers(provider):
     if provider == "twilio":
         return get_twilio_numbers()
     return get_telnyx_numbers()
 
+def _set_user_twilio_account(user_id, number):
+    """Twilio user moves to the Twilio account that owns their number."""
+    acct = twilio_number_accounts().get(number, "w1")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE public.dialnytics_users SET twilio_account=%s WHERE id=%s", (acct, user_id))
+    return acct
+
 def _twilio_configure_number(number):
     """Point a Twilio number's Voice webhook at this app (best effort)."""
-    if not twilio_enabled() or not PUBLIC_BASE_URL:
+    try:
+        acct = twilio_number_accounts().get(number, "w1")
+    except HTTPException:
+        acct = "w1"
+    with tw_ctx(acct):
+        return _twilio_configure_number_now(number)
+
+def _twilio_configure_number_now(number):
+    if not twilio_enabled(tw_current()) or not PUBLIC_BASE_URL:
         return False
     try:
         for record in _twilio_number_records():
@@ -750,24 +836,33 @@ def _twilio_voice_config():
     Environment variables win. Otherwise the app creates them once through the
     Twilio API and stores them in dialnytics_settings.
     """
-    key_sid = os.getenv("TWILIO_API_KEY_SID", "").strip() or get_setting("twilio_api_key_sid", "")
-    key_secret = os.getenv("TWILIO_API_KEY_SECRET", "").strip() or get_setting("twilio_api_key_secret", "")
-    app_sid = os.getenv("TWILIO_TWIML_APP_SID", "").strip() or get_setting("twilio_twiml_app_sid", "")
+    c = tw_conf()
+    pre = c["settings"]          # twilio_ (account 1, same keys as before) / twilio2_
+    # Saved keys belong to one Twilio account; if the account SID changed, make new ones.
+    saved_sid = get_setting(pre + "account_sid", "")
+    if saved_sid != c["sid"]:
+        if saved_sid:
+            for k in ("api_key_sid", "api_key_secret", "twiml_app_sid"):
+                set_setting(pre + k, "")
+        set_setting(pre + "account_sid", c["sid"])
+    key_sid = c["api_key_sid"] or get_setting(pre + "api_key_sid", "")
+    key_secret = c["api_key_secret"] or get_setting(pre + "api_key_secret", "")
+    app_sid = c["app_sid"] or get_setting(pre + "twiml_app_sid", "")
     if key_sid and key_secret and app_sid:
         return key_sid, key_secret, app_sid
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(hashtext('dialnytics-twilio-setup'))")
-            key_sid = key_sid or get_setting("twilio_api_key_sid", "")
-            key_secret = key_secret or get_setting("twilio_api_key_secret", "")
-            app_sid = app_sid or get_setting("twilio_twiml_app_sid", "")
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("dialnytics-twilio-setup-" + pre,))
+            key_sid = key_sid or get_setting(pre + "api_key_sid", "")
+            key_secret = key_secret or get_setting(pre + "api_key_secret", "")
+            app_sid = app_sid or get_setting(pre + "twiml_app_sid", "")
             if not (key_sid and key_secret):
                 created = _twilio_request("POST", "/Keys.json", {"FriendlyName": "Dialnytics Web Dialer"})
                 key_sid, key_secret = created.get("sid", ""), created.get("secret", "")
                 if not (key_sid and key_secret):
                     raise HTTPException(status_code=502, detail="Twilio API key creation failed")
-                set_setting("twilio_api_key_sid", key_sid)
-                set_setting("twilio_api_key_secret", key_secret)
+                set_setting(pre + "api_key_sid", key_sid)
+                set_setting(pre + "api_key_secret", key_secret)
             if not app_sid:
                 created = _twilio_request("POST", "/Applications.json", {
                     "FriendlyName": "Dialnytics Web Dialer",
@@ -777,7 +872,7 @@ def _twilio_voice_config():
                 app_sid = created.get("sid", "")
                 if not app_sid:
                     raise HTTPException(status_code=502, detail="Twilio TwiML app creation failed")
-                set_setting("twilio_twiml_app_sid", app_sid)
+                set_setting(pre + "twiml_app_sid", app_sid)
     return key_sid, key_secret, app_sid
 
 
@@ -819,12 +914,48 @@ async def admin_caller_ids(request: Request):
                     'email': r['email'],
                     'last_name': (r['name'] or '').strip().split()[-1] if (r['name'] or '').strip() else 'Unknown'
                 })
-    owners = telnyx_number_accounts() if provider == "telnyx" and len(TELNYX_ACCOUNTS) > 1 else {}
+    if provider == "twilio":
+        owners, labels = twilio_number_accounts(), {k: v["label"] for k, v in TWILIO_ACCOUNTS.items()}
+    else:
+        owners, labels = telnyx_number_accounts(), {k: v["label"] for k, v in TELNYX_ACCOUNTS.items()}
+    only = request.query_params.get("account", "")
     return JSONResponse({'numbers': [
         {'number': n, 'assigned_to': assigned.get(n, []),
-         'account': owners.get(n, ''), 'account_label': TELNYX_ACCOUNTS[owners[n]]['label'] if n in owners else ''}
-        for n in numbers
+         'account': owners.get(n, ''), 'account_label': labels.get(owners.get(n, ''), '')}
+        for n in numbers if not only or owners.get(n) == only
     ]}, headers={'Cache-Control': 'no-store'})
+
+
+@app.get("/api/admin/lines")
+async def admin_lines(request: Request):
+    """Every calling account (Telnyx 1/2, Twilio 1/2) and whether it is connected.
+    Keys are never returned, only yes/no and the number count."""
+    admin = get_current_user(request)
+    if not admin or admin.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    lines = []
+    tx_map, tw_map, tx_err, tw_err = {}, {}, "", ""
+    try:
+        tx_map = telnyx_number_accounts(fresh=True)
+    except HTTPException as exc:
+        tx_err = str(exc.detail)
+    try:
+        tw_map = twilio_number_accounts(fresh=True) if twilio_enabled() else {}
+    except HTTPException as exc:
+        tw_err = str(exc.detail)
+    for key, label, env in (("t1", "Telnyx 1", "TELNYX_"), ("t2", "Telnyx 2", "TELNYX2_")):
+        conf = TELNYX_ACCOUNTS.get(key)
+        ok = bool(conf and conf["api_key"])
+        lines.append({"value": "telnyx:" + key, "provider": "telnyx", "account": key, "label": label,
+                      "configured": ok, "numbers": sum(1 for a in tx_map.values() if a == key),
+                      "env": env, "error": tx_err if ok and key == "t1" else ""})
+    for key, label, env in (("w1", "Twilio 1", "TWILIO_"), ("w2", "Twilio 2", "TWILIO2_")):
+        conf = TWILIO_ACCOUNTS.get(key)
+        ok = bool(conf and conf["sid"] and conf["token"])
+        lines.append({"value": "twilio:" + key, "provider": "twilio", "account": key, "label": label,
+                      "configured": ok, "numbers": sum(1 for a in tw_map.values() if a == key),
+                      "env": env, "error": tw_err if ok else ""})
+    return JSONResponse({"lines": lines}, headers={"Cache-Control": "no-store"})
 
 
 # Admin-only customer management and invoice features.
@@ -838,7 +969,7 @@ def require_admin(request):
 def _customer_data(email):
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.provider,u.plan_name,
+            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.provider,u.telnyx_account,u.twilio_account,u.plan_name,
                 u.plan_start,u.plan_renewal,u.created_at,u.is_active,u.is_demo,
                 u.last_paid_amount,u.recording_premium,u.contact_name,u.contact_phone,
                 u.contact_address,u.customer_notes,
@@ -951,6 +1082,8 @@ async def customer_change_number(request: Request, email: str, phone_number: str
                         (new_number,provider,target['id']))
     if provider == 'telnyx':
         _set_user_telnyx_account(target['id'], telnyx_number_accounts().get(new_number, 't1'))
+    else:
+        _set_user_twilio_account(target['id'], new_number)
     refresh_users()
     if provider == 'twilio':
         _twilio_configure_number(new_number)
@@ -1267,6 +1400,8 @@ async def create_user(
     if phone_number and provider == 'telnyx':
         acct = telnyx_number_accounts().get(phone_number, 't1')
         _set_user_telnyx_account(new_id, acct)
+    elif phone_number and provider == 'twilio':
+        _set_user_twilio_account(new_id, phone_number)
     refresh_users()
     if phone_number:
         if provider == 'twilio':
@@ -1448,11 +1583,32 @@ templates.env.globals["leg_tag"] = ct.leg_tag
 def provider_label(u):
     """'Twilio', 'Telnyx', or 'Telnyx 1' / 'Telnyx 2' when two Telnyx accounts are set up."""
     if (u.get("provider") or "telnyx") == "twilio":
-        return "Twilio"
+        return tw_conf(u.get("twilio_account") or "w1")["label"] if len(TWILIO_ACCOUNTS) > 1 else "Twilio"
     if len(TELNYX_ACCOUNTS) > 1:
         return tx_conf(u.get("telnyx_account") or "t1")["label"]
     return "Telnyx"
 templates.env.globals["provider_label"] = provider_label
+
+def calling_lines():
+    """Provider choices for the admin: Telnyx 1, Telnyx 2, Twilio 1, Twilio 2."""
+    out = []
+    for key, label in (("t1", "Telnyx 1"), ("t2", "Telnyx 2")):
+        c = TELNYX_ACCOUNTS.get(key)
+        out.append({"value": "telnyx:" + key, "provider": "telnyx", "account": key, "label": label,
+                    "ready": bool(c and c["api_key"])})
+    for key, label in (("w1", "Twilio 1"), ("w2", "Twilio 2")):
+        c = TWILIO_ACCOUNTS.get(key)
+        out.append({"value": "twilio:" + key, "provider": "twilio", "account": key, "label": label,
+                    "ready": bool(c and c["sid"] and c["token"])})
+    return out
+
+def user_line(u):
+    if (u.get("provider") or "telnyx") == "twilio":
+        return "twilio:" + (u.get("twilio_account") or "w1")
+    return "telnyx:" + (u.get("telnyx_account") or "t1")
+
+templates.env.globals["calling_lines"] = calling_lines
+templates.env.globals["user_line"] = user_line
 
 # ---- Calling countries: a UK line calls only the UK, a US line only US/Canada,
 # unless the admin allows more for that user.
@@ -2534,7 +2690,7 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
 # ==================== TWILIO WEBHOOKS & TOKEN ====================
 async def _twilio_params(request: Request):
     """Read Twilio's form POST and verify X-Twilio-Signature."""
-    if not TWILIO_AUTH_TOKEN:
+    if not twilio_enabled():
         raise HTTPException(status_code=503, detail="Twilio not configured")
     form = await request.form()
     params = {}
@@ -2544,10 +2700,13 @@ async def _twilio_params(request: Request):
     path = request.url.path + ("?" + query if query else "")
     candidates = [PUBLIC_BASE_URL + path, str(request.url),
                   str(request.url).replace("http://", "https://", 1)]
-    if not vh.twilio_signature_valid(TWILIO_AUTH_TOKEN, candidates, params,
-                                     request.headers.get("x-twilio-signature", "")):
-        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
-    return {k: v[0] for k, v in params.items()}
+    signature = request.headers.get("x-twilio-signature", "")
+    # The account whose Auth Token signed the request is the account of this call.
+    for acct, conf in TWILIO_ACCOUNTS.items():
+        if conf["token"] and vh.twilio_signature_valid(conf["token"], candidates, params, signature):
+            _TW.set(acct)
+            return {k: v[0] for k, v in params.items()}
+    raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
 def _twiml_response(*verbs):
     return Response(vh.twiml(*verbs), media_type="application/xml")
@@ -2579,11 +2738,14 @@ async def twilio_token(request: Request):
         raise HTTPException(status_code=402, detail="Subscription expired")
     if user.get("provider") != "twilio":
         raise HTTPException(status_code=409, detail="This account does not use Twilio")
-    if not twilio_enabled():
-        raise HTTPException(status_code=503, detail="Twilio is not configured on the server")
-    key_sid, key_secret, app_sid = _twilio_voice_config()
+    acct = user.get("twilio_account") or "w1"
+    if not twilio_enabled(acct):
+        raise HTTPException(status_code=503, detail=f"{tw_conf(acct)['label']} is not configured on the server")
+    with tw_ctx(acct):
+        key_sid, key_secret, app_sid = _twilio_voice_config()
+        account_sid = tw_conf()["sid"]
     identity = vh.identity_for_user(user["id"])
-    token = vh.twilio_access_token(TWILIO_ACCOUNT_SID, key_sid, key_secret, identity, app_sid, ttl=3600)
+    token = vh.twilio_access_token(account_sid, key_sid, key_secret, identity, app_sid, ttl=3600)
     return JSONResponse({"token": token, "identity": identity, "from_number": user.get("phone_number") or ""},
                         headers={"Cache-Control": "no-store"})
 
@@ -2674,7 +2836,8 @@ def _twilio_save_voicemail(log_id, recording_url, recording_sid, duration):
                 row = cur.fetchone()
         if not row:
             return
-        data, _ = vh.http_bytes(recording_url + ".mp3", basic_auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+        c = tw_conf()
+        data, _ = vh.http_bytes(recording_url + ".mp3", basic_auth=(c["sid"], c["token"]),
                                 max_bytes=MAX_RECORDING_BYTES)
         _store_recording(row["user_id"], "voicemail", data, "audio/mpeg", call_id=row["id"],
                          provider="twilio", from_number=row["from_number"] or "",
@@ -2694,7 +2857,7 @@ async def twilio_recording(request: Request, background: BackgroundTasks):
     sid = params.get("RecordingSid", "")
     if params.get("RecordingStatus", "completed") == "completed" and url.startswith("https://api.twilio.com/") and sid:
         duration = int(params.get("RecordingDuration") or 0) if str(params.get("RecordingDuration") or "0").isdigit() else 0
-        background.add_task(_twilio_save_voicemail, log_id, url, sid, duration)
+        _tw_bg(background, _twilio_save_voicemail, log_id, url, sid, duration)
     return JSONResponse({"ok": True})
 
 

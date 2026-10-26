@@ -26,7 +26,7 @@
  <div class="field company-existing" hidden><label for="company-select">Existing company</label><select id="company-select" name="account_id"><option value="">Select company…</option>{% for c in companies %}<option value="{{ c.id }}">{{ c.name }} ({{ c.users }} users)</option>{% endfor %}</select></div>
  <div class="field company-existing" hidden><label for="account-role">Role in company</label><select id="account-role" name="account_role"><option value="agent" selected>Agent (makes calls)</option><option value="owner">Owner (sees the whole team)</option></select><small>Owners see live status, call logs and recordings of every team member.</small></div>
  </div>
- <div class="field calling-only"><label for="provider-select">Calling Provider</label><select id="provider-select" name="provider" required><option value="telnyx" selected>Telnyx (main)</option><option value="twilio">Twilio (backup)</option></select><small>The Caller ID list below shows numbers from the selected provider.</small></div>
+ <div class="field calling-only"><label for="provider-select">Calling Provider</label><select id="provider-select" required>{% for l in calling_lines() %}<option value="{{ l.value }}" data-provider="{{ l.provider }}" data-account="{{ l.account }}"{% if loop.first %} selected{% endif %}{% if not l.ready %} disabled{% endif %}>{{ l.label }}{% if not l.ready %} — not set up{% endif %}</option>{% endfor %}</select><input type="hidden" name="provider" id="provider-value" value="telnyx"><small>The Caller ID list below shows only the numbers of the selected account.</small><div id="lines-status" class="lines-status" aria-live="polite">Checking calling accounts…</div></div>
  <div class="field"><label for="caller-id" id="caller-id-label">Caller ID · Telnyx Numbers</label><select id="caller-id" name="phone_number"><option value="">Loading Telnyx numbers...</option></select><input type="hidden" id="confirm-shared-number" name="confirm_shared_number" value="no"><small id="caller-id-message" aria-live="polite">Numbers assigned to other users require transfer confirmation.</small><small>Owners can be created without a number (they only watch the team). Agents need a number.</small></div>
  </section>
  <section class="user-panel"><div class="panel-title"><span class="panel-icon">▤</span><div><h2>Subscription & Payment</h2><p>Manage plan and PKR payments</p></div></div>
@@ -50,14 +50,17 @@
   let confirmedNumber = '';
 
   async function loadCallerIds() {
-    const provider = providerSelect.value;
-    const providerName = provider === 'twilio' ? 'Twilio' : 'Telnyx';
+    const opt = providerSelect.selectedOptions[0];
+    const provider = opt.dataset.provider;
+    const account = opt.dataset.account;
+    const providerName = opt.textContent.trim();
+    document.getElementById('provider-value').value = provider;
     label.textContent = 'Caller ID · ' + providerName + ' Numbers';
     select.replaceChildren(new Option('Loading ' + providerName + ' numbers...', ''));
     message.textContent = 'Numbers assigned to other users require transfer confirmation.';
     callerIds = [];
     try {
-      const response = await fetch('/api/admin/caller-ids?provider=' + encodeURIComponent(provider), {credentials: 'same-origin', cache: 'no-store'});
+      const response = await fetch('/api/admin/caller-ids?provider=' + encodeURIComponent(provider) + '&account=' + encodeURIComponent(account), {credentials: 'same-origin', cache: 'no-store'});
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
         throw new Error(err.detail || ('Could not load ' + providerName + ' numbers (' + response.status + ')'));
@@ -67,7 +70,7 @@
       select.replaceChildren(new Option('Select Caller ID', ''));
       callerIds.forEach(item => {
         const names = item.assigned_to.map(person => person.last_name).join(', ');
-        const label = item.number + (item.account_label ? ' · ' + item.account_label : '') + (names ? ' — Assigned (' + names + ')' : ' — Available');
+        const label = item.number + (names ? ' — Assigned (' + names + ')' : ' — Available');
         select.add(new Option(label, item.number));
       });
       if (!callerIds.length) message.textContent = 'No phone numbers found in your ' + providerName + ' account.';
@@ -76,6 +79,17 @@
       message.textContent = error.message + '. Check the ' + providerName + ' keys on Render and try again.';
     }
   }
+  fetch('/api/admin/lines', {credentials: 'same-origin', cache: 'no-store'}).then(r => r.json()).then(data => {
+    const box = document.getElementById('lines-status');
+    box.replaceChildren();
+    (data.lines || []).forEach(l => {
+      const chip = document.createElement('span');
+      chip.className = 'line-chip ' + (!l.configured ? 'off' : l.error ? 'bad' : 'ok');
+      chip.title = !l.configured ? 'Add ' + l.env + '* variables on Render' : (l.error || '');
+      chip.textContent = l.label + ': ' + (!l.configured ? 'not set up' : l.error ? 'error' : 'connected · ' + l.numbers + ' numbers');
+      box.appendChild(chip);
+    });
+  }).catch(() => { document.getElementById('lines-status').textContent = ''; });
   providerSelect.addEventListener('change', () => { confirmedNumber = ''; confirmation.value = 'no'; loadCallerIds(); });
   select.addEventListener('change', () => {
     confirmedNumber = '';
@@ -130,6 +144,7 @@
   loadCallerIds();
 })();
 </script>
+<style>.lines-status{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;font-size:11px}.line-chip{border-radius:12px;padding:4px 9px;border:1px solid #33415c}.line-chip.ok{background:#173c39;color:#30d5a4;border-color:#1f5a50}.line-chip.off{color:#9fb1d0}.line-chip.bad{background:#4a1f2a;color:#ff8a9c;border-color:#7a2f40}</style>
 {% else %}
 <section class="premium-users">
  <div class="premium-users-head"><div><h2>User Management</h2><p>Manage accounts, subscriptions and calling access.</p></div><div class="premium-count">{{ users|length }} users</div></div>
@@ -150,7 +165,7 @@
   <form id="drawerEditForm" method="POST" action="/users/edit">
    <input type="hidden" name="email" id="editOriginalEmail"><input type="hidden" name="account_active" value="yes">
    <div class="drawer-pane" data-pane="account"><label>Full Name<input id="editName" name="name" required></label><label>Email Address<input id="editEmail" name="new_email" type="email" required></label><div class="drawer-info">Account is active. Use Delete User below to disable access and release its number.</div></div>
-   <div class="drawer-pane" data-pane="calling" hidden><label>Assigned Caller ID<input id="editNumberDisplay" readonly></label><a id="changeNumberLink" class="drawer-link" href="#">Change number in Customer Details →</a><div class="drawer-setting"><span>Recording & Campaigns <small id="recordingState"></small></span><button type="submit" id="recordingButton" form="recordingForm" class="drawer-action">Toggle Access</button></div><div class="drawer-setting"><span>SMS add-on (text messages) <small id="smsState"></small></span><button type="submit" id="smsButton" form="smsForm" class="drawer-action">Toggle SMS</button></div><div class="drawer-setting"><span>Advanced calling (transfer outgoing calls) <small id="advState"></small></span><button type="submit" id="advButton" form="advForm" class="drawer-action">Toggle Advanced</button></div><div class="drawer-zones"><span>Countries this user can call <small id="zonesState"></small></span><label class="zone-check"><input type="checkbox" form="zonesForm" name="zones" value="US" id="zoneUS"> US / Canada</label><label class="zone-check"><input type="checkbox" form="zonesForm" name="zones" value="UK" id="zoneUK"> United Kingdom</label><small class="zone-hint">Nothing ticked = only the country of the user's own number.</small><button type="submit" form="zonesForm" class="drawer-action">Save countries</button></div><label>Calling Provider<input id="editProviderDisplay" readonly></label><div class="drawer-info">To switch this user between Telnyx and Twilio, open Customer Details and pick a number from the other provider.</div></div>
+   <div class="drawer-pane" data-pane="calling" hidden><label>Assigned Caller ID<input id="editNumberDisplay" readonly></label><a id="changeNumberLink" class="drawer-link" href="#">Change number in Customer Details →</a><div class="drawer-setting"><span>Recording & Campaigns <small id="recordingState"></small></span><button type="submit" id="recordingButton" form="recordingForm" class="drawer-action">Toggle Access</button></div><div class="drawer-setting"><span>SMS add-on (text messages) <small id="smsState"></small></span><button type="submit" id="smsButton" form="smsForm" class="drawer-action">Toggle SMS</button></div><div class="drawer-setting"><span>Advanced calling (transfer outgoing calls) <small id="advState"></small></span><button type="submit" id="advButton" form="advForm" class="drawer-action">Toggle Advanced</button></div><div class="drawer-zones"><span>Countries this user can call <small id="zonesState"></small></span><label class="zone-check"><input type="checkbox" form="zonesForm" name="zones" value="US" id="zoneUS"> US / Canada</label><label class="zone-check"><input type="checkbox" form="zonesForm" name="zones" value="UK" id="zoneUK"> United Kingdom</label><small class="zone-hint">Nothing ticked = only the country of the user's own number.</small><button type="submit" form="zonesForm" class="drawer-action">Save countries</button></div><label>Calling Provider<input id="editProviderDisplay" readonly></label><div class="drawer-info">To move this user to another account (Telnyx 1, Telnyx 2, Twilio 1, Twilio 2), open Customer Details and pick a number from that account.</div></div>
    <div class="drawer-pane" data-pane="billing" hidden><label>Plan Name<input id="editPlan" name="plan_name" required></label><label>Renewal Date<input id="editRenewal" name="plan_renewal" type="date" required></label><button type="submit" form="extendForm" class="drawer-action">+30 Days</button></div>
    <div class="drawer-footer"><button class="drawer-save" type="submit">Save Changes</button></div>
   </form>
@@ -177,7 +192,7 @@
   document.querySelectorAll('.drawer-target-email').forEach(x=>x.value=u.email);
   document.getElementById('editName').value=u.name;document.getElementById('editEmail').value=u.email;
   document.getElementById('editNumberDisplay').value=u.number||'Unassigned';
-  document.getElementById('editProviderDisplay').value=(u.provider==='twilio'?'Twilio (backup)':(u.provider_label||'Telnyx'));
+  document.getElementById('editProviderDisplay').value=(u.provider_label||(u.provider==='twilio'?'Twilio':'Telnyx'));
   document.getElementById('editPlan').value=u.plan||'';document.getElementById('editRenewal').value=u.renewal||'';
   document.getElementById('recordingState').textContent=u.recording?'Enabled':'Disabled';
   document.getElementById('smsState').textContent=u.sms?'Enabled':(u.number?'Disabled':'Disabled · needs a calling number');
