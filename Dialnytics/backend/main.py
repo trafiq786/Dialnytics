@@ -36,6 +36,7 @@ import urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_helpers as vh  # noqa: E402  (sibling module; works for both start commands)
 import call_transfer as ct  # noqa: E402  (agent transfer + advanced calling)
+import ring_group as rg  # noqa: E402  (shared numbers: ring every free member)
 
 app = FastAPI(title="Dialnytics", version="1.2.0")
 log = logging.getLogger("dialnytics")
@@ -426,7 +427,28 @@ ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS telnyx_account text
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS call_countries text NOT NULL DEFAULT '';
 -- 13: second Twilio account
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS twilio_account text NOT NULL DEFAULT 'w1';
-""" + ct.SCHEMA_SQL
+-- 15: admin-only recordings of every call (auto-deleted after 14 days)
+CREATE TABLE IF NOT EXISTS public.monitor_recordings (
+    id uuid PRIMARY KEY,
+    user_id uuid NOT NULL,
+    call_id uuid,
+    direction text NOT NULL DEFAULT 'outgoing',
+    provider text NOT NULL DEFAULT 'telnyx',
+    from_number text NOT NULL DEFAULT '',
+    to_number text NOT NULL DEFAULT '',
+    duration_seconds integer NOT NULL DEFAULT 0,
+    content_type text NOT NULL DEFAULT 'audio/webm',
+    size_bytes integer NOT NULL DEFAULT 0,
+    storage text NOT NULL DEFAULT 'db',
+    storage_path text,
+    audio bytea,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS monitor_recordings_user_idx ON public.monitor_recordings(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS monitor_recordings_age_idx ON public.monitor_recordings(created_at);
+ALTER TABLE public.monitor_recordings ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.monitor_recordings FROM anon, authenticated;
+""" + ct.SCHEMA_SQL + rg.SCHEMA_SQL
 
 def ensure_schema():
     """Idempotent additive migration (same SQL as SUPABASE_MIGRATION_07)."""
@@ -508,16 +530,19 @@ def cost_summary(user_id=None):
     sql = """
         WITH r(prov, leg, zone, rate) AS (VALUES """ + ",".join(rows) + """),
         c0 AS (
-            SELECT created_at, direction,
-                   CEIL(GREATEST(COALESCE(duration_seconds,0),0)/60.0)::float8 AS mins,
-                   CASE WHEN COALESCE(provider,'telnyx')='twilio' THEN 'twilio' ELSE 'telnyx' END AS prov,
-                   CASE WHEN direction='incoming' THEN 'in' ELSE 'out' END AS leg,
-                   regexp_replace(regexp_replace(COALESCE(to_number,''), '\\D', '', 'g'), '^00', '') AS d
-            FROM public.calls
-            WHERE created_at >= %(since)s AND (%(uid)s::uuid IS NULL OR user_id=%(uid)s::uuid)
+            SELECT k.created_at, k.direction,
+                   CEIL(GREATEST(COALESCE(k.duration_seconds,0),0)/60.0)::float8 AS mins,
+                   CASE WHEN COALESCE(k.provider,'telnyx')='twilio' THEN 'twilio' ELSE 'telnyx' END AS prov,
+                   CASE WHEN k.direction='incoming' THEN 'in' ELSE 'out' END AS leg,
+                   regexp_replace(regexp_replace(COALESCE(k.to_number,''), '\\D', '', 'g'), '^00', '') AS d,
+                   -- account of the user (Telnyx 1/2, Twilio 1/2)
+                   CASE WHEN COALESCE(k.provider,'telnyx')='twilio' THEN 'twilio:' || COALESCE(u.twilio_account,'w1')
+                        ELSE 'telnyx:' || COALESCE(u.telnyx_account,'t1') END AS line
+            FROM public.calls k LEFT JOIN public.dialnytics_users u ON u.id=k.user_id
+            WHERE k.created_at >= %(since)s AND (%(uid)s::uuid IS NULL OR k.user_id=%(uid)s::uuid)
         ),
         c AS (
-            SELECT c0.created_at, c0.direction, c0.mins,
+            SELECT c0.created_at, c0.direction, c0.mins, c0.line,
                    r.rate + CASE WHEN c0.prov='twilio' THEN %(tw_client)s::float8 ELSE 0 END AS rate
             FROM c0 JOIN r ON r.prov=c0.prov AND r.leg=c0.leg AND r.zone =
                  CASE WHEN c0.d LIKE '1%%' THEN 'us' WHEN c0.d LIKE '447%%' THEN 'uk_mobile'
@@ -535,21 +560,45 @@ def cost_summary(user_id=None):
           COALESCE(SUM(mins) FILTER (WHERE created_at >= %(month)s AND direction<>'incoming'),0) AS month_out,
           COUNT(*) FILTER (WHERE created_at >= %(today)s) AS today_calls,
           COUNT(*) FILTER (WHERE created_at >= %(week)s) AS week_calls,
-          COUNT(*) FILTER (WHERE created_at >= %(month)s) AS month_calls
-        FROM c"""
+          COUNT(*) FILTER (WHERE created_at >= %(month)s) AS month_calls,
+          line
+        FROM c GROUP BY line"""
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, params)
-            row = cur.fetchone()
+            line_rows = cur.fetchall()
     pkr = rates["usd_to_pkr"]
-    out = {"rates": rates}
+    out = {"rates": rates, "lines": []}
+    labels = {l["value"]: l["label"] for l in calling_lines()}
     for period in ("today", "week", "month"):
-        usd = float(row[f"{period}_cost"] or 0)
+        usd = sum(float(r[f"{period}_cost"] or 0) for r in line_rows)
         out[period] = {"usd": usd, "pkr": usd * pkr,
-                       "in_min": int(row[f"{period}_in"] or 0),
-                       "out_min": int(row[f"{period}_out"] or 0),
-                       "calls": int(row[f"{period}_calls"] or 0)}
+                       "in_min": sum(int(r[f"{period}_in"] or 0) for r in line_rows),
+                       "out_min": sum(int(r[f"{period}_out"] or 0) for r in line_rows),
+                       "calls": sum(int(r[f"{period}_calls"] or 0) for r in line_rows)}
+    for r in sorted(line_rows, key=lambda r: r["line"] or ""):
+        out["lines"].append({"label": labels.get(r["line"], r["line"]),
+                             **{p: float(r[f"{p}_cost"] or 0) for p in ("today", "week", "month")},
+                             "month_min": int(r["month_in"] or 0) + int(r["month_out"] or 0)})
     return out
+
+def admin_finance():
+    """Admin dashboard: provider cost, revenue (recorded payments) and margin."""
+    costs = cost_summary()
+    starts = _period_starts()
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT
+                  COALESCE(SUM(amount_pkr) FILTER (WHERE paid_at >= %(today)s),0) AS today,
+                  COALESCE(SUM(amount_pkr) FILTER (WHERE paid_at >= %(week)s),0) AS week,
+                  COALESCE(SUM(amount_pkr) FILTER (WHERE paid_at >= %(month)s),0) AS month
+                FROM public.payments WHERE status='paid' AND paid_at >= %(since)s""",
+                dict(starts, since=min(starts.values())))
+            rev = cur.fetchone()
+    for p in ("today", "week", "month"):
+        costs[p]["revenue_pkr"] = float(rev[p] or 0)
+        costs[p]["margin_pkr"] = costs[p]["revenue_pkr"] - costs[p]["pkr"]
+    return costs
 
 templates.env.globals["call_cost"] = vh.call_cost
 templates.env.globals["rate_zones"] = vh.RATE_ZONES
@@ -915,18 +964,19 @@ async def admin_caller_ids(request: Request):
     # Fetch all assignments in one database roundtrip, not from cached users_db.
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT DISTINCT u.id,u.email,u.name,a.phone_number
+            cur.execute("""SELECT DISTINCT u.id,u.email,u.name,u.account_id,a.phone_number
                 FROM public.caller_id_assignments a
                 JOIN public.dialnytics_users u ON u.id=a.user_id
                 WHERE a.phone_number = ANY(%s)
                 UNION
-                SELECT DISTINCT u.id,u.email,u.name,u.phone_number
+                SELECT DISTINCT u.id,u.email,u.name,u.account_id,u.phone_number
                 FROM public.dialnytics_users u
                 WHERE u.phone_number = ANY(%s)""", (numbers, numbers))
             assigned = {}
             for r in cur.fetchall():
                 assigned.setdefault(r['phone_number'], []).append({
-                    'email': r['email'],
+                    'email': r['email'], 'name': r['name'] or r['email'],
+                    'account_id': str(r['account_id']) if r['account_id'] else '',
                     'last_name': (r['name'] or '').strip().split()[-1] if (r['name'] or '').strip() else 'Unknown'
                 })
     if provider == "twilio":
@@ -984,7 +1034,7 @@ def require_admin(request):
 def _customer_data(email):
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.provider,u.telnyx_account,u.twilio_account,u.plan_name,
+            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.provider,u.telnyx_account,u.twilio_account,u.account_id,u.plan_name,
                 u.plan_start,u.plan_renewal,u.created_at,u.is_active,u.is_demo,
                 u.last_paid_amount,u.recording_premium,u.contact_name,u.contact_phone,
                 u.contact_address,u.customer_notes,
@@ -1083,13 +1133,17 @@ async def customer_change_number(request: Request, email: str, phone_number: str
             # Serialize changes to this user and the requested number.
             cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', ('caller-id:' + new_number,))
             cur.execute('SELECT pg_advisory_xact_lock(hashtext(%s))', ('user-number:' + email.lower(),))
-            cur.execute("SELECT id,phone_number FROM public.dialnytics_users WHERE lower(email)=lower(%s) AND role <> 'admin' FOR UPDATE", (email,))
+            cur.execute("SELECT id,phone_number,account_id FROM public.dialnytics_users WHERE lower(email)=lower(%s) AND role <> 'admin' FOR UPDATE", (email,))
             target = cur.fetchone()
             if not target:
                 raise HTTPException(404, 'Customer not found')
-            cur.execute('SELECT user_id FROM public.caller_id_assignments WHERE phone_number=%s AND user_id<>%s', (new_number,target['id']))
-            if cur.fetchone():
-                raise HTTPException(409, 'This number is already assigned to another user')
+            cur.execute("""SELECT a.user_id, u.account_id FROM public.caller_id_assignments a
+                JOIN public.dialnytics_users u ON u.id=a.user_id
+                WHERE a.phone_number=%s AND a.user_id<>%s""", (new_number,target['id']))
+            others = cur.fetchall()
+            # A number can be SHARED by users of the same company (all of them ring).
+            if others and (not target['account_id'] or any(o['account_id'] != target['account_id'] for o in others)):
+                raise HTTPException(409, 'This number belongs to a user of another company')
             # Remove old assignment and insert new assignment in one transaction.
             cur.execute('DELETE FROM public.caller_id_assignments WHERE user_id=%s', (target['id'],))
             cur.execute('INSERT INTO public.caller_id_assignments(user_id,phone_number) VALUES (%s,%s)', (target['id'],new_number))
@@ -1370,7 +1424,16 @@ async def create_user(
                         LEFT JOIN public.caller_id_assignments a ON a.user_id=u.id
                         WHERE a.phone_number=%s OR u.phone_number=%s
                         FOR UPDATE OF u""", (phone_number, phone_number))
-                    owners = [r['id'] for r in cur.fetchall()]
+                    owner_rows = cur.fetchall()
+                    owners = [r['id'] for r in owner_rows]
+                    share = form.get('share_number') == 'yes'
+                    if owners and share:
+                        # Share inside one company: every holder keeps the number and rings.
+                        cur.execute("SELECT DISTINCT account_id FROM public.dialnytics_users WHERE id=ANY(%s)", (owners,))
+                        accts = {r['account_id'] for r in cur.fetchall()}
+                        if not existing_account or accts != {existing_account}:
+                            return fail('A number can only be shared inside the same company')
+                        owners = []
                     if owners and not confirmed_transfer:
                         return fail('Caller ID already assigned; confirm transfer first')
                     if owners:
@@ -1786,7 +1849,7 @@ async def dashboard(request: Request):
     costs = None
     if user.get("role") == "admin":
         try:
-            costs = cost_summary()
+            costs = admin_finance()
         except Exception:
             log.exception("Dashboard cost summary failed")
     with db_connect() as conn:
@@ -2331,6 +2394,156 @@ async def recording_audio(rec_id: uuid.UUID, request: Request):
                "Content-Disposition": f'{disposition}; filename="dialnytics-{row["kind"]}-{stamp}{ext}"'}
     return _range_response(data, row["content_type"], request.headers.get("range"), headers)
 
+# ==================== ADMIN MONITOR RECORDINGS ====================
+# Every call is recorded by the dialer and uploaded here. Only an admin can
+# list or play these; they are deleted automatically after 14 days.
+MONITOR_KEEP_DAYS = int(os.getenv("MONITOR_RECORDING_DAYS", "14"))
+_monitor_purge = {"at": 0.0}
+
+def _purge_monitor_recordings(force=False):
+    if not force and time.time() - _monitor_purge["at"] < 3600:
+        return 0
+    _monitor_purge["at"] = time.time()
+    removed = 0
+    try:
+        while True:
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""DELETE FROM public.monitor_recordings WHERE id IN (
+                            SELECT id FROM public.monitor_recordings
+                            WHERE created_at < now() - make_interval(days => %s) LIMIT 200)
+                        RETURNING storage, storage_path""", (MONITOR_KEEP_DAYS,))
+                    rows = cur.fetchall()
+            for r in rows:
+                if r["storage"] == "supabase" and r["storage_path"]:
+                    try:
+                        storage.delete(r["storage_path"])
+                    except vh.ProviderError:
+                        log.warning("Could not delete old monitor recording object")
+            removed += len(rows)
+            if len(rows) < 200:
+                break
+    except Exception:
+        log.exception("Monitor recording clean-up failed")
+    return removed
+
+@app.post("/api/monitor-recordings")
+async def save_monitor_recording(request: Request, file: UploadFile = File(...), number: str = Form(""),
+                                 direction: str = Form("outgoing"), duration: int = Form(0)):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if user.get("role") == "admin":
+        return {"ok": True}
+    data = await file.read(MAX_RECORDING_BYTES + 1)
+    if not data or len(data) > MAX_RECORDING_BYTES:
+        return {"ok": False}
+    direction = "incoming" if direction == "incoming" else "outgoing"
+    number = re.sub(r"[^0-9+]", "", number)[:40]
+    duration = min(max(0, int(duration or 0)), 86400)
+    content_type = (file.content_type or "audio/webm").split(";")[0].strip().lower()
+    if content_type not in AUDIO_TYPES:
+        content_type = "audio/webm"
+    mine = user.get("phone_number") or ""
+    tail = re.sub(r"[^0-9]", "", number)[-9:] or "0000000000"
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id FROM public.calls WHERE user_id=%s AND direction=%s
+                AND created_at > now() - make_interval(secs => %s)
+                AND regexp_replace(CASE WHEN direction='incoming' THEN from_number ELSE to_number END, '[^0-9]', '', 'g')
+                    LIKE '%%' || %s
+                ORDER BY created_at DESC LIMIT 1""", (user["id"], direction, duration + 600, tail))
+            row = cur.fetchone()
+            call_id = row["id"] if row else None
+    rec_id = uuid.uuid4()
+    kind, path, audio = "db", None, data
+    if storage.enabled:
+        obj = "monitor/" + str(user["id"]) + "/" + str(rec_id) + AUDIO_TYPES[content_type]
+        try:
+            storage.upload(obj, data, content_type)
+            kind, path, audio = "supabase", obj, None
+        except vh.ProviderError:
+            log.exception("Monitor recording upload failed; kept in the database")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO public.monitor_recordings
+                (id,user_id,call_id,direction,provider,from_number,to_number,duration_seconds,content_type,
+                 size_bytes,storage,storage_path,audio)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (rec_id, user["id"], call_id, direction, user.get("provider") or "telnyx",
+                 number if direction == "incoming" else mine, mine if direction == "incoming" else number,
+                 duration, content_type, len(data), kind, path, audio))
+    _purge_monitor_recordings()
+    return {"ok": True}
+
+@app.get("/customers/{email}/recordings", response_class=HTMLResponse)
+async def customer_monitor_recordings(request: Request, email: str):
+    admin = require_admin(request)
+    _purge_monitor_recordings()
+    q = request.query_params
+    direction = q.get("direction", "")
+    number = re.sub(r"[^0-9]", "", q.get("number", ""))[:20]
+    day = q.get("date", "")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id,name,email,phone_number FROM public.dialnytics_users WHERE lower(email)=lower(%s)",
+                        (email,))
+            cust = cur.fetchone()
+            if not cust:
+                raise HTTPException(404, "Customer not found")
+            where, params = ["r.user_id=%s"], [cust["id"]]
+            if direction in ("incoming", "outgoing"):
+                where.append("r.direction=%s"); params.append(direction)
+            if number:
+                where.append("(regexp_replace(r.from_number,'[^0-9]','','g') LIKE %s OR regexp_replace(r.to_number,'[^0-9]','','g') LIKE %s)")
+                params += ["%" + number + "%", "%" + number + "%"]
+            if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day):
+                where.append("(r.created_at AT TIME ZONE %s)::date = %s::date")
+                params += [os.getenv("DASHBOARD_TIMEZONE", "Asia/Karachi"), day]
+            cur.execute("SELECT r.id,r.direction,r.from_number,r.to_number,r.duration_seconds,r.size_bytes,r.created_at "
+                        "FROM public.monitor_recordings r WHERE " + " AND ".join(where) +
+                        " ORDER BY r.created_at DESC LIMIT 500", params)
+            rows = cur.fetchall()
+            cur.execute("SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes),0) AS b FROM public.monitor_recordings WHERE user_id=%s",
+                        (cust["id"],))
+            totals = cur.fetchone()
+    items = []
+    for r in rows:
+        local = _to_local(r["created_at"])
+        other = r["from_number"] if r["direction"] == "incoming" else r["to_number"]
+        items.append({"id": str(r["id"]), "direction": r["direction"], "number": other or "Unknown",
+                      "duration": int(r["duration_seconds"] or 0),
+                      "size_kb": max(1, int((r["size_bytes"] or 0) / 1024)),
+                      "when": local.strftime("%d %b %Y, %I:%M %p") if local else ""})
+    return templates.TemplateResponse(request=request, name="admin_recordings.html", context={
+        "user": admin, "customer": cust, "items": items, "keep_days": MONITOR_KEEP_DAYS,
+        "total": int(totals["n"] or 0), "total_mb": round(float(totals["b"] or 0) / 1048576, 1),
+        "f_direction": direction, "f_number": q.get("number", ""), "f_date": day})
+
+@app.get("/admin/monitor-recordings/{rec_id}/audio")
+async def monitor_recording_audio(rec_id: uuid.UUID, request: Request):
+    require_admin(request)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT content_type,storage,storage_path,audio,created_at,direction
+                FROM public.monitor_recordings WHERE id=%s""", (rec_id,))
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if row["storage"] == "supabase":
+        try:
+            data, _ = storage.download(row["storage_path"])
+        except vh.ProviderError:
+            raise HTTPException(status_code=502, detail="Recording storage is unavailable")
+    else:
+        data = bytes(row["audio"] or b"")
+    ext = AUDIO_TYPES.get(row["content_type"], ".webm")
+    stamp = _to_local(row["created_at"]).strftime("%Y%m%d-%H%M") if row["created_at"] else "call"
+    disp = "attachment" if request.query_params.get("download") else "inline"
+    headers = {"Cache-Control": "private, no-store",
+               "Content-Disposition": disp + '; filename="call-' + row["direction"] + "-" + stamp + ext + '"'}
+    return _range_response(data, row["content_type"], request.headers.get("range"), headers)
+
 @app.delete("/api/recordings/{rec_id}")
 async def delete_recording(rec_id: uuid.UUID, request: Request):
     user = get_current_user(request)
@@ -2432,6 +2645,7 @@ def _telnyx_start_voicemail(call_control_id, group_id):
                 WHERE group_id=%s AND status='ringing'""", (group_id,))
             if row["call_log_id"]:
                 cur.execute("UPDATE public.calls SET status='missed' WHERE id=%s", (row["call_log_id"],))
+            rg.mark_missed(cur, group_id)          # shared number: every member's log
     try:
         _telnyx_request("POST", f"/v2/calls/{call_control_id}/actions/answer",
                         {"client_state": _cs_encode(f"vm:{group_id}")})
@@ -2440,6 +2654,16 @@ def _telnyx_start_voicemail(call_control_id, group_id):
         log.exception("Voicemail answer failed for group %s", group_id)
         _telnyx_hangup_quietly(call_control_id)
         return False
+
+def _telnyx_voicemail_answered(call_control_id, group_id):
+    """Caller already answered (was waiting on hold): play the greeting, then record."""
+    try:
+        _telnyx_request("POST", f"/v2/calls/{call_control_id}/actions/speak", {
+            "payload": VOICEMAIL_GREETING, "voice": "female", "language": "en-US",
+            "client_state": _cs_encode(f"vm:{group_id}")})
+    except Exception:
+        log.exception("Voicemail greeting failed for queued group %s", group_id)
+        _telnyx_hangup_quietly(call_control_id)
 
 def _telnyx_save_voicemail(group_id, mp3_url, duration, provider_ref, call_control_id):
     try:
@@ -2453,10 +2677,15 @@ def _telnyx_save_voicemail(group_id, mp3_url, duration, provider_ref, call_contr
             log.warning("Voicemail for unknown call group %s ignored", group_id)
             return
         data, ctype = vh.http_bytes(mp3_url, max_bytes=MAX_RECORDING_BYTES)
-        _store_recording(row["user_id"], "voicemail", data, "audio/mpeg", call_id=row["call_id"],
-                         provider="telnyx", from_number=row["caller_number"] or "",
-                         to_number=row["destination_number"] or "", duration=duration,
-                         provider_ref=provider_ref)
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                targets = rg.voicemail_targets(cur, group_id) or [(row["user_id"], row["call_id"])]
+        for n, (uid, log_id) in enumerate(targets):
+            # Shared number: every member gets the voicemail in their list.
+            _store_recording(uid, "voicemail", data, "audio/mpeg", call_id=log_id,
+                             provider="telnyx", from_number=row["caller_number"] or "",
+                             to_number=row["destination_number"] or "", duration=duration,
+                             provider_ref=provider_ref if n == 0 else f"{provider_ref}:{uid}")
     except Exception:
         log.exception("Saving Telnyx voicemail failed for group %s", group_id)
     finally:
@@ -2504,6 +2733,17 @@ ct.setup(db_connect=db_connect, telnyx=_telnyx_request, cs_encode=_cs_encode,
          call_allowed=call_allowed, call_block_message=call_block_message,
          base_url=PUBLIC_BASE_URL, presence_timeout=40,
          no_worker=os.getenv("TRANSFER_WORKER", "1") == "0")
+
+def _line_ctx(provider, acct):
+    return tw_ctx(acct or "w1") if provider == "twilio" else tx_ctx(acct or "t1")
+
+rg.setup(db_connect=db_connect, telnyx=_telnyx_request, cs_encode=_cs_encode,
+         quiet=lambda m, p, b=None: ct._quiet(m, p, b), hangup=_telnyx_hangup_quietly,
+         voice_app=lambda: tx_conf()["voice_app_id"], hold_music_url=ct.hold_music_url,
+         free=ct._free, on_ring_answered=ct.on_ring_answered, agent_leg_gone=ct.agent_leg_gone,
+         voicemail_parked=_telnyx_start_voicemail, voicemail_answered=_telnyx_voicemail_answered,
+         current_account=lambda provider: tw_current() if provider == "twilio" else tx_current(),
+         account_ctx=_line_ctx, no_worker=os.getenv("TRANSFER_WORKER", "1") == "0")
 
 def _handle_ring_leg_event(event, group_id, background, payload=None):
     """Events from the SIP leg that rings the agent's browser."""
@@ -2569,6 +2809,27 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
     elif client_state.startswith("ring:"):
         _handle_ring_leg_event(event, client_state[5:], background, payload)
         return JSONResponse({"ok": True})
+    elif client_state.startswith("rg:"):
+        # Shared number: the leg ringing one member's browser.
+        try:
+            gid, uid = client_state[3:].split(":", 1)
+            uuid.UUID(gid); uuid.UUID(uid)
+            rg.on_ring_event(event, gid, uid, payload)
+        except ValueError:
+            pass
+        except Exception:
+            log.exception("Ring-group event failed (%s)", event)
+        return JSONResponse({"ok": True})
+    elif client_state.startswith("q:"):
+        # Shared number: caller waiting on hold for a free member.
+        try:
+            uuid.UUID(client_state[2:])
+            if rg.on_queue_event(event, client_state[2:], payload):
+                return JSONResponse({"ok": True})
+        except ValueError:
+            return JSONResponse({"ok": True})
+        except Exception:
+            log.exception("Ring-group queue event failed (%s)", event)
     # Single-number/single-user Voice API routing.
     # Telnyx Voice API originates a SIP leg to the assigned WebRTC credential,
     # automatically bridging it to the inbound leg once answered.
@@ -2602,8 +2863,13 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
                             retry_of_declined = True
                             cur.execute("""UPDATE public.incoming_call_groups
                                 SET status='declined', ended_at=NOW() WHERE id=%s""", (inserted["id"],))
+                    shared_rows = None
                     if inserted and not retry_of_declined:
                         group_id = inserted["id"]
+                        rows = rg.members(cur, destination, "telnyx")
+                        if rg.is_shared(rows):
+                            shared_rows = rows
+                    if inserted and not retry_of_declined and shared_rows is None:
                         cur.execute("""SELECT u.id,u.email,u.sip_username,u.credential_id,
                             u.dnd_enabled,u.plan_renewal FROM public.caller_id_assignments a
                             JOIN public.dialnytics_users u ON u.id=a.user_id
@@ -2631,7 +2897,13 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
                                 ring_user = recipient
             if retry_of_declined:
                 _bg(background, _telnyx_reject_declined, call_id)
-            if group_id:
+            if group_id and shared_rows is not None:
+                try:
+                    rg.telnyx_start(group_id, call_id, origin, destination, shared_rows)
+                except Exception:
+                    log.exception("Ring group start failed for %s", group_id)
+                    _bg(background, _telnyx_start_voicemail, call_id, group_id)
+            elif group_id:
                 # Do not create new SIP credentials in a webhook: the user must
                 # have logged in once and obtained a WebRTC credential already.
                 sip_username = (ring_user or {}).get("sip_username", "")
@@ -2681,12 +2953,17 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
                     # Linked SIP leg webhooks can have their own call control id.
                     # For now, only update the inbound leg's stored id.
                     if event in ("call.answered", "call.bridged"):
+                        # Shared numbers are marked answered by the member's own leg (ring_group).
                         cur.execute("""UPDATE public.incoming_call_groups SET status='answered'
-                            WHERE telnyx_call_id=%s AND status='ringing'""", (call_id,))
+                            WHERE telnyx_call_id=%s AND status='ringing' AND NOT is_shared""", (call_id,))
                         cur.execute("""UPDATE public.calls c SET status='answered'
                             FROM public.incoming_call_groups g WHERE g.call_log_id=c.id
-                            AND g.telnyx_call_id=%s AND c.status='ringing'""", (call_id,))
+                            AND g.telnyx_call_id=%s AND c.status='ringing' AND NOT g.is_shared""", (call_id,))
                     else:
+                        try:
+                            rg.customer_gone(call_id)      # shared number: stop every ringing member
+                        except Exception:
+                            log.exception("Ring-group cleanup failed for %s", call_id)
                         cur.execute("""UPDATE public.incoming_call_groups
                             SET status=CASE WHEN status='ringing' THEN 'missed'
                                 WHEN status='answered' THEN 'ended' ELSE status END,
@@ -2786,12 +3063,175 @@ async def twilio_voice(request: Request):
         f'<Dial callerId="{vh.xml_attr(user["phone_number"])}" answerOnBridge="true" timeLimit="14400">'
         f'<Number>{vh.xml_attr(to_number)}</Number></Dial>')
 
+# ---- Shared Twilio numbers (ring every free member, first to answer wins)
+def _tw_url(path):
+    return vh.xml_attr(PUBLIC_BASE_URL + path)
+
+def _twilio_group_ring_twiml(gid, users, logs):
+    parts = []
+    for u in users:
+        cb = _tw_url("/twilio/group-answered?g=%s&u=%s" % (gid, u["id"]))
+        ident = vh.identity_for_user(u["id"])
+        log_id = logs.get(str(u["id"])) or ""
+        parts.append('<Client statusCallbackEvent="answered" statusCallbackMethod="POST" '
+                     'statusCallback="%s"><Identity>%s</Identity>'
+                     '<Parameter name="logId" value="%s"/></Client>' % (cb, ident, log_id))
+    clients = "".join(parts)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE public.call_participants SET status='ringing', updated_at=now()
+                WHERE group_id=%s AND user_id = ANY(%s)""", (gid, [u["id"] for u in users]))
+    return (f'<Dial timeout="{rg.RING_SECONDS}" answerOnBridge="true" method="POST" '
+            'action="%s">%s</Dial>' % (_tw_url("/twilio/group-dial?g=" + gid), clients))
+
+def _twilio_group_hold_twiml(gid, part=1):
+    nxt = 2 if part == 1 else 1
+    return ('<Play>%s</Play><Redirect method="POST">%s</Redirect>'
+            % (_tw_url("/static/audio/hold-part%d.mp3" % part), _tw_url("/twilio/group-queue?g=%s&p=%d" % (gid, nxt))))
+
+def _twilio_group_logs(gid):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id,call_log_id FROM public.call_participants WHERE group_id=%s", (gid,))
+            return {str(r["user_id"]): r["call_log_id"] for r in cur.fetchall()}
+
+def _twilio_group_voicemail(gid):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE public.incoming_call_groups SET status='missed', ended_at=now()
+                WHERE id=%s AND status IN ('ringing','queued') RETURNING call_log_id""", (gid,))
+            row = cur.fetchone()
+            rg.mark_missed(cur, gid)
+            if not row:
+                cur.execute("SELECT call_log_id FROM public.incoming_call_groups WHERE id=%s", (gid,))
+                row = cur.fetchone()
+    if not row or not row["call_log_id"]:
+        return _twiml_response(_say("Sorry, nobody is available. Goodbye."), "<Hangup/>")
+    return _twiml_response(_twilio_voicemail_twiml(row["call_log_id"]))
+
+def _twilio_group_incoming(params, rows):
+    to_number = params.get("To", "")
+    from_number = params.get("From", "") or "Unknown"
+    call_sid = params.get("CallSid") or ""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO public.incoming_call_groups
+                (telnyx_call_id,caller_number,destination_number,status,provider)
+                VALUES (%s,%s,%s,'ringing','twilio') ON CONFLICT(telnyx_call_id) DO NOTHING RETURNING id""",
+                (call_sid, from_number, to_number))
+            ins = cur.fetchone()
+            if not ins:
+                return _twiml_response("<Hangup/>")          # duplicate webhook
+            gid = str(ins["id"])
+            logs = rg.create_group_logs(cur, gid, rows, from_number, to_number, "twilio", call_sid)
+            free, busy = rg.classify(cur, rows, gid, "twilio")
+    if not logs:
+        return _twiml_response(_say("This number is not available right now. Goodbye."), "<Hangup/>")
+    if free:
+        return _twiml_response(_twilio_group_ring_twiml(gid, free, logs))
+    if busy:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE public.incoming_call_groups SET status='queued',
+                    queue_deadline=now() + make_interval(secs => %s) WHERE id=%s""", (rg.QUEUE_SECONDS, gid))
+        return _twiml_response(_twilio_group_hold_twiml(gid))
+    return _twilio_group_voicemail(gid)
+
+def _gid_param(request):
+    try:
+        return str(uuid.UUID(request.query_params.get("g", "")))
+    except ValueError:
+        return ""
+
+@app.post("/twilio/group-answered")
+async def twilio_group_answered(request: Request):
+    """A member's browser answered: they win, everybody else's log is removed."""
+    params = await _twilio_params(request)
+    gid = _gid_param(request)
+    try:
+        uid = str(uuid.UUID(request.query_params.get("u", "")))
+    except ValueError:
+        uid = ""
+    if gid and uid and params.get("CallStatus") in ("in-progress", "answered", ""):
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                rg.claim(cur, gid, uid)
+    return Response(status_code=204)
+
+@app.post("/twilio/group-dial")
+async def twilio_group_dial(request: Request):
+    """End of the <Dial> that rang the free members."""
+    params = await _twilio_params(request)
+    gid = _gid_param(request)
+    if not gid:
+        return _twiml_response("<Hangup/>")
+    status = params.get("DialCallStatus", "")
+    duration = int(params.get("DialCallDuration") or 0) if str(params.get("DialCallDuration") or "0").isdigit() else 0
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status,call_log_id,queue_deadline < now() AS late, queue_deadline IS NOT NULL AS was_queued "
+                        "FROM public.incoming_call_groups WHERE id=%s", (gid,))
+            g = cur.fetchone()
+            if g and g["status"] == "answered":
+                cur.execute("UPDATE public.incoming_call_groups SET status='ended', ended_at=now() WHERE id=%s", (gid,))
+                if g["call_log_id"]:
+                    cur.execute("UPDATE public.calls SET status='completed', duration_seconds=%s WHERE id=%s",
+                                (duration, g["call_log_id"]))
+    if not g or g["status"] in ("answered", "ended") or status in ("completed", "canceled"):
+        if g and g["status"] in ("ringing", "queued") and status == "canceled":
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE public.incoming_call_groups SET status='missed', ended_at=now() WHERE id=%s", (gid,))
+                    rg.mark_missed(cur, gid)
+        return _twiml_response("<Hangup/>")
+    if g["was_queued"] and not g["late"]:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE public.call_participants SET status='waiting', updated_at=now()
+                    WHERE group_id=%s AND status='ringing'""", (gid,))
+                cur.execute("UPDATE public.incoming_call_groups SET status='queued' WHERE id=%s", (gid,))
+        return _twiml_response(_twilio_group_hold_twiml(gid))
+    return _twilio_group_voicemail(gid)       # nobody picked up
+
+@app.post("/twilio/group-queue")
+async def twilio_group_queue(request: Request):
+    """Caller on hold: ring the first member who is free, or voicemail after 3 min."""
+    await _twilio_params(request)
+    gid = _gid_param(request)
+    part = 2 if request.query_params.get("p") == "2" else 1
+    if not gid:
+        return _twiml_response("<Hangup/>")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, queue_deadline < now() AS late FROM public.incoming_call_groups WHERE id=%s", (gid,))
+            g = cur.fetchone()
+            if not g or g["status"] != "queued":
+                return _twiml_response("<Hangup/>")
+            if g["late"]:
+                free = None
+            else:
+                cur.execute("""SELECT u.id,u.email,u.name,u.sip_username,u.dnd_enabled,u.plan_renewal,
+                        u.account_id,u.created_at,u.twilio_account,u.telnyx_account
+                    FROM public.call_participants p JOIN public.dialnytics_users u ON u.id=p.user_id
+                    WHERE p.group_id=%s AND u.is_active""", (gid,))
+                free, _busy = rg.classify(cur, cur.fetchall(), gid, "twilio")
+    if free is None:
+        return _twilio_group_voicemail(gid)
+    if free:
+        return _twiml_response(_twilio_group_ring_twiml(gid, free, _twilio_group_logs(gid)))
+    return _twiml_response(_twilio_group_hold_twiml(gid, part))
+
 @app.post("/twilio/incoming")
 async def twilio_incoming(request: Request):
     """Voice webhook of each Twilio number: ring the assigned user's browser."""
     params = await _twilio_params(request)
     to_number = params.get("To", "")
     from_number = params.get("From", "") or "Unknown"
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            shared = rg.members(cur, to_number, "twilio")
+    if rg.is_shared(shared):
+        return _twilio_group_incoming(params, shared)
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT u.* FROM public.caller_id_assignments a
@@ -2855,10 +3295,19 @@ def _twilio_save_voicemail(log_id, recording_url, recording_sid, duration):
         c = tw_conf()
         data, _ = vh.http_bytes(recording_url + ".mp3", basic_auth=(c["sid"], c["token"]),
                                 max_bytes=MAX_RECORDING_BYTES)
-        _store_recording(row["user_id"], "voicemail", data, "audio/mpeg", call_id=row["id"],
-                         provider="twilio", from_number=row["from_number"] or "",
-                         to_number=row["to_number"] or "", duration=duration,
-                         provider_ref="twilio:" + recording_sid)
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT g.id FROM public.incoming_call_groups g WHERE g.call_log_id=%s AND g.is_shared
+                    LIMIT 1""", (row["id"],))
+                g = cur.fetchone()
+                targets = rg.voicemail_targets(cur, g["id"]) if g else []
+        targets = targets or [(row["user_id"], row["id"])]
+        for n, (uid, call_id) in enumerate(targets):
+            # Shared number: every member gets the voicemail.
+            _store_recording(uid, "voicemail", data, "audio/mpeg", call_id=call_id,
+                             provider="twilio", from_number=row["from_number"] or "",
+                             to_number=row["to_number"] or "", duration=duration,
+                             provider_ref="twilio:" + recording_sid + ("" if n == 0 else ":" + str(uid)))
     except Exception:
         log.exception("Saving Twilio voicemail failed for call %s", log_id)
 
@@ -3164,6 +3613,22 @@ async def messages_page(request: Request):
         "user": user, "sms_ok": has_sms(user), "open_number": _sms_number(request.query_params.get("to", "")),
         "is_admin": user.get("role") == "admin"})
 
+def _sms_scope(user):
+    """SQL filter for this user's SMS inbox. A number shared by several users of
+    one company is one inbox that all of them see."""
+    num = user.get("phone_number") or ""
+    ids = [str(user["id"])]
+    if num and user.get("account_id"):
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT DISTINCT a.user_id FROM public.caller_id_assignments a
+                    JOIN public.dialnytics_users u ON u.id=a.user_id
+                    WHERE a.phone_number=%s AND u.account_id=%s""", (num, user["account_id"]))
+                ids += [str(r["user_id"]) for r in cur.fetchall() if str(r["user_id"]) not in ids]
+    if len(ids) > 1:
+        return "user_id = ANY(%s::uuid[]) AND our_number=%s", [ids, num]
+    return "user_id=%s", [str(user["id"])]
+
 @app.get("/api/sms/unread")
 async def sms_unread(request: Request):
     user = get_current_user(request)
@@ -3171,23 +3636,25 @@ async def sms_unread(request: Request):
         return {"unread": 0}
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT COUNT(*) AS n FROM public.sms_messages
-                WHERE user_id=%s AND direction='in' AND is_read=false""", (user["id"],))
+            scope, sp = _sms_scope(user)
+            cur.execute("SELECT COUNT(*) AS n FROM public.sms_messages WHERE " + scope +
+                        " AND direction='in' AND is_read=false", sp)
             return {"unread": int(cur.fetchone()["n"])}
 
 @app.get("/api/sms/threads")
 async def sms_threads(request: Request):
     user = _sms_require(request)
+    scope, sp = _sms_scope(user)
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT t.contact_number, t.body, t.direction, t.status, t.created_at, u.unread
                 FROM (SELECT DISTINCT ON (contact_number) contact_number, body, direction, status, created_at
-                      FROM public.sms_messages WHERE user_id=%s
+                      FROM public.sms_messages WHERE """ + scope + """
                       ORDER BY contact_number, created_at DESC) t
                 LEFT JOIN (SELECT contact_number, COUNT(*) AS unread FROM public.sms_messages
-                      WHERE user_id=%s AND direction='in' AND is_read=false GROUP BY contact_number) u
+                      WHERE """ + scope + """ AND direction='in' AND is_read=false GROUP BY contact_number) u
                   ON u.contact_number=t.contact_number
-                ORDER BY t.created_at DESC LIMIT 300""", (user["id"], user["id"]))
+                ORDER BY t.created_at DESC LIMIT 300""", sp + sp)
             rows = cur.fetchall()
     contacts = _contact_names(user["id"])
     out = []
@@ -3206,14 +3673,15 @@ async def sms_thread(request: Request, number: str = ""):
     contact = _sms_number(number)
     if not contact:
         raise HTTPException(status_code=422, detail="Enter a number with country code, e.g. +12025550123")
+    scope, sp = _sms_scope(user)
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT * FROM (SELECT id,direction,body,media,status,created_at FROM public.sms_messages
-                WHERE user_id=%s AND contact_number=%s ORDER BY created_at DESC LIMIT 300) x
-                ORDER BY created_at ASC""", (user["id"], contact))
+                WHERE """ + scope + """ AND contact_number=%s ORDER BY created_at DESC LIMIT 300) x
+                ORDER BY created_at ASC""", sp + [contact])
             rows = cur.fetchall()
-            cur.execute("""UPDATE public.sms_messages SET is_read=true
-                WHERE user_id=%s AND contact_number=%s AND direction='in' AND is_read=false""", (user["id"], contact))
+            cur.execute("UPDATE public.sms_messages SET is_read=true WHERE " + scope +
+                        " AND contact_number=%s AND direction='in' AND is_read=false", sp + [contact])
     c = _contact_names(user["id"]).get(contact)
     return {"number": contact, "name": c["name"] if c else "", "messages": [_sms_row(r) for r in rows]}
 
@@ -3268,7 +3736,8 @@ async def sms_delete_thread(request: Request, number: str = ""):
         raise HTTPException(status_code=422, detail="Invalid number")
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM public.sms_messages WHERE user_id=%s AND contact_number=%s", (user["id"], contact))
+            scope, sp = _sms_scope(user)
+            cur.execute("DELETE FROM public.sms_messages WHERE " + scope + " AND contact_number=%s", sp + [contact])
     return {"ok": True}
 
 @app.post("/webhooks/telnyx/sms")
@@ -4305,7 +4774,7 @@ async def decline_incoming_group(group_id: uuid.UUID, request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT g.telnyx_call_id, g.status, g.ring_call_id
+            cur.execute("""SELECT g.telnyx_call_id, g.status, g.ring_call_id, g.is_shared, g.line_account, u.id AS uid
                 FROM public.incoming_call_groups g
                 JOIN public.call_participants p ON p.group_id=g.id
                 JOIN public.dialnytics_users u ON u.id=p.user_id
@@ -4313,6 +4782,14 @@ async def decline_incoming_group(group_id: uuid.UUID, request: Request):
             group = cur.fetchone()
     if not group:
         raise HTTPException(status_code=403, detail="Not a participant")
+    if group.get("is_shared"):
+        # Shared number: only YOUR ringing stops; teammates keep ringing. When
+        # nobody is left ringing the caller goes to voicemail.
+        leg = rg.decline(str(group_id), group["uid"])
+        if leg:
+            with tx_ctx(group.get("line_account") or "t1"):
+                _telnyx_hangup_quietly(leg)
+        return {"group_declined": False, "carrier_hangup_requested": True, "status": "declined_by_you"}
     if group["status"] not in ("ringing", "answered"):
         return {"group_declined": False, "carrier_hangup_requested": False,
                 "status": group["status"]}
@@ -4366,8 +4843,8 @@ async def pending_incoming_for_user(request: Request):
                 FROM public.incoming_call_groups g
                 JOIN public.call_participants p ON p.group_id=g.id
                 JOIN public.dialnytics_users u ON u.id=p.user_id
-                WHERE u.email=%s AND g.status='ringing'
-                  AND g.created_at > NOW() - INTERVAL '3 minutes'
+                WHERE u.email=%s AND g.status IN ('ringing','queued') AND COALESCE(p.status,'ringing')='ringing'
+                  AND g.created_at > NOW() - INTERVAL '5 minutes'
                 ORDER BY g.created_at DESC LIMIT 5""", (user["email"],))
             rows = cur.fetchall()
     pending = [{"id":str(r["id"]),"from":r["caller_number"],

