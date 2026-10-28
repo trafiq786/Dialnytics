@@ -50,3 +50,9 @@ New database columns/tables are created automatically on start (migrations 14 & 
 ## Optional environment variables (all have defaults)
 - RING_GROUP_RING_SECONDS (30), RING_GROUP_QUEUE_SECONDS (180)
 - MONITOR_RECORDING_DAYS (14)
+
+## Fix (2026-10-28, later): shared number sent calls to voicemail
+- The ring group uses a new participant status 'waiting'. An old database CHECK
+  constraint rejected it, so shared-number calls crashed and fell to voicemail.
+- Migration 14 now replaces that constraint automatically (and drops any status
+  CHECK on incoming_call_groups). No data is changed. Just redeploy this build.

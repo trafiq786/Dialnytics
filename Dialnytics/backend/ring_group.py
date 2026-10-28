@@ -30,9 +30,16 @@ D = {}
 
 SCHEMA_SQL = """
 -- 14: shared numbers / ring groups
+-- The ring group adds the 'waiting' participant status. Replace any old CHECK
+-- constraint that forbids it (data is untouched).
+ALTER TABLE public.call_participants DROP CONSTRAINT IF EXISTS call_participants_status_check;
+ALTER TABLE public.call_participants ADD CONSTRAINT call_participants_status_check
+    CHECK (status IN ('waiting','ringing','answered','cancelled','declined','missed'));
 ALTER TABLE public.call_participants ADD COLUMN IF NOT EXISTS call_log_id uuid;
 ALTER TABLE public.call_participants ADD COLUMN IF NOT EXISTS ring_call_id text;
 ALTER TABLE public.call_participants ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
+-- The ring group adds the 'queued' group status; allow it if a CHECK exists.
+ALTER TABLE public.incoming_call_groups DROP CONSTRAINT IF EXISTS incoming_call_groups_status_check;
 ALTER TABLE public.incoming_call_groups ADD COLUMN IF NOT EXISTS provider text NOT NULL DEFAULT 'telnyx';
 ALTER TABLE public.incoming_call_groups ADD COLUMN IF NOT EXISTS line_account text;
 ALTER TABLE public.incoming_call_groups ADD COLUMN IF NOT EXISTS is_shared boolean NOT NULL DEFAULT false;
