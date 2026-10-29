@@ -1,0 +1,6 @@
+Twilio call recordings now capture correctly for admin monitoring.
+The recorder pulls audio from the call peer-connection when the provider
+(Twilio) does not expose a direct media stream. Telnyx path unchanged.
+
+Replace: frontend/static/js/dialer.js  (then hard-refresh the dialer).
+Already-missed Twilio calls before this deploy are not recoverable.

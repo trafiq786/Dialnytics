@@ -1319,16 +1319,40 @@ function hangup() {
     // Compliance recording: every call is recorded and uploaded for the account
     // admin (fraud monitoring). Disclosed to users in the service terms. This is
     // separate from the customer's own REC button and runs on all accounts.
+    // Remote + local audio for recording. Telnyx exposes remoteStream directly;
+    // Twilio plays its own audio and does not, so we pull the tracks from the
+    // call's RTCPeerConnection, which works for both providers.
+    function callStreams(call) {
+        let remote = null, local = null;
+        try { remote = call.remoteStream || null; } catch (e) {}
+        try { local = call.localStream || (call.options && call.options.localStream) || null; } catch (e) {}
+        if (!remote || !local) {
+            const pc = findPc(call);
+            if (pc) {
+                if (!remote && pc.getReceivers) {
+                    const rt = pc.getReceivers().map(r => r.track).filter(t => t && t.kind === 'audio' && t.readyState === 'live');
+                    if (rt.length) remote = new MediaStream(rt);
+                }
+                if (!local && pc.getSenders) {
+                    const lt = pc.getSenders().map(s => s.track).filter(t => t && t.kind === 'audio' && t.readyState === 'live');
+                    if (lt.length) local = new MediaStream(lt);
+                }
+            }
+        }
+        return { remote: remote, local: local };
+    }
     function startMonitorRecording() {
         try {
             if (!activeCall || !window.MediaRecorder) return;
             if (monRec && monRec.state === 'recording') return;
+            let tries = 0;
             const build = () => {
                 if (!activeCall || ended || (monRec && monRec.state === 'recording')) return;
-                const remote = activeCall.remoteStream;
-                if (!remote) { if (!ended) setTimeout(build, 600); return; }
+                const s = callStreams(activeCall);
+                const remote = s.remote;
+                if (!remote) { if (!ended && tries++ < 25) setTimeout(build, 600); return; }
                 let stream = remote;
-                const local = activeCall.localStream || (activeCall.options && activeCall.options.localStream) || null;
+                const local = s.local;
                 const Ctx = window.AudioContext || window.webkitAudioContext;
                 if (Ctx && local) {
                     try {
