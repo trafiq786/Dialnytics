@@ -36,6 +36,7 @@ import urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voice_helpers as vh  # noqa: E402  (sibling module; works for both start commands)
 import call_transfer as ct  # noqa: E402  (agent transfer + advanced calling)
+from starlette.concurrency import run_in_threadpool  # noqa: E402
 import ring_group as rg  # noqa: E402  (shared numbers: ring every free member)
 
 app = FastAPI(title="Dialnytics", version="1.2.0")
@@ -241,10 +242,39 @@ def _new_db_connection():
 # Opening a new TLS connection to Supabase costs ~300-500 ms, and one page used
 # up to 8 of them. Connections are now kept open and re-used.
 _db_pool = vh.ConnectionPool(_new_db_connection,
-                             max_idle=int(os.getenv("DB_POOL_SIZE", "8")))
+                             max_idle=int(os.getenv("DB_POOL_SIZE", "20")))
 
 def db_connect():
     return _db_pool.connection()
+
+# ---- Background-worker leader election --------------------------------------
+# With more than one app instance, the ring-group and transfer workers must run
+# on only ONE of them, or an incoming call would be rung twice. Each process
+# renews a lease row; whoever holds it is the leader. Works through any Postgres
+# pooler. Fails OPEN (returns True) so a single instance always runs its workers.
+import socket as _socket
+_WORKER_ID = "%s:%d:%s" % (_socket.gethostname(), os.getpid(), secrets.token_hex(3))
+_leader_state = {"is_leader": True, "at": 0.0}
+
+def worker_should_run():
+    now = time.time()
+    if now - _leader_state["at"] < 4:
+        return _leader_state["is_leader"]
+    _leader_state["at"] = now
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE public.worker_leader
+                    SET instance=%s, heartbeat=now()
+                    WHERE id=1 AND (instance=%s OR heartbeat < now() - interval '15 seconds')""",
+                    (_WORKER_ID, _WORKER_ID))
+                got = cur.rowcount == 1
+        _leader_state["is_leader"] = got
+        return got
+    except Exception:
+        log.exception("Worker leader check failed; running workers on this instance")
+        _leader_state["is_leader"] = True
+        return True
 
 def _db_user(row):
     return {
@@ -427,6 +457,19 @@ ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS telnyx_account text
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS call_countries text NOT NULL DEFAULT '';
 -- 13: second Twilio account
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS twilio_account text NOT NULL DEFAULT 'w1';
+-- 16: single-leader lease so background workers run on ONE instance only
+--     (lets the app scale to several Render instances without double-ringing)
+CREATE TABLE IF NOT EXISTS public.worker_leader (
+    id integer PRIMARY KEY,
+    instance text,
+    heartbeat timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO public.worker_leader(id, instance) VALUES (1, '') ON CONFLICT (id) DO NOTHING;
+-- 17: indexes that matter at scale (per-user call logs, cost, monitoring)
+CREATE INDEX IF NOT EXISTS calls_user_created_idx ON public.calls(user_id, created_at DESC);
+-- 18: CRM leads can carry company and website (for imported lead lists)
+ALTER TABLE public.crm_leads ADD COLUMN IF NOT EXISTS company text;
+ALTER TABLE public.crm_leads ADD COLUMN IF NOT EXISTS website text;
 -- 15: admin-only recordings of every call (auto-deleted after 14 days)
 CREATE TABLE IF NOT EXISTS public.monitor_recordings (
     id uuid PRIMARY KEY,
@@ -668,22 +711,44 @@ def create_session(email: str) -> str:
 def revoke_session(token):
     if not token:
         return
+    _session_invalidate(token)
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE public.user_sessions SET revoked_at=NOW() WHERE token_hash=%s",(hashlib.sha256(token.encode()).hexdigest(),))
+
+# Short-lived cache of the per-request session lookup. Without it every single
+# API call (presence, SMS badge, tokens, webhooks for logged-in views) hits the
+# database just to resolve the session, which serialises the whole app under
+# load. TTL is small so logout / force-logout take effect almost immediately.
+_SESSION_TTL = float(os.getenv("SESSION_CACHE_TTL", "12"))
+_session_cache = {}
+
+def _session_invalidate(token):
+    try:
+        _session_cache.pop(hashlib.sha256(token.encode()).hexdigest(), None)
+    except Exception:
+        pass
 
 def get_current_user(request: Request):
     token = request.cookies.get("session_token")
     if not token:
         return None
+    th = hashlib.sha256(token.encode()).hexdigest()
+    now = time.time()
+    hit = _session_cache.get(th)
+    if hit and now - hit[0] < _SESSION_TTL:
+        user = hit[1]
+        tx_use(user.get("telnyx_account"))
+        return user
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT u.* FROM public.user_sessions s
                 JOIN public.dialnytics_users u ON u.id=s.user_id
                 WHERE s.token_hash=%s AND s.revoked_at IS NULL
-                AND s.expires_at>NOW() AND u.is_active=TRUE""",(hashlib.sha256(token.encode()).hexdigest(),))
+                AND s.expires_at>NOW() AND u.is_active=TRUE""",(th,))
             row=cur.fetchone()
     if not row:
+        _session_cache.pop(th, None)
         return None
     user=_db_user(row)
     tx_use(user.get("telnyx_account"))   # this request talks to the user's Telnyx account
@@ -691,6 +756,10 @@ def get_current_user(request: Request):
         revoke_session(token)
         return None
     users_db[user["email"]]=user
+    _session_cache[th] = (now, user)
+    if len(_session_cache) > 5000:
+        for k in list(_session_cache)[:1000]:
+            _session_cache.pop(k, None)
     return user
 
 # Session heartbeat for browser-side immediate logout and WebRTC teardown.
@@ -1930,9 +1999,9 @@ def _set_user_telnyx_account(user_id, acct):
         except Exception:
             log.info("Old calling login %s on %s was not deleted", old_cred, old_acct)
 
-def _ensure_credential(email: str) -> str:
+def _ensure_credential(email: str, force: bool = False) -> str:
     user = users_db.get(email) or {}
-    if user.get("credential_id"):
+    if not force and user.get("credential_id"):
         return user["credential_id"]
     created = _telnyx_request("POST", "/v2/telephony_credentials", {
         "connection_id": tx_conf()["connection_id"],
@@ -1947,6 +2016,11 @@ def _ensure_credential(email: str) -> str:
         users_db[email]["credential_id"] = cred_id
         users_db[email]["sip_username"] = data.get("sip_username", "")
         save_users()
+    else:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE public.dialnytics_users SET credential_id=%s, sip_username=%s WHERE email=%s",
+                            (cred_id, data.get("sip_username", ""), email))
     return cred_id
 
 LINE_UNAVAILABLE = "Calling line is temporarily unavailable. Please contact support."
@@ -1978,13 +2052,26 @@ async def webrtc_token(request: Request):
         raise HTTPException(status_code=402, detail="Subscription expired")
     if user.get("provider") == "twilio":
         raise HTTPException(status_code=409, detail="This account uses Twilio; request /api/twilio-token")
-    cred_id = _ensure_credential(user["email"])
-    token_resp = _telnyx_request("POST", f"/v2/telephony_credentials/{cred_id}/token")
-    token = None
-    if isinstance(token_resp, dict):
-        token = token_resp.get("raw") or token_resp.get("data")
-        if isinstance(token, dict):
-            token = token.get("token")
+    def _mint():
+        cred_id = _ensure_credential(user["email"])
+        resp = _telnyx_request("POST", f"/v2/telephony_credentials/{cred_id}/token")
+        tok = None
+        if isinstance(resp, dict):
+            tok = resp.get("raw") or resp.get("data")
+            if isinstance(tok, dict):
+                tok = tok.get("token")
+        return tok if (tok and isinstance(tok, str)) else None
+    def _mint_with_retry():
+        try:
+            t = _mint()
+        except HTTPException:
+            t = None
+        if not t:
+            log.info("Recreating Telnyx credential for %s on the current account", user["email"])
+            _ensure_credential(user["email"], force=True)
+            t = _mint()
+        return t
+    token = await run_in_threadpool(_mint_with_retry)
     if not token or not isinstance(token, str):
         raise HTTPException(status_code=502, detail="Token generation failed")
     return JSONResponse({
@@ -2731,7 +2818,7 @@ def _handle_voicemail_event(event, payload, group_id, background):
 ct.setup(db_connect=db_connect, telnyx=_telnyx_request, cs_encode=_cs_encode,
          conf=tx_conf, current_account=tx_current, account_ctx=tx_ctx,
          call_allowed=call_allowed, call_block_message=call_block_message,
-         base_url=PUBLIC_BASE_URL, presence_timeout=40,
+         base_url=PUBLIC_BASE_URL, presence_timeout=40, should_run=worker_should_run,
          no_worker=os.getenv("TRANSFER_WORKER", "1") == "0")
 
 def _line_ctx(provider, acct):
@@ -2743,7 +2830,8 @@ rg.setup(db_connect=db_connect, telnyx=_telnyx_request, cs_encode=_cs_encode,
          free=ct._free, on_ring_answered=ct.on_ring_answered, agent_leg_gone=ct.agent_leg_gone,
          voicemail_parked=_telnyx_start_voicemail, voicemail_answered=_telnyx_voicemail_answered,
          current_account=lambda provider: tw_current() if provider == "twilio" else tx_current(),
-         account_ctx=_line_ctx, no_worker=os.getenv("TRANSFER_WORKER", "1") == "0")
+         account_ctx=_line_ctx, should_run=worker_should_run,
+         no_worker=os.getenv("TRANSFER_WORKER", "1") == "0")
 
 def _handle_ring_leg_event(event, group_id, background, payload=None):
     """Events from the SIP leg that rings the agent's browser."""
@@ -3034,9 +3122,10 @@ async def twilio_token(request: Request):
     acct = user.get("twilio_account") or "w1"
     if not twilio_enabled(acct):
         raise HTTPException(status_code=503, detail=f"{tw_conf(acct)['label']} is not configured on the server")
-    with tw_ctx(acct):
-        key_sid, key_secret, app_sid = _twilio_voice_config()
-        account_sid = tw_conf()["sid"]
+    def _tw_cfg():
+        with tw_ctx(acct):
+            return _twilio_voice_config(), tw_conf()["sid"]
+    (key_sid, key_secret, app_sid), account_sid = await run_in_threadpool(_tw_cfg)
     identity = vh.identity_for_user(user["id"])
     token = vh.twilio_access_token(account_sid, key_sid, key_secret, identity, app_sid, ttl=3600)
     return JSONResponse({"token": token, "identity": identity, "from_number": user.get("phone_number") or ""},
@@ -3613,18 +3702,29 @@ async def messages_page(request: Request):
         "user": user, "sms_ok": has_sms(user), "open_number": _sms_number(request.query_params.get("to", "")),
         "is_admin": user.get("role") == "admin"})
 
+_sms_scope_cache = {}
+
 def _sms_scope(user):
     """SQL filter for this user's SMS inbox. A number shared by several users of
-    one company is one inbox that all of them see."""
+    one company is one inbox that all of them see. The shared-user list is
+    cached for 60 s so the 15 s unread-badge poll does not hit the database for
+    the member list every time."""
     num = user.get("phone_number") or ""
-    ids = [str(user["id"])]
-    if num and user.get("account_id"):
+    if not (num and user.get("account_id")):
+        return "user_id=%s", [str(user["id"])]
+    ck = (user["id"], num)
+    hit = _sms_scope_cache.get(ck)
+    if hit and time.time() - hit[0] < 60:
+        ids = hit[1]
+    else:
+        ids = [str(user["id"])]
         with db_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("""SELECT DISTINCT a.user_id FROM public.caller_id_assignments a
                     JOIN public.dialnytics_users u ON u.id=a.user_id
                     WHERE a.phone_number=%s AND u.account_id=%s""", (num, user["account_id"]))
                 ids += [str(r["user_id"]) for r in cur.fetchall() if str(r["user_id"]) not in ids]
+        _sms_scope_cache[ck] = (time.time(), ids)
     if len(ids) > 1:
         return "user_id = ANY(%s::uuid[]) AND our_number=%s", [ids, num]
     return "user_id=%s", [str(user["id"])]
@@ -3981,27 +4081,47 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=422,detail="Upload CSV file (export Excel as CSV)")
     content = await file.read(250001)
     if len(content)>250000: raise HTTPException(status_code=413,detail="CSV exceeds 250 KB")
-    try: reader = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
+    try: rows = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
     except (UnicodeError,csv.Error): raise HTTPException(status_code=422,detail="Invalid UTF-8 CSV")
-    if len(reader)>500: raise HTTPException(status_code=422,detail="Maximum 500 rows per import")
+    if len(rows)>500: raise HTTPException(status_code=422,detail="Maximum 500 rows per import")
+
+    def norm(d):
+        # lower-case, strip spaces/underscores so "Phone Number " == "phone_number"
+        return {re.sub(r"[^a-z0-9]", "", str(k or "").lower()): (v or "") for k, v in d.items()}
+    def pick(d, *keys):
+        for k in keys:
+            if d.get(k) not in (None, ""):
+                return str(d[k]).strip()
+        return ""
+    # If NO consent column exists anywhere, the user is importing their own list;
+    # default to consent=yes. If a consent column exists, honour it per row.
+    has_consent_col = any(k in ("consent","optin","permission") for k in norm(rows[0]) ) if rows else False
+
     added=0; skipped=0
     with db_connect() as conn:
         with conn.cursor() as cur:
-            for r in reader:
-                # Import only leads with an explicit affirmative consent field.
-                if str(r.get("consent","")).strip().lower() not in ("yes","true","1"):
+            for raw in rows:
+                r = norm(raw)
+                dnc = pick(r,"donotcall","dnc","donotcontact").lower() in ("yes","true","1")
+                if dnc:
                     skipped+=1; continue
-                if str(r.get("do_not_call","")).strip().lower() in ("yes","true","1"):
+                if has_consent_col and pick(r,"consent","optin","permission").lower() not in ("yes","true","1"):
                     skipped+=1; continue
-                try: phone=_crm_number(r.get("phone"))
+                try: phone=_crm_number(pick(r,"phone","phonenumber","mobile","number","telephone","tel","cell"))
                 except HTTPException: skipped+=1; continue
-                name=str(r.get("name") or "").strip()[:150]
+                name=pick(r,"name","fullname","contact","contactname","leadname")[:150] or pick(r,"company","business")[:150]
                 if not name: skipped+=1; continue
-                cur.execute("""INSERT INTO public.crm_leads(user_id,name,phone,email,consent)
-                    VALUES(%s,%s,%s,%s,TRUE) ON CONFLICT(user_id,phone) DO NOTHING RETURNING id""",
-                    (user["id"],name,phone,str(r.get("email") or "")[:254]))
-                if cur.fetchone(): added+=1
-                else: skipped+=1
+                company=pick(r,"company","business","organisation","organization","businessname")[:200]
+                website=pick(r,"website","url","web","site")[:300]
+                email=pick(r,"email","emailaddress","mail")[:254]
+                notes=pick(r,"notes","note","comment","comments","remarks")[:2000]
+                cur.execute("SELECT 1 FROM public.crm_leads WHERE user_id=%s AND phone=%s", (user["id"], phone))
+                if cur.fetchone():
+                    skipped+=1; continue      # same number already in this user's CRM
+                cur.execute("""INSERT INTO public.crm_leads(user_id,name,phone,email,company,website,notes,consent)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE)""",
+                    (user["id"],name,phone,email,company or None,website or None,notes or None))
+                added+=1
     return {"added":added,"skipped":skipped}
 
 @app.get("/power-dialer", response_class=HTMLResponse)
