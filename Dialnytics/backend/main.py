@@ -4201,25 +4201,33 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=422, detail="Maximum 500 rows per import")
 
     added = 0; skipped = 0
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            for (name, phone_raw, company, website, email, notes, consent_ok, dnc) in leads_in:
-                if dnc or not consent_ok:
-                    skipped += 1; continue
-                phone = _import_number(phone_raw)
-                name = (name or "").strip()[:150]
-                if not phone or not name:
-                    skipped += 1; continue
-                cur.execute("SELECT 1 FROM public.crm_leads WHERE user_id=%s AND phone=%s", (user["id"], phone))
-                if cur.fetchone():
-                    skipped += 1; continue      # same number already in this user's CRM
-                cur.execute("""INSERT INTO public.crm_leads(user_id,name,phone,email,company,website,notes,consent)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE)""",
-                    (user["id"], name, phone, (email or None)[:254] if email else None,
-                     (company or None)[:200] if company else None,
-                     (website or None)[:300] if website else None,
-                     (notes or None)[:2000] if notes else None))
-                added += 1
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                for (name, phone_raw, company, website, email, notes, consent_ok, dnc) in leads_in:
+                    if dnc or not consent_ok:
+                        skipped += 1; continue
+                    phone = _import_number(phone_raw)
+                    name = (name or "").strip()[:150]
+                    if not phone or not name:
+                        skipped += 1; continue
+                    cur.execute("SELECT 1 FROM public.crm_leads WHERE user_id=%s AND phone=%s", (user["id"], phone))
+                    if cur.fetchone():
+                        skipped += 1; continue      # same number already in this user's CRM
+                    # status/do_not_call set explicitly so the insert never depends on
+                    # column defaults (matches the manual "Add lead" insert).
+                    cur.execute("""INSERT INTO public.crm_leads
+                        (user_id,name,phone,email,company,website,notes,consent,status,do_not_call)
+                        VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE,'new',FALSE)""",
+                        (user["id"], name, phone, (email or None)[:254] if email else None,
+                         (company or None)[:200] if company else None,
+                         (website or None)[:300] if website else None,
+                         (notes or None)[:2000] if notes else None))
+                    added += 1
+    except psycopg.Error as e:
+        # Surface a readable reason instead of a bare 500 (e.g. a missing column).
+        detail = (getattr(e, "diag", None) and e.diag.message_primary) or str(e)
+        raise HTTPException(status_code=422, detail="Import failed: " + str(detail)[:200])
     return {"added": added, "skipped": skipped}
 
 @app.get("/power-dialer", response_class=HTMLResponse)
