@@ -4216,13 +4216,12 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
                         skipped += 1; continue      # same number already in this user's CRM
                     # status/do_not_call set explicitly so the insert never depends on
                     # column defaults (matches the manual "Add lead" insert).
+                    # Use "" (not None) for empty text so NOT NULL columns never break.
                     cur.execute("""INSERT INTO public.crm_leads
                         (user_id,name,phone,email,company,website,notes,consent,status,do_not_call)
                         VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE,'new',FALSE)""",
-                        (user["id"], name, phone, (email or None)[:254] if email else None,
-                         (company or None)[:200] if company else None,
-                         (website or None)[:300] if website else None,
-                         (notes or None)[:2000] if notes else None))
+                        (user["id"], name, phone, (email or "")[:254],
+                         (company or "")[:200], (website or "")[:300], (notes or "")[:2000]))
                     added += 1
     except psycopg.Error as e:
         # Surface a readable reason instead of a bare 500 (e.g. a missing column).
