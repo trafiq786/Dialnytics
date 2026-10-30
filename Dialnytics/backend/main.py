@@ -3997,6 +3997,30 @@ def _crm_number(raw):
         raise HTTPException(status_code=422, detail="Phone must be E.164, e.g. +12025550123")
     return value
 
+def _import_number(raw, default_cc="44"):
+    """Best-effort E.164 for messy import data. National numbers missing their
+    country code (e.g. a UK mobile '7717316354' or '07717316354') get the default
+    country code (UK). Returns None when it cannot be made into a valid number."""
+    v = re.sub(r"[^\d+]", "", str(raw or ""))
+    if v.startswith("+"):
+        return v if re.fullmatch(r"\+[1-9]\d{7,14}", v) else None
+    d = re.sub(r"\D", "", v)
+    if not d:
+        return None
+    if d.startswith("00"):                          # international access prefix
+        d = d[2:]
+        return "+" + d if re.fullmatch(r"[1-9]\d{7,14}", d) else None
+    if d.startswith(default_cc) and len(d) >= 11:   # already carries the country code
+        return "+" + d
+    if d.startswith("0"):                           # national trunk 0 -> country code
+        rest = d[1:]
+        return "+" + default_cc + rest if re.fullmatch(r"[1-9]\d{6,13}", rest) else None
+    if len(d) == 10 and d[0] == "7":                # UK mobile typed without the 0
+        return "+" + default_cc + d
+    if 11 <= len(d) <= 15 and d[0] != "0":          # looks like it already has a country code
+        return "+" + d
+    return None
+
 def _crm_row(row):
     return {k: (str(v) if isinstance(v, uuid.UUID) else v.isoformat() if isinstance(v, (datetime, date)) else v)
             for k, v in dict(row).items()}
@@ -4077,52 +4101,126 @@ async def crm_delete_lead(lead_id: uuid.UUID, request: Request):
 async def crm_import(request: Request, file: UploadFile = File(...)):
     user = get_current_user(request)
     if not user: raise HTTPException(status_code=401,detail="Login required")
-    if not (file.filename or "").lower().endswith(".csv"):
-        raise HTTPException(status_code=422,detail="Upload CSV file (export Excel as CSV)")
-    content = await file.read(250001)
-    if len(content)>250000: raise HTTPException(status_code=413,detail="CSV exceeds 250 KB")
-    try: rows = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
-    except (UnicodeError,csv.Error): raise HTTPException(status_code=422,detail="Invalid UTF-8 CSV")
-    if len(rows)>500: raise HTTPException(status_code=422,detail="Maximum 500 rows per import")
+    fname = (file.filename or "").lower()
+    is_xlsx = fname.endswith(".xlsx")
+    is_csv = fname.endswith(".csv")
+    if not (is_csv or is_xlsx):
+        raise HTTPException(status_code=422, detail="Upload a CSV or Excel (.xlsx) file")
+    limit = 3_000_000 if is_xlsx else 250_000
+    content = await file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(status_code=413, detail="File is too large")
 
-    def norm(d):
-        # lower-case, strip spaces/underscores so "Phone Number " == "phone_number"
-        return {re.sub(r"[^a-z0-9]", "", str(k or "").lower()): (v or "") for k, v in d.items()}
-    def pick(d, *keys):
-        for k in keys:
-            if d.get(k) not in (None, ""):
-                return str(d[k]).strip()
-        return ""
-    # If NO consent column exists anywhere, the user is importing their own list;
-    # default to consent=yes. If a consent column exists, honour it per row.
-    has_consent_col = any(k in ("consent","optin","permission") for k in norm(rows[0]) ) if rows else False
+    # Read the file into a plain table: a list of rows, each a list of cell values.
+    if is_xlsx:
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+            ws = wb.worksheets[0]
+            table = [list(r) for r in ws.iter_rows(values_only=True)]
+        except Exception:
+            raise HTTPException(status_code=422, detail="Could not read the Excel file. Save it as .xlsx or CSV and retry.")
+    else:
+        try:
+            table = list(csv.reader(io.StringIO(content.decode("utf-8-sig"))))
+        except (UnicodeError, csv.Error):
+            raise HTTPException(status_code=422, detail="Invalid CSV file")
 
-    added=0; skipped=0
+    table = [r for r in table if any(c is not None and str(c).strip() != "" for c in r)]
+    if not table:
+        return {"added": 0, "skipped": 0}
+
+    YES = ("yes", "true", "1", "y")
+    def cell(v): return "" if v is None else str(v).strip()
+    def ncol(v): return re.sub(r"[^a-z0-9]", "", cell(v).lower())
+    KNOWN_HEADERS = {"name","fullname","contact","contactname","leadname","phone","phonenumber","mobile",
+        "number","telephone","tel","cell","company","business","organisation","organization","businessname",
+        "website","url","web","site","email","emailaddress","mail","notes","note","comment","comments","remarks",
+        "consent","optin","permission","donotcall","dnc","donotcontact","firstname","lastname","first","last",
+        "title","address","city","county","postcode","zip","state","region","age","provider"}
+    header_cells = [ncol(c) for c in table[0]]
+    has_header = sum(1 for h in header_cells if h in KNOWN_HEADERS) >= 2
+
+    # Build a common list of leads: (name, phone_raw, company, website, email, notes, consent_ok, dnc)
+    leads_in = []
+    if has_header:
+        headers = header_cells
+        has_consent_col = any(h in ("consent", "optin", "permission") for h in headers)
+        def pickr(r, *keys):
+            for k in keys:
+                if r.get(k): return cell(r[k])
+            return ""
+        for row in table[1:]:
+            r = {headers[i]: row[i] for i in range(min(len(headers), len(row)))}
+            dnc = pickr(r, "donotcall", "dnc", "donotcontact").lower() in YES
+            consent_ok = (not has_consent_col) or pickr(r, "consent", "optin", "permission").lower() in YES
+            phone_raw = pickr(r, "phone", "phonenumber", "mobile", "number", "telephone", "tel", "cell")
+            name = pickr(r, "name", "fullname", "contact", "contactname", "leadname")
+            if not name:
+                name = (pickr(r, "title") + " " + pickr(r, "firstname", "first") + " " + pickr(r, "lastname", "last")).strip()
+            company = pickr(r, "company", "business", "organisation", "organization", "businessname")
+            website = pickr(r, "website", "url", "web", "site")
+            email = pickr(r, "email", "emailaddress", "mail")
+            notes = pickr(r, "notes", "note", "comment", "comments", "remarks")
+            leads_in.append((name or company, phone_raw, company, website, email, notes, consent_ok, dnc))
+    else:
+        # No header row (e.g. a raw telesales lead list). Detect columns by content.
+        ncols = max(len(r) for r in table)
+        n = len(table)
+        def digs(v): return re.sub(r"\D", "", cell(v))
+        phone_idx, best = -1, 0
+        for c in range(ncols):
+            cnt = sum(1 for r in table if c < len(r) and 9 <= len(digs(r[c])) <= 13)
+            if cnt > best: best, phone_idx = cnt, c
+        if phone_idx < 0 or best < max(1, n // 2):
+            raise HTTPException(status_code=422, detail="Couldn't find a phone column. Add a header row (Name, Phone, Notes) and retry.")
+        TITLES = {"mr", "mrs", "miss", "ms", "mx", "dr", "sir", "mstr"}
+        title_idx = -1
+        for c in range(ncols):
+            if c == phone_idx: continue
+            if sum(1 for r in table if c < len(r) and cell(r[c]).lower().rstrip(".") in TITLES) > n // 2:
+                title_idx = c; break
+        date_cols = {c for c in range(ncols)
+                     if sum(1 for r in table if c < len(r) and isinstance(r[c], (datetime, date))) > n // 2}
+        if title_idx >= 0:
+            name_cols = [i for i in (title_idx, title_idx + 1, title_idx + 2) if i < ncols and i != phone_idx]
+        else:
+            def alpha_score(c):
+                return sum(1 for r in table if c < len(r) and re.search(r"[A-Za-z]", cell(r[c])) and len(digs(r[c])) < 4)
+            cand = sorted([c for c in range(ncols) if c != phone_idx and c not in date_cols],
+                          key=alpha_score, reverse=True)
+            name_cols = sorted(cand[:2])
+        used = set(name_cols) | {phone_idx} | date_cols
+        for row in table:
+            name = " ".join(cell(row[c]) for c in name_cols if c < len(row) and cell(row[c])).strip()
+            phone_raw = row[phone_idx] if phone_idx < len(row) else ""
+            extras = [cell(row[c]) for c in range(ncols) if c not in used and c < len(row) and cell(row[c])]
+            leads_in.append((name, phone_raw, "", "", "", " · ".join(extras), True, False))
+
+    if len(leads_in) > 500:
+        raise HTTPException(status_code=422, detail="Maximum 500 rows per import")
+
+    added = 0; skipped = 0
     with db_connect() as conn:
         with conn.cursor() as cur:
-            for raw in rows:
-                r = norm(raw)
-                dnc = pick(r,"donotcall","dnc","donotcontact").lower() in ("yes","true","1")
-                if dnc:
-                    skipped+=1; continue
-                if has_consent_col and pick(r,"consent","optin","permission").lower() not in ("yes","true","1"):
-                    skipped+=1; continue
-                try: phone=_crm_number(pick(r,"phone","phonenumber","mobile","number","telephone","tel","cell"))
-                except HTTPException: skipped+=1; continue
-                name=pick(r,"name","fullname","contact","contactname","leadname")[:150] or pick(r,"company","business")[:150]
-                if not name: skipped+=1; continue
-                company=pick(r,"company","business","organisation","organization","businessname")[:200]
-                website=pick(r,"website","url","web","site")[:300]
-                email=pick(r,"email","emailaddress","mail")[:254]
-                notes=pick(r,"notes","note","comment","comments","remarks")[:2000]
+            for (name, phone_raw, company, website, email, notes, consent_ok, dnc) in leads_in:
+                if dnc or not consent_ok:
+                    skipped += 1; continue
+                phone = _import_number(phone_raw)
+                name = (name or "").strip()[:150]
+                if not phone or not name:
+                    skipped += 1; continue
                 cur.execute("SELECT 1 FROM public.crm_leads WHERE user_id=%s AND phone=%s", (user["id"], phone))
                 if cur.fetchone():
-                    skipped+=1; continue      # same number already in this user's CRM
+                    skipped += 1; continue      # same number already in this user's CRM
                 cur.execute("""INSERT INTO public.crm_leads(user_id,name,phone,email,company,website,notes,consent)
                     VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE)""",
-                    (user["id"],name,phone,email,company or None,website or None,notes or None))
-                added+=1
-    return {"added":added,"skipped":skipped}
+                    (user["id"], name, phone, (email or None)[:254] if email else None,
+                     (company or None)[:200] if company else None,
+                     (website or None)[:300] if website else None,
+                     (notes or None)[:2000] if notes else None))
+                added += 1
+    return {"added": added, "skipped": skipped}
 
 @app.get("/power-dialer", response_class=HTMLResponse)
 async def power_dialer_page(request: Request):
@@ -4175,7 +4273,7 @@ async def power_queue_get(queue_id: uuid.UUID,request: Request):
             cur.execute("SELECT * FROM public.power_queues WHERE id=%s AND user_id=%s",(queue_id,user["id"]))
             queue=cur.fetchone()
             if not queue: raise HTTPException(status_code=404,detail="Queue not found")
-            cur.execute("""SELECT i.id,i.position,i.result,i.finished_at,i.call_notes,l.name,l.phone,l.status,l.consent,l.do_not_call
+            cur.execute("""SELECT i.id,i.position,i.result,i.finished_at,i.call_notes,l.name,l.phone,l.status,l.consent,l.do_not_call,l.company,l.website,l.notes
                 FROM public.power_queue_items i JOIN public.crm_leads l ON l.id=i.lead_id
                 WHERE i.queue_id=%s ORDER BY i.position""",(queue_id,))
             items=[_crm_row(r) for r in cur.fetchall()]
