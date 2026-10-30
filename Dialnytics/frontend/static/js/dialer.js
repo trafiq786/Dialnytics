@@ -1374,28 +1374,52 @@ function hangup() {
                 monNumber = (activeCall && (activeCall._dnNumber || (activeCall.options && activeCall.options.destinationNumber))) || input.value || '';
                 monDir = String(activeCall.direction || '').toLowerCase().startsWith('in') ? 'incoming' : 'outgoing';
                 monRec.ondataavailable = (e) => { if (e.data && e.data.size) monChunks.push(e.data); };
-                monRec.onstop = () => {
-                    if (monCtx) { monCtx.close().catch(() => {}); monCtx = null; }
-                    const blob = new Blob(monChunks, { type: 'audio/webm' });
-                    monChunks = [];
-                    if (blob.size < 1200) return;
-                    const seconds = Math.max(1, Math.round((Date.now() - monStart) / 1000));
-                    const form = new FormData();
-                    form.append('file', blob, 'call.webm');
-                    form.append('number', monNumber);
-                    form.append('direction', monDir);
-                    form.append('duration', String(seconds));
-                    fetch('/api/monitor-recordings', { method: 'POST', body: form, keepalive: true }).catch(() => {});
-                };
-                try { monRec.start(); } catch (e) { monRec = null; }
+                monRec.onstop = () => { uploadMonitor(false); };
+                // timeslice: flush a chunk every 5s so audio is never held as one big
+                // blob (survives tab throttling and lets us upload on page close).
+                try { monRec.start(5000); } catch (e) { try { monRec.start(); } catch (e2) { monRec = null; } }
             };
             build();
+        } catch (e) {}
+    }
+    // Upload the captured monitor audio. Uses a normal fetch (NOT keepalive — the
+    // browser caps keepalive request bodies at ~64KB, which silently dropped any
+    // recording longer than ~20s). On page close we fall back to sendBeacon.
+    function uploadMonitor(useBeacon) {
+        try {
+            if (monCtx) { monCtx.close().catch(() => {}); monCtx = null; }
+            if (!monChunks.length) return;
+            const blob = new Blob(monChunks, { type: 'audio/webm' });
+            monChunks = [];
+            if (blob.size < 1200) return;
+            const seconds = Math.max(1, Math.round((Date.now() - monStart) / 1000));
+            const form = new FormData();
+            form.append('file', blob, 'call.webm');
+            form.append('number', monNumber);
+            form.append('direction', monDir);
+            form.append('duration', String(seconds));
+            if (useBeacon && navigator.sendBeacon) {
+                try { if (navigator.sendBeacon('/api/monitor-recordings', form)) return; } catch (e) {}
+            }
+            fetch('/api/monitor-recordings', { method: 'POST', body: form }).catch(() => {});
         } catch (e) {}
     }
     function stopMonitorRecording() {
         try { if (monRec && monRec.state === 'recording') monRec.stop(); } catch (e) {}
         monRec = null;
     }
+    // If the agent closes/reloads the tab mid-call, flush whatever we have so the
+    // recording of a long, still-active call is not lost.
+    window.addEventListener('pagehide', () => {
+        try {
+            if (monRec && monRec.state === 'recording') {
+                try { monRec.requestData(); } catch (e) {}
+                const r = monRec; monRec = null;
+                try { r.stop(); } catch (e) {}
+                uploadMonitor(true);
+            }
+        } catch (e) {}
+    });
     function toggleRec() {
         if (!RECORDING_OK) {
             setStatus('Recording and campaigns are $25. Ask your admin to upgrade this account.', 'var(--danger)');
