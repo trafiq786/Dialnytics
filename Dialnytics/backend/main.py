@@ -863,6 +863,59 @@ def _telnyx_numbers_one():
     return sorted(set(numbers))
 
 
+# Internal read-only inventory: provider-owned numbers minus ALL dialer assignments.
+# The token is separate from admin passwords; never expose this endpoint publicly.
+@app.get('/internal/owned-numbers')
+def internal_owned_numbers(request: Request):
+    from inventory_feed import available_rows
+    import hmac as _hmac
+    token = os.getenv('DIALER_INTERNAL_TOKEN', '')
+    supplied = request.headers.get('authorization', '')
+    if len(token) < 32 or not _hmac.compare_digest(supplied, 'Bearer ' + token):
+        raise HTTPException(403, 'Forbidden')
+    records = []
+    configured = 0
+    for acct, conf in TELNYX_ACCOUNTS.items():
+        if not conf.get('api_key'):
+            continue
+        configured += 1
+        with tx_ctx(acct):
+            page = 1
+            while page <= 30:
+                payload = _telnyx_request('GET', f'/v2/phone_numbers?page[number]={page}&page[size]=100')
+                batch = payload.get('data') or []
+                if not isinstance(batch, list):
+                    raise HTTPException(502, 'Invalid provider inventory')
+                for item in batch:
+                    # Country metadata must come from provider, not guessed from +1.
+                    country = item.get('country_iso_alpha2') or item.get('country_iso') or item.get('country')
+                    records.append({'number': item.get('phone_number'), 'country': country,
+                                    'provider': 'telnyx'})
+                meta = payload.get('meta') or {}
+                pages = meta.get('total_pages')
+                if (pages is not None and page >= int(pages)) or (pages is None and len(batch) < 100):
+                    break
+                page += 1
+            else:
+                raise HTTPException(502, 'Provider pagination limit reached')
+    for acct in TWILIO_ACCOUNTS:
+        if not twilio_enabled(acct):
+            continue
+        configured += 1
+        with tw_ctx(acct):
+            for item in _twilio_number_records():
+                records.append({'number': item.get('phone_number'),
+                                'country': item.get('iso_country'), 'provider': 'twilio'})
+    if not any(c.get('api_key') for c in TELNYX_ACCOUNTS.values()) or not any(twilio_enabled(a) for a in TWILIO_ACCOUNTS):
+        raise HTTPException(503, 'Both Telnyx and Twilio inventory sources must be configured')
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT phone_number, twilio_number FROM public.dialnytics_users""")
+            assigned = {n for row in cur.fetchall() for n in row.values() if n}
+            cur.execute("SELECT phone_number FROM public.caller_id_assignments")
+            assigned.update(row['phone_number'] for row in cur.fetchall() if row.get('phone_number'))
+    return {'complete': True, 'numbers': available_rows(records, assigned)}
+
 # ==================== TWILIO ====================
 TWILIO_API = "https://api.twilio.com/2010-04-01"
 
