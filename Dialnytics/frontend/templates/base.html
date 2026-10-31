@@ -74,10 +74,10 @@
                     <a href="/voicemails" class="{% if request.url.path == '/voicemails' %}active{% endif %}"><span class="ni">◎</span><span>Voicemails</span></a>
                     <a href="/recordings" class="{% if request.url.path == '/recordings' %}active{% endif %}"><span class="ni">⏺</span><span>Recordings</span></a>
                     <a href="/contacts" class="{% if request.url.path == '/contacts' %}active{% endif %}"><span class="ni">👤</span><span>Contacts</span></a>
-                    <a href="/crm" class="{% if request.url.path == '/crm' %}active{% endif %}"><span class="ni">▤</span><span>CRM</span></a>
-                    <a href="/power-dialer" class="{% if request.url.path == '/power-dialer' %}active{% endif %}"><span class="ni">⚡</span><span>Power Dialer</span></a>
-                    <a href="/campaigns" class="{% if request.url.path == '/campaigns' %}active{% endif %}"><span class="ni">📣</span><span>Campaigns</span></a>
-                    <a href="/follow-ups" class="{% if request.url.path == '/follow-ups' %}active{% endif %}"><span class="ni">⚑</span><span>Follow-ups</span></a>
+                    {% if has_power(user) %}<a href="/crm" class="{% if request.url.path == '/crm' %}active{% endif %}"><span class="ni">▤</span><span>CRM</span></a>{% endif %}
+                    {% if has_power(user) %}<a href="/power-dialer" class="{% if request.url.path == '/power-dialer' %}active{% endif %}"><span class="ni">⚡</span><span>Power Dialer</span></a>{% endif %}
+                    {% if has_power(user) %}<a href="/campaigns" class="{% if request.url.path == '/campaigns' %}active{% endif %}"><span class="ni">📣</span><span>Campaigns</span></a>{% endif %}
+                    {% if has_power(user) %}<a href="/follow-ups" class="{% if request.url.path == '/follow-ups' %}active{% endif %}"><span class="ni">⚑</span><span>Follow-ups</span></a>{% endif %}
                     <a href="/scripts" class="{% if request.url.path == '/scripts' %}active{% endif %}"><span class="ni">📄</span><span>Script</span></a>
                     <a href="/billing" class="{% if request.url.path == '/billing' %}active{% endif %}"><span class="ni">▭</span><span>Billing</span></a>
                     {% endif %}

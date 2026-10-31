@@ -16,6 +16,6 @@ The database changes run automatically on start (idempotent). No manual SQL need
 - Number holds: held numbers are hidden from the Create User list and refused by Create User.
 - Expiry sweeper (every 45 s): pending users, the order and the hold are deleted when the timer ends.
 - Add-on flags: Recording -> `recording_premium`, SMS -> `sms_enabled`, Campaigns & Power Dialer -> new `power_enabled`.
-  Existing users keep Power Dialer/Campaigns (column default TRUE). SMS pages still need a Telnyx number until Twilio SMS code is added (`has_sms`).
+  `power_enabled` now gates Power Dialer, Campaigns, **CRM** and Follow-ups (pages, APIs and sidebar links). Existing users keep access (column default TRUE); website users get it only with the add-on. Admin switch: Users -> Edit -> Calling tab -> "Power Dialer, CRM, Campaigns & Follow-ups" (`POST /users/power`). SMS pages still need a Telnyx number until Twilio SMS code is added (`has_sms`).
 - Payments: new **USD** box (create user, record payment, dashboard repayment) and `amount_usd`, `method`, `reference` columns; USD shows in Payment History.
   Optional setting `usd_pkr_rate` (dialnytics_settings) converts website payments into the PKR revenue totals; without it PKR is 0 for those rows.

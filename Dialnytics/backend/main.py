@@ -4017,6 +4017,27 @@ async def toggle_sms(request: Request, email: str = Form(...)):
             return RedirectResponse(url=back + sep + "error=" + urllib.parse.quote("SMS turned ON, but: " + problem), status_code=302)
     return RedirectResponse(url=back + sep + "created=1", status_code=302)
 
+@app.post("/users/power")
+async def toggle_power(request: Request, email: str = Form(...)):
+    """Admin: switch Power Dialer, Campaigns, CRM and Follow-ups on/off for one user."""
+    admin = get_current_user(request)
+    if not admin or admin.get("role") != "admin":
+        return RedirectResponse(url="/login", status_code=302)
+    email = email.strip().lower()
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE public.dialnytics_users SET power_enabled = NOT power_enabled
+                WHERE email=%s RETURNING power_enabled""", (email,))
+            row = cur.fetchone()
+    if not row:
+        return RedirectResponse(url="/users?error=User+not+found", status_code=302)
+    if email in users_db:
+        users_db[email]["power_enabled"] = bool(row["power_enabled"])
+    back = urllib.parse.urlsplit(request.headers.get("referer") or "").path or "/users"
+    if not (back.startswith("/users") or back.startswith("/customers/")):
+        back = "/users"
+    return RedirectResponse(url=back + "?created=1", status_code=302)
+
 # CRM and power dialer: user-scoped, opt-in only, PostgreSQL persistence.
 CRM_STATUSES = {"new", "interested", "callback", "converted", "not_interested"}
 
@@ -4059,6 +4080,8 @@ async def crm_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
+    if not has_power(user):
+        return locked_page(request, user, "CRM")
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT * FROM public.crm_leads WHERE user_id=%s
@@ -4071,6 +4094,8 @@ async def crm_save_lead(request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Login required")
+    if not has_power(user):
+        raise HTTPException(status_code=403, detail="CRM is an optional add-on for your plan")
     data = await request.json()
     name = str(data.get("name") or "").strip()[:150]
     if not name:
@@ -4112,6 +4137,8 @@ async def crm_delete_lead(lead_id: uuid.UUID, request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Login required")
+    if not has_power(user):
+        raise HTTPException(status_code=403, detail="CRM is an optional add-on for your plan")
     with db_connect() as conn:
         with conn.cursor() as cur:
             # Preserve queue history: a queued lead cannot be deleted until its
@@ -4130,6 +4157,7 @@ async def crm_delete_lead(lead_id: uuid.UUID, request: Request):
 async def crm_import(request: Request, file: UploadFile = File(...)):
     user = get_current_user(request)
     if not user: raise HTTPException(status_code=401,detail="Login required")
+    if not has_power(user): raise HTTPException(status_code=403,detail="CRM is an optional add-on for your plan")
     fname = (file.filename or "").lower()
     is_xlsx = fname.endswith(".xlsx")
     is_csv = fname.endswith(".csv")
@@ -4425,6 +4453,8 @@ async def followups_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
+    if not has_power(user):
+        return locked_page(request, user, "Follow-ups")
     return templates.TemplateResponse(request=request, name="followups.html", context={"user": user, "items": []})
 
 @app.get("/settings", response_class=HTMLResponse)
