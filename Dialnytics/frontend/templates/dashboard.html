@@ -47,7 +47,7 @@
 {% endif %}
 <section class="panel repayment-panel"><h2>Upcoming Repayments — Next 7 Days</h2>
 {% if renewals %}<div class="table-scroll"><table class="modern-table"><thead><tr><th>User</th><th>Renewal</th><th>Previous Amount</th><th>Record Repayment</th></tr></thead><tbody>
-{% for r in renewals %}<tr><td><strong>{{ r.name }}</strong><small>{{ r.email }}</small></td><td>{{ r.renewal }} ({{ r.days }} days)</td><td>Rs. {{ "{:,}".format(r.amount) }}</td><td><form method="post" action="/users/repayment" class="repayment-form"><input type="hidden" name="email" value="{{ r.email }}"><input type="number" name="amount" min="1" value="{{ r.amount }}" required aria-label="Repayment amount PKR"><button class="btn btn-primary" type="submit">Mark as Paid (+30 days)</button></form></td></tr>{% endfor %}
+{% for r in renewals %}<tr><td><strong>{{ r.name }}</strong><small>{{ r.email }}</small></td><td>{{ r.renewal }} ({{ r.days }} days)</td><td>Rs. {{ "{:,}".format(r.amount) }}</td><td><form method="post" action="/users/repayment" class="repayment-form"><input type="hidden" name="email" value="{{ r.email }}"><input type="number" name="amount" min="0" value="{{ r.amount }}" required aria-label="Repayment amount PKR" title="PKR"><input type="number" name="amount_usd" min="0" step="0.01" value="" placeholder="USD" aria-label="Repayment amount USD" title="USD (optional)" style="max-width:90px"><button class="btn btn-primary" type="submit">Mark as Paid (+30 days)</button></form></td></tr>{% endfor %}
 </tbody></table></div>{% else %}<p class="empty-note">No renewals due in the next 7 days.</p>{% endif %}
 </section>
 {% endif %}

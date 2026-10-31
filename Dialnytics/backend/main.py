@@ -38,6 +38,7 @@ import voice_helpers as vh  # noqa: E402  (sibling module; works for both start 
 import call_transfer as ct  # noqa: E402  (agent transfer + advanced calling)
 from starlette.concurrency import run_in_threadpool  # noqa: E402
 import ring_group as rg  # noqa: E402  (shared numbers: ring every free member)
+import website_orders as wo  # noqa: E402  (orders from the marketing website)
 
 app = FastAPI(title="Dialnytics", version="1.2.0")
 log = logging.getLogger("dialnytics")
@@ -296,6 +297,9 @@ def _db_user(row):
         "call_countries": row.get("call_countries") or "",
         "twilio_account": tw_key(row.get("twilio_account") or "w1"),
         "is_demo": bool(row.get("is_demo", False)),
+        "signup_source": row.get("signup_source") or "",
+        "signup_ref": row.get("signup_ref") or "",
+        "power_enabled": bool(row.get("power_enabled", True)),
         "account_id": str(row["account_id"]) if row.get("account_id") else "",
         "account_role": "owner" if row.get("account_role") == "owner" else "agent",
         "user_type": "reseller" if row.get("user_type") == "reseller" else "customer",
@@ -491,7 +495,7 @@ CREATE INDEX IF NOT EXISTS monitor_recordings_user_idx ON public.monitor_recordi
 CREATE INDEX IF NOT EXISTS monitor_recordings_age_idx ON public.monitor_recordings(created_at);
 ALTER TABLE public.monitor_recordings ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.monitor_recordings FROM anon, authenticated;
-""" + ct.SCHEMA_SQL + rg.SCHEMA_SQL
+""" + ct.SCHEMA_SQL + rg.SCHEMA_SQL + wo.SCHEMA_SQL
 
 def ensure_schema():
     """Idempotent additive migration (same SQL as SUPABASE_MIGRATION_07)."""
@@ -1053,10 +1057,11 @@ async def admin_caller_ids(request: Request):
     else:
         owners, labels = telnyx_number_accounts(), {k: v["label"] for k, v in TELNYX_ACCOUNTS.items()}
     only = request.query_params.get("account", "")
+    held = _wo["hold_info"](numbers)       # reserved for a website buyer: not offered here
     return JSONResponse({'numbers': [
         {'number': n, 'assigned_to': assigned.get(n, []),
          'account': owners.get(n, ''), 'account_label': labels.get(owners.get(n, ''), '')}
-        for n in numbers if not only or owners.get(n) == only
+        for n in numbers if (not only or owners.get(n) == only) and n not in held
     ]}, headers={'Cache-Control': 'no-store'})
 
 
@@ -1140,7 +1145,7 @@ async def customer_detail(request:Request,email:str):
     c=_customer_data(email)
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute('SELECT amount_pkr,status,paid_at,renewal_date FROM public.payments WHERE user_id=%s ORDER BY paid_at DESC NULLS LAST LIMIT 100',(c['id'],))
+            cur.execute('SELECT amount_pkr,amount_usd,method,reference,status,paid_at,renewal_date FROM public.payments WHERE user_id=%s ORDER BY paid_at DESC NULLS LAST LIMIT 100',(c['id'],))
             payments=cur.fetchall()
     try:
         costs = cost_summary(c['id'])
@@ -1229,15 +1234,15 @@ async def customer_change_number(request: Request, email: str, phone_number: str
 
 
 @app.post('/customers/{email}/payment')
-async def customer_payment(request:Request,email:str,amount:int=Form(...),method:str=Form('Manual'),reference:str=Form('')):
+async def customer_payment(request:Request,email:str,amount:int=Form(0),amount_usd:float=Form(0),method:str=Form('Manual'),reference:str=Form('')):
     require_admin(request)
-    if amount<=0: raise HTTPException(422,'Amount must be positive')
+    if amount<0 or amount_usd<0 or (amount<=0 and amount_usd<=0): raise HTTPException(422,'Enter an amount in PKR or USD')
     c=_customer_data(email)
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""INSERT INTO public.payments(user_id,amount_pkr,status,paid_at,renewal_date)
-                VALUES(%s,%s,'paid',NOW(),%s)""",(c['id'],amount,c['plan_renewal']))
-            cur.execute('UPDATE public.dialnytics_users SET last_paid_amount=%s WHERE id=%s',(amount,c['id']))
+            cur.execute("""INSERT INTO public.payments(user_id,amount_pkr,status,paid_at,renewal_date,amount_usd,method,reference)
+                VALUES(%s,%s,'paid',NOW(),%s,%s,%s,%s)""",(c['id'],amount,c['plan_renewal'],round(amount_usd,2) or None,method.strip()[:40],reference.strip()[:120]))
+            if amount>0: cur.execute('UPDATE public.dialnytics_users SET last_paid_amount=%s WHERE id=%s',(amount,c['id']))
     refresh_users()
     return RedirectResponse('/customers/'+email+'?payment=1',status_code=303)
 
@@ -1445,6 +1450,8 @@ async def create_user(
             return fail(f'Unable to verify {provider_label} numbers')
         if phone_number not in owned_numbers:
             return fail(f'Caller ID not in {provider_label} account')
+        if phone_number in _wo["hold_info"]([phone_number]):
+            return fail('This number is reserved for a website order right now')
 
     form = await request.form()
     confirmed_transfer = form.get('confirm_shared_number') == 'yes'
@@ -1454,11 +1461,18 @@ async def create_user(
             raise ValueError()
     except (ValueError, TypeError):
         return fail('Invalid PKR amount')
+    try:
+        amount_usd = round(float(str(form.get('amount_usd', '') or '0').replace(',', '')), 2)
+        if amount_usd < 0:
+            raise ValueError()
+    except ValueError:
+        return fail('Invalid USD amount')
     payment_status = str(form.get('payment_status', 'paid'))
     if payment_status not in ('paid', 'partial', 'unpaid'):
         payment_status = 'unpaid'
     if is_demo or payment_status == 'unpaid' or user_type == 'reseller':
         amount_paid = 0
+        amount_usd = 0
         payment_status = 'unpaid'
     try:
         start = date.fromisoformat(plan_start) if plan_start else date.today()
@@ -1536,10 +1550,10 @@ async def create_user(
                 if phone_number:
                     cur.execute('INSERT INTO public.caller_id_assignments(user_id,phone_number) VALUES (%s,%s)',
                                 (new_id,phone_number))
-                if amount_paid:
-                    cur.execute("""INSERT INTO public.payments(user_id,amount_pkr,status,paid_at,renewal_date)
-                        VALUES (%s,%s,%s,%s,%s)""", (new_id,amount_paid,payment_status,
-                        datetime.now() if payment_status == 'paid' else None,renewal))
+                if amount_paid or amount_usd:
+                    cur.execute("""INSERT INTO public.payments(user_id,amount_pkr,status,paid_at,renewal_date,amount_usd,method)
+                        VALUES (%s,%s,%s,%s,%s,%s,'manual')""", (new_id,amount_paid,payment_status,
+                        datetime.now() if payment_status == 'paid' else None,renewal,amount_usd or None))
     except UniqueViolation:
         return fail('Email or Caller ID already assigned; refresh and retry')
 
@@ -1618,13 +1632,14 @@ async def delete_user(request: Request, email: str = Form(...)):
     return RedirectResponse(url="/users?deleted=1", status_code=303)
 
 @app.post("/users/repayment")
-async def record_repayment(request: Request, email: str = Form(...), amount: int = Form(...), renewal_date: str = Form("")):
+async def record_repayment(request: Request, email: str = Form(...), amount: int = Form(0), amount_usd: float = Form(0), renewal_date: str = Form("")):
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
     target = users_db.get(email.strip().lower())
     if not target: raise HTTPException(status_code=404, detail="User not found")
-    if amount <= 0: raise HTTPException(status_code=400, detail="Amount must be positive")
+    if amount < 0 or amount_usd < 0 or (amount <= 0 and amount_usd <= 0):
+        raise HTTPException(status_code=400, detail="Enter an amount in PKR or USD")
     if renewal_date:
         try: date.fromisoformat(renewal_date)
         except ValueError: raise HTTPException(status_code=400, detail="Invalid renewal date")
@@ -1638,9 +1653,9 @@ async def record_repayment(request: Request, email: str = Form(...), amount: int
     save_users()
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""INSERT INTO public.payments(user_id,amount_pkr,status,paid_at,renewal_date)
-                SELECT id,%s,'paid',NOW(),%s::date FROM public.dialnytics_users WHERE email=%s""",
-                (amount,target["plan_renewal"],email.strip().lower()))
+            cur.execute("""INSERT INTO public.payments(user_id,amount_pkr,status,paid_at,renewal_date,amount_usd,method)
+                SELECT id,%s,'paid',NOW(),%s::date,%s,'manual' FROM public.dialnytics_users WHERE email=%s""",
+                (amount,target["plan_renewal"],round(amount_usd,2) or None,email.strip().lower()))
     return RedirectResponse(url="/dashboard?period=month", status_code=303)
 
 @app.post("/users/plan")
@@ -1701,6 +1716,14 @@ async def toggle_recording(request: Request, email: str = Form(...)):
 def has_recording(user):
     return user.get("role") == "admin" or bool(user.get("recording_premium"))
 
+def has_power(user):
+    """Power Dialer + Campaigns. Existing users keep it (column default TRUE); website orders get it from the add-on."""
+    return bool(user and (user.get("role") == "admin" or user.get("power_enabled", True)))
+
+def locked_page(request, user, feature):
+    return templates.TemplateResponse(request=request, name="feature_locked.html",
+                                      context={"user": user, "feature": feature})
+
 def has_sms(user):
     """Text messages: only users with the SMS add-on switched on by admin, and a number of their own."""
     return bool(user and user.get("sms_enabled") and user.get("phone_number")
@@ -1726,6 +1749,8 @@ def plan_status(user):
     }
 
 templates.env.globals["has_recording"] = has_recording
+templates.env.globals["has_power"] = has_power
+templates.env.globals["support_whatsapp"] = os.getenv("SUPPORT_WHATSAPP", "447476629105").strip().lstrip("+")
 templates.env.globals["leg_tag"] = ct.leg_tag
 def provider_label(u):
     """'Twilio', 'Telnyx', or 'Telnyx 1' / 'Telnyx 2' when two Telnyx accounts are set up."""
@@ -3517,10 +3542,12 @@ async def campaigns_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
+    if not has_power(user):
+        return locked_page(request, user, "Campaigns")
     return templates.TemplateResponse(request=request, name="campaigns.html", context={
         "user": user,
         "campaigns": campaigns_db.get(user["email"], []),
-        "premium": has_recording(user),
+        "premium": has_recording(user) or user.get("signup_source") == "website",
     })
 
 @app.post("/api/campaigns")
@@ -3528,7 +3555,9 @@ async def create_campaign(request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    if not has_recording(user):
+    if not has_power(user):
+        raise HTTPException(status_code=403, detail="Campaigns are an optional add-on for your plan")
+    if not (has_recording(user) or user.get("signup_source") == "website"):
         raise HTTPException(status_code=402, detail="Campaigns are part of the $25 upgrade")
     data = await request.json()
     if user["email"] not in campaigns_db:
@@ -4233,12 +4262,14 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
 async def power_dialer_page(request: Request):
     user=get_current_user(request)
     if not user: return RedirectResponse(url="/login",status_code=302)
+    if not has_power(user): return locked_page(request, user, "Power Dialer")
     return templates.TemplateResponse(request=request,name="power_dialer.html",context={"user":user})
 
 @app.post("/api/power/queue")
 async def power_queue_create(request: Request):
     user=get_current_user(request)
     if not user: raise HTTPException(status_code=401,detail="Login required")
+    if not has_power(user): raise HTTPException(status_code=403,detail="Power Dialer is an optional add-on for your plan")
     if user.get("role")!="admin" and plan_status(user)["days_left"]<0:
         raise HTTPException(status_code=402,detail="Plan expired")
     data=await request.json()
@@ -5164,3 +5195,15 @@ async def admin_force_logout(user_id: uuid.UUID, request: Request):
             "carrier_hangups_failed": terminated['hangup_failed'],
             "active_calls_terminated": terminated['tracked'] > 0 and terminated['hangup_failed'] == 0,
             "note": "Untracked outbound WebRTC carrier legs cannot be terminated by this API."}
+
+
+# ==================== WEBSITE ORDERS (marketing site -> dialer) ====================
+# Secured server-to-server endpoints under /webhooks/marketing/*, the pending-orders
+# admin page and the 10-minute / 1-hour expiry sweeper. See backend/website_orders.py.
+_wo = wo.register(app, dict(
+    db_connect=db_connect, templates=templates, get_current_user=get_current_user,
+    refresh_users=refresh_users, hash_password=hash_password, get_setting=get_setting,
+    telnyx_number_accounts=telnyx_number_accounts, twilio_number_accounts=twilio_number_accounts,
+    _set_user_twilio_account=_set_user_twilio_account, _twilio_configure_number=_twilio_configure_number,
+    _set_user_telnyx_account=_set_user_telnyx_account, tx_ctx=tx_ctx, _ensure_credential=_ensure_credential,
+    worker_should_run=worker_should_run))

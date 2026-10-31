@@ -34,6 +34,7 @@
  <div class="field"><label>Plan Name</label><input name="plan_name" value="1 USER ACCOUNT-UK" required></div>
  <div class="two-fields"><div class="field"><label>Start Date</label><input name="plan_start" type="date" required></div><div class="field"><label>Renewal Date</label><input name="plan_renewal" type="date" required></div></div>
  <div class="field"><label>Amount Received (PKR)</label><div class="money-field"><span>Rs.</span><input name="amount_paid" type="number" min="0" step="1" value="0" required></div></div>
+ <div class="field"><label>Amount Received (USD)</label><div class="money-field"><span>$</span><input name="amount_usd" type="number" min="0" step="0.01" value="0"></div><small>Optional. Saved with the payment next to the PKR amount.</small></div>
  <div class="field"><label>Payment Status</label><select name="payment_status"><option value="paid">Paid</option><option value="partial">Partially Paid</option><option value="unpaid">Unpaid</option></select></div>
  </section></div>
  <div class="form-footer"><span>Only administrators can see payment details.</span><button class="btn btn-primary create-user-button" type="submit">＋ Create User</button></div>
@@ -160,6 +161,7 @@
     const payment = form.querySelector('[name="payment_status"]');
     if (demo.checked) { amount.value = '0'; payment.value = 'unpaid'; }
     amount.disabled = demo.checked;
+    const usd = form.querySelector('[name="amount_usd"]'); if (usd) { usd.disabled = demo.checked; if (demo.checked) usd.value = '0'; }
     payment.disabled = demo.checked;
   });
   loadCallerIds();
@@ -173,7 +175,7 @@
  <div class="premium-scroll"><table class="premium-table"><thead><tr><th>USER</th><th>CALLER ID</th><th>PLAN</th><th>STATUS</th><th>RENEWAL</th><th>ACTION</th></tr></thead><tbody>
  {% set cmap = {} %}{% for c in companies %}{% set _ = cmap.update({c.id|string: c.name}) %}{% endfor %}
  {% for u in users %}<tr class="premium-user-row" data-search="{{ (u.name ~ ' ' ~ u.email ~ ' ' ~ (u.phone_number or ''))|lower|e }}">
- <td><strong>{{ u.name }}</strong><small>{{ u.email }}</small>{% if u.user_type == 'reseller' %}<small><span class="dn-pill warn">Reseller</span></small>{% elif u.account_id and cmap.get(u.account_id) %}<small><a href="/companies/{{ u.account_id }}">{{ cmap.get(u.account_id) }}</a> · {{ 'Owner' if u.account_role == 'owner' else 'Agent' }}</small>{% endif %}</td><td class="number-cell">{{ u.phone_number or 'Unassigned' }}<small><span class="dn-pill {{ u.provider or 'telnyx' }}">{{ provider_label(u) }}</span></small></td><td><span class="plan-pill">{{ u.plan_name or '—' }}</span></td>
+ <td><strong>{{ u.name }}</strong><small>{{ u.email }}</small>{% if u.signup_source == 'website' %}<small><span class="dn-pill ok" title="{{ u.signup_ref }}">Self-signup (website order)</span></small>{% endif %}{% if u.user_type == 'reseller' %}<small><span class="dn-pill warn">Reseller</span></small>{% elif u.account_id and cmap.get(u.account_id) %}<small><a href="/companies/{{ u.account_id }}">{{ cmap.get(u.account_id) }}</a> · {{ 'Owner' if u.account_role == 'owner' else 'Agent' }}</small>{% endif %}</td><td class="number-cell">{{ u.phone_number or 'Unassigned' }}<small><span class="dn-pill {{ u.provider or 'telnyx' }}">{{ provider_label(u) }}</span></small></td><td><span class="plan-pill">{{ u.plan_name or '—' }}</span></td>
  <td><span class="status-pill {{ 'status-demo' if u.is_demo else 'status-active' }}">{{ 'Demo' if u.is_demo else 'Active' }}</span></td><td>{{ u.plan_renewal or '—' }}</td>
  <td><button type="button" class="premium-edit" data-user='{{ {"name":u.name,"email":u.email,"number":u.phone_number,"provider":u.provider or "telnyx","provider_label":provider_label(u),"plan":u.plan_name,"renewal":u.plan_renewal,"recording":u.recording_premium,"sms":(u.sms_enabled|default(false)),"adv":(u.adv_calling|default(false)),"zones":(u.call_countries or ''),"zone_text":call_zone_text(u),"demo":u.is_demo,"role":u.role}|tojson|forceescape }}'>Edit ✎</button></td></tr>{% endfor %}
  </tbody></table></div>
