@@ -1422,7 +1422,7 @@ function hangup() {
     });
     function toggleRec() {
         if (!RECORDING_OK) {
-            setStatus('Recording and campaigns are $25. Ask your admin to upgrade this account.', 'var(--danger)');
+            setStatus('Call recording is an add-on ($5 per user / month). Ask your admin to enable it.', 'var(--danger)');
             return;
         }
         if (!recorder || recorder.state === 'inactive') {

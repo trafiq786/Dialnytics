@@ -171,11 +171,11 @@
 <style>.lines-status{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;font-size:11px}.line-chip{border-radius:12px;padding:4px 9px;border:1px solid #33415c}.line-chip.ok{background:#173c39;color:#30d5a4;border-color:#1f5a50}.line-chip.off{color:#9fb1d0}.line-chip.bad{background:#4a1f2a;color:#ff8a9c;border-color:#7a2f40}</style>
 {% else %}
 <section class="premium-users">
- <div class="premium-users-head"><div><h2>User Management</h2><p>Manage accounts, subscriptions and calling access.</p></div><div class="premium-count">{{ users|length }} users</div></div>
+ <div class="premium-users-head"><div><h2>User Management</h2><p>Manage accounts, subscriptions and calling access.</p></div><div class="premium-count">{{ users|rejectattr('role','equalto','admin')|list|length }} users</div></div>
  <div class="premium-search"><span>⌕</span><input id="userSearch" type="search" placeholder="Search name, email or number" aria-label="Search users"></div>
  <div class="premium-scroll"><table class="premium-table"><thead><tr><th>USER</th><th>CALLER ID</th><th>PLAN</th><th>STATUS</th><th>RENEWAL</th><th>ACTION</th></tr></thead><tbody>
  {% set cmap = {} %}{% for c in companies %}{% set _ = cmap.update({c.id|string: c.name}) %}{% endfor %}
- {% for u in users %}<tr class="premium-user-row" data-email="{{ u.email }}" data-search="{{ (u.name ~ ' ' ~ u.email ~ ' ' ~ (u.phone_number or ''))|lower|e }}">
+ {% for u in users if u.role != 'admin' %}<tr class="premium-user-row" data-email="{{ u.email }}" data-search="{{ (u.name ~ ' ' ~ u.email ~ ' ' ~ (u.phone_number or ''))|lower|e }}">
  <td><strong>{{ u.name }}</strong><small>{{ u.email }}</small>{% if u.signup_source == 'website' %}<small><span class="dn-pill ok" title="{{ u.signup_ref }}">Self-signup (website order)</span></small>{% endif %}{% if u.user_type == 'reseller' %}<small><span class="dn-pill warn">Reseller</span></small>{% elif u.account_id and cmap.get(u.account_id) %}<small><a href="/companies/{{ u.account_id }}">{{ cmap.get(u.account_id) }}</a> · {{ 'Owner' if u.account_role == 'owner' else 'Agent' }}</small>{% endif %}</td><td class="number-cell">{{ u.phone_number or 'Unassigned' }}<small><span class="dn-pill {{ u.provider or 'telnyx' }}">{{ provider_label(u) }}</span></small></td><td><span class="plan-pill">{{ u.plan_name or '—' }}</span></td>
  <td><span class="status-pill {{ 'status-demo' if u.is_demo else 'status-active' }}">{{ 'Demo' if u.is_demo else 'Active' }}</span></td><td>{{ u.plan_renewal or '—' }}</td>
  <td><button type="button" class="premium-edit" data-user='{{ {"name":u.name,"email":u.email,"number":u.phone_number,"provider":u.provider or "telnyx","provider_label":provider_label(u),"plan":u.plan_name,"renewal":u.plan_renewal,"recording":u.recording_premium,"sms":(u.sms_enabled|default(false)),"credits":(u.sms_credits if u.sms_credits is not none else ""),"power":(u.power_enabled|default(true)),"adv":(u.adv_calling|default(false)),"zones":(u.call_countries or ''),"zone_text":call_zone_text(u),"demo":u.is_demo,"role":u.role}|tojson|forceescape }}'>Edit ✎</button></td></tr>{% endfor %}
@@ -193,27 +193,64 @@ document.addEventListener('submit',async e=>{const f=e.target;if(!f.matches||!f.
 </tbody></table></div></section>{% endif %}
 <div id="userDrawerBackdrop" class="user-drawer-backdrop" hidden></div>
 <aside id="userDrawer" class="user-drawer" role="dialog" aria-modal="true" aria-labelledby="drawerHeading" aria-hidden="true">
- <div class="drawer-header"><div><h2 id="drawerHeading">Edit User</h2><p id="drawerSubtitle"></p></div><button type="button" id="drawerClose" class="drawer-close" aria-label="Close panel">✕</button></div>
- <div class="drawer-tabs"><button type="button" class="drawer-tab active" data-tab="account">Account</button><button type="button" class="drawer-tab" data-tab="calling">Calling</button><button type="button" class="drawer-tab" data-tab="billing">Billing</button></div>
- <div class="drawer-content">
-  <form id="drawerEditForm" method="POST" action="/users/edit">
-   <input type="hidden" name="email" id="editOriginalEmail"><input type="hidden" name="account_active" value="yes">
-   <div class="drawer-pane" data-pane="account"><label>Full Name<input id="editName" name="name" required></label><label>Email Address<input id="editEmail" name="new_email" type="email" required></label><div class="drawer-info">Account is active. Use Delete User below to disable access and release its number.</div></div>
-   <div class="drawer-pane" data-pane="calling" hidden><label>Assigned Caller ID<input id="editNumberDisplay" readonly></label><a id="changeNumberLink" class="drawer-link" href="#">Change number in Customer Details →</a><div class="drawer-setting"><span>Recording & Campaigns <small id="recordingState"></small></span><button type="submit" id="recordingButton" form="recordingForm" class="drawer-action">Toggle Access</button></div><div class="drawer-setting"><span>Power Dialer, CRM, Campaigns &amp; Follow-ups <small id="powerState"></small></span><button type="submit" id="powerButton" form="powerForm" class="drawer-action">Toggle Power Dialer &amp; CRM</button></div><div class="drawer-setting"><span>SMS add-on (text messages) <small id="smsState"></small></span><button type="submit" id="smsButton" form="smsForm" class="drawer-action">Toggle SMS</button></div><div class="drawer-setting"><span>SMS allowance (multiples of 100) <small id="creditsState"></small></span><input id="creditsInput" form="smsCreditsForm" name="credits" type="number" min="0" step="100" placeholder="blank = unlimited" style="max-width:150px"><button type="submit" form="smsCreditsForm" class="drawer-action">Save SMS</button></div><div class="drawer-setting"><span>Advanced calling (transfer outgoing calls) <small id="advState"></small></span><button type="submit" id="advButton" form="advForm" class="drawer-action">Toggle Advanced</button></div><div class="drawer-zones"><span>Countries this user can call <small id="zonesState"></small></span><label class="zone-check"><input type="checkbox" form="zonesForm" name="zones" value="US" id="zoneUS"> US / Canada</label><label class="zone-check"><input type="checkbox" form="zonesForm" name="zones" value="UK" id="zoneUK"> United Kingdom</label><small class="zone-hint">Nothing ticked = only the country of the user's own number.</small><button type="submit" form="zonesForm" class="drawer-action">Save countries</button></div><label>Calling Provider<input id="editProviderDisplay" readonly></label><div class="drawer-info">To move this user to another account (Telnyx 1, Telnyx 2, Twilio 1, Twilio 2), open Customer Details and pick a number from that account.</div></div>
-   <div class="drawer-pane" data-pane="billing" hidden><label>Plan Name<input id="editPlan" name="plan_name" required></label><label>Renewal Date<input id="editRenewal" name="plan_renewal" type="date" required></label><button type="submit" form="extendForm" class="drawer-action">+30 Days</button></div>
-   <div class="drawer-footer"><button class="drawer-save" type="submit">Save Changes</button></div>
-  </form>
-  <form id="extendForm" method="POST" action="/users/extend"><input type="hidden" name="email" class="drawer-target-email"><input type="hidden" name="days" value="30"></form>
-  <form id="recordingForm" method="POST" action="/users/recording"><input type="hidden" name="email" class="drawer-target-email"></form>
-  <form id="powerForm" method="POST" action="/users/power"><input type="hidden" name="email" class="drawer-target-email"></form>
-  <form id="smsCreditsForm" method="POST" action="/users/sms-credits"><input type="hidden" name="email" class="drawer-target-email"></form>
-  <form id="purgeForm" method="POST" action="/users/delete-permanent" data-purge><input type="hidden" name="email" class="drawer-target-email"><input type="hidden" name="confirm" id="purgeConfirm"><button type="submit" class="drawer-delete" style="margin-top:8px;background:#7f1d1d">Delete permanently (all data)</button></form>
-  <form id="smsForm" method="POST" action="/users/sms"><input type="hidden" name="email" class="drawer-target-email"></form>
-  <form id="advForm" method="POST" action="/users/advanced-calling"><input type="hidden" name="email" class="drawer-target-email"></form>
-  <form id="zonesForm" method="POST" action="/users/call-countries"><input type="hidden" name="email" class="drawer-target-email"></form>
-  <form id="deleteForm" method="POST" action="/users/delete"><input type="hidden" name="email" class="drawer-target-email"><button type="submit" class="drawer-delete">Delete User</button></form>
- </div>
+ <form id="drawerEditForm" method="POST" action="/users/save" class="um-form">
+  <input type="hidden" name="email" id="editOriginalEmail">
+  <header class="um-head">
+   <div><h2 id="drawerHeading">Customer</h2><p id="drawerSubtitle"></p>
+    <div class="um-chips"><span class="um-chip" id="umNumber"></span><span class="um-chip" id="umProvider"></span></div></div>
+   <button type="button" id="drawerClose" class="um-x" aria-label="Close">✕</button>
+  </header>
+  <div class="um-body">
+   <section class="um-sec"><h3>Profile</h3><div class="um-grid">
+    <label>Full name<input id="editName" name="name" required></label>
+    <label>Email address<input id="editEmail" name="new_email" type="email" required></label>
+    <label>Plan name<input id="editPlan" name="plan_name" required></label>
+    <label>Renewal date<input id="editRenewal" name="plan_renewal" type="date" required></label>
+   </div><div class="um-links"><button type="submit" form="extendForm" class="um-mini">+30 days</button><a id="changeNumberLink" href="#">Change number / provider →</a></div></section>
+   <section class="um-sec"><h3>Add-ons &amp; features</h3><div class="um-checks">
+    <label class="um-check"><input type="checkbox" name="recording" value="1" id="chkRecording"><span><b>Call recording</b><small>Recordings page + recording of calls ($5 / user / month)</small></span></label>
+    <label class="um-check"><input type="checkbox" name="power" value="1" id="chkPower"><span><b>Power Dialer, CRM, Campaigns &amp; Follow-ups</b><small>Campaigns add-on ($8 / user / month)</small></span></label>
+    <label class="um-check"><input type="checkbox" name="sms" value="1" id="chkSms"><span><b>SMS texting</b><small id="smsHint">Needs a Telnyx calling number</small></span></label>
+    <label class="um-check"><input type="checkbox" name="adv" value="1" id="chkAdv"><span><b>Advanced calling</b><small id="advHint">Transfer outgoing calls (Telnyx lines only)</small></span></label>
+   </div>
+   <div class="um-grid" style="margin-top:12px"><label>SMS allowance <small id="creditsState" class="um-sub"></small><input id="creditsInput" name="credits" type="number" min="0" step="100" placeholder="blank = unlimited (multiples of 100)"></label></div></section>
+   <section class="um-sec"><h3>Countries this user can call</h3><div class="um-checks two">
+    <label class="um-check"><input type="checkbox" name="zones" value="US" id="zoneUS"><span><b>US / Canada</b></span></label>
+    <label class="um-check"><input type="checkbox" name="zones" value="UK" id="zoneUK"><span><b>United Kingdom</b></span></label></div>
+    <small class="um-sub" id="zonesState"></small></section>
+  </div>
+  <footer class="um-foot">
+   <div class="um-danger"><button type="submit" form="deleteForm" class="um-del">Delete user</button><button type="submit" form="purgeForm" class="um-del hard">Delete permanently</button></div>
+   <div><button type="button" class="um-cancel" id="drawerCancel">Cancel</button><button class="um-save" type="submit">Save changes</button></div>
+  </footer>
+ </form>
+ <form id="extendForm" method="POST" action="/users/extend"><input type="hidden" name="email" class="drawer-target-email"><input type="hidden" name="days" value="30"></form>
+ <form id="purgeForm" method="POST" action="/users/delete-permanent" data-purge><input type="hidden" name="email" class="drawer-target-email"><input type="hidden" name="confirm" id="purgeConfirm"></form>
+ <form id="deleteForm" method="POST" action="/users/delete"><input type="hidden" name="email" class="drawer-target-email"></form>
 </aside>
+<style>
+aside#userDrawer.user-drawer{position:fixed;inset:auto;left:50%;top:50%;right:auto;bottom:auto;width:min(760px,94vw);max-height:92vh;transform:translate(-50%,-46%) scale(.97);opacity:0;pointer-events:none;border-radius:22px;border:1px solid #34436b;background:linear-gradient(180deg,#18213a,#111829);box-shadow:0 40px 100px rgba(0,0,0,.65);display:flex;flex-direction:column;transition:transform .18s ease,opacity .18s ease;z-index:901;color:#eef2ff}
+aside#userDrawer.user-drawer.open{transform:translate(-50%,-50%) scale(1);opacity:1;pointer-events:auto}
+.um-form{display:flex;flex-direction:column;min-height:0;max-height:92vh}
+.um-head{display:flex;justify-content:space-between;gap:16px;padding:24px 28px 18px;border-bottom:1px solid #2b3858;background:linear-gradient(135deg,rgba(97,92,243,.28),rgba(97,92,243,0))}
+.um-head h2{margin:0;font-size:26px}.um-head p{margin:4px 0 10px;color:#a9b8da}.um-chips{display:flex;gap:8px;flex-wrap:wrap}.um-chip{background:#222e4f;border:1px solid #38487a;border-radius:20px;padding:4px 11px;font-size:12px;color:#c9d4f5}
+.um-x{align-self:flex-start;border:1px solid #3a4973;background:transparent;color:#fff;border-radius:10px;padding:8px 12px;cursor:pointer}
+.um-body{padding:6px 28px 8px;overflow-y:auto;flex:1}
+.um-sec{padding:16px 0;border-bottom:1px solid #26324f}.um-sec:last-child{border:0}.um-sec h3{margin:0 0 12px;font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:#8fa2cf}
+.um-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.um-grid label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:#a9b8da}
+.um-grid input,.um-sec input[type=number]{background:#0e1526;border:1px solid #33426a;border-radius:10px;color:#fff;padding:10px 12px;font-size:14px}
+.um-links{display:flex;justify-content:space-between;align-items:center;margin-top:12px}.um-links a{color:#9d97ff;font-size:13px}
+.um-mini{background:#222f4a;border:1px solid #354766;color:#fff;border-radius:9px;padding:8px 12px;cursor:pointer}
+.um-checks{display:grid;grid-template-columns:1fr 1fr;gap:10px}.um-checks.two{grid-template-columns:1fr 1fr}
+.um-check{display:flex;gap:12px;align-items:flex-start;background:#0e1526;border:1px solid #2f3d63;border-radius:14px;padding:12px 14px;cursor:pointer;transition:border-color .12s,background .12s}
+.um-check:hover{border-color:#6a64f5}.um-check:has(input:checked){border-color:#6a64f5;background:rgba(97,92,243,.14)}
+.um-check input{width:19px;height:19px;margin-top:2px;accent-color:#7c6cff;flex:none}.um-check b{display:block;font-size:14px}.um-check small,.um-sub{display:block;color:#92a3cc;font-size:12px;margin-top:3px}
+.um-foot{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 28px;border-top:1px solid #2b3858;background:#0f1628;border-radius:0 0 22px 22px}
+.um-danger,.um-foot>div:last-child{display:flex;gap:10px}
+.um-save{background:linear-gradient(135deg,#7c6cff,#5a4de6);border:0;color:#fff;font-weight:700;border-radius:12px;padding:12px 24px;cursor:pointer}.um-cancel{background:transparent;border:1px solid #3a4973;color:#d5defa;border-radius:12px;padding:12px 18px;cursor:pointer}
+.um-del{background:transparent;border:1px solid #7f2a3a;color:#f58a9b;border-radius:10px;padding:9px 12px;cursor:pointer;font-size:13px}.um-del.hard{background:#5b1626;color:#ffd5db}
+@media(max-width:640px){.um-grid,.um-checks{grid-template-columns:1fr}.um-foot{flex-direction:column;align-items:stretch}}
+</style>
 <style>
 .premium-users{background:#172137;border:1px solid #2c3b58;border-radius:18px;padding:24px;margin-top:26px;color:#f3f6ff}.premium-users-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.premium-users-head h2{margin:0;font-size:23px}.premium-users-head p{color:#9fb1d0;margin:6px 0 0}.premium-count{border-radius:20px;background:#252f4b;padding:7px 12px;color:#b6c8e7;white-space:nowrap}.premium-search{display:flex;align-items:center;gap:9px;border:1px solid #30405e;border-radius:10px;padding:0 13px;margin:22px 0 12px;background:#111b30}.premium-search input{background:transparent!important;border:0!important;color:white!important;outline:0;width:100%;padding:13px 0!important}.premium-scroll{overflow-x:auto}.premium-table{width:100%;border-collapse:collapse;min-width:940px;table-layout:fixed}.premium-table th{font-size:11px;letter-spacing:.07em;color:#9fb6da;background:#10192b;text-align:left;padding:15px 12px}.premium-table td{padding:17px 12px;border-bottom:1px solid #2c3b55;vertical-align:middle;font-size:13px;overflow-wrap:anywhere}.premium-table th:nth-child(1){width:26%}.premium-table th:nth-child(2){width:17%}.premium-table th:nth-child(3){width:21%}.premium-table th:nth-child(4){width:11%}.premium-table th:nth-child(5){width:14%}.premium-table th:nth-child(6){width:11%}.premium-table td strong{display:block;font-size:14px}.premium-table td small{display:block;color:#a9bddd;margin-top:5px}.premium-table .number-cell{white-space:nowrap}.plan-pill{background:#2b2854;color:#c1b5ff;border-radius:15px;padding:6px 9px;display:inline-block;font-size:11px}.status-pill{border-radius:16px;padding:6px 10px;font-weight:600;font-size:11px}.status-active{background:#173c39;color:#30d5a4}.status-demo{background:#453b1b;color:#f5c45c}.premium-edit,.drawer-action{background:#222f4a;border:1px solid #354766;color:#fff;border-radius:9px;padding:10px 13px;cursor:pointer}.premium-edit:hover,.drawer-action:hover{border-color:#726cf6}.user-drawer-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:900}.user-drawer-backdrop[hidden]{display:none}.user-drawer{position:fixed;right:0;top:0;bottom:0;width:min(480px,100vw);background:#111a2d;color:#f4f6ff;z-index:901;box-shadow:-18px 0 55px #0008;transform:translateX(105%);transition:transform .2s ease;display:flex;flex-direction:column}.user-drawer.open{transform:translateX(0)}.drawer-header{display:flex;justify-content:space-between;align-items:center;padding:24px;border-bottom:1px solid #293953}.drawer-header h2{margin:0}.drawer-header p{color:#a5b9d8;margin:5px 0 0}.drawer-close{border:1px solid #35445e;border-radius:8px;background:transparent;color:white;padding:9px 13px;cursor:pointer}.drawer-tabs{display:flex;gap:7px;padding:16px 22px}.drawer-tab{flex:1;background:#1c2941;color:#a9bcda;border:1px solid #34415a;border-radius:9px;padding:11px 5px;cursor:pointer}.drawer-tab.active{background:#615cf3;color:#fff}.drawer-content{padding:10px 24px 28px;overflow-y:auto;flex:1}.drawer-pane label{display:block;font-size:13px;color:#a9bddd;margin:15px 0}.drawer-pane label input{display:block;width:100%;box-sizing:border-box;margin-top:7px;background:#17243a;color:#fff;border:1px solid #354663;border-radius:9px;padding:12px}.drawer-info{font-size:12px;color:#b4c6e3;line-height:1.6;background:#1d2a41;border-radius:10px;padding:12px;margin:18px 0}.drawer-link{color:#aaa5ff;display:block;margin:12px 0}.drawer-setting{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:24px 0}.drawer-setting small{display:block;color:#9fb1d0;margin-top:4px}.drawer-footer{margin-top:24px}.drawer-save{background:#625cf3;border:0;border-radius:9px;color:white;font-weight:700;padding:13px 20px;width:100%;cursor:pointer}.drawer-zones{background:#1d2a41;border-radius:10px;padding:14px;margin:18px 0}.drawer-zones>span{display:block;font-size:13px;margin-bottom:6px}.drawer-zones small{display:block;color:#9fb1d0;margin-top:4px}.drawer-pane .zone-check{display:flex;align-items:center;gap:9px;margin:9px 0;color:#f3f6ff}.drawer-pane .zone-check input{display:inline-block;width:auto;margin:0}.zone-hint{margin:6px 0 12px!important;font-size:11px}.drawer-delete{margin-top:22px;background:transparent;border:1px solid #a84655;color:#ff7186;border-radius:9px;padding:12px;cursor:pointer}
 </style>
@@ -221,31 +258,29 @@ document.addEventListener('submit',async e=>{const f=e.target;if(!f.matches||!f.
 (function(){
  const drawer=document.getElementById('userDrawer'),backdrop=document.getElementById('userDrawerBackdrop');
  function close(){drawer.classList.remove('open');drawer.setAttribute('aria-hidden','true');backdrop.hidden=true;document.body.style.overflow='';}
- function tab(name){document.querySelectorAll('.drawer-tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));document.querySelectorAll('.drawer-pane').forEach(x=>x.hidden=x.dataset.pane!==name);}
+ const $=id=>document.getElementById(id);
  document.querySelectorAll('.premium-edit').forEach(button=>button.addEventListener('click',()=>{
-  const u=JSON.parse(button.dataset.user);if(u.role==='admin'){alert('Admin account cannot be edited here.');return;}
-  document.getElementById('drawerSubtitle').textContent=u.name+' · Account settings';
-  document.getElementById('editOriginalEmail').value=u.email;
-  document.querySelectorAll('.drawer-target-email').forEach(x=>x.value=u.email);
-  document.getElementById('editName').value=u.name;document.getElementById('editEmail').value=u.email;
-  document.getElementById('editNumberDisplay').value=u.number||'Unassigned';
-  document.getElementById('editProviderDisplay').value=(u.provider_label||(u.provider==='twilio'?'Twilio':'Telnyx'));
-  document.getElementById('editPlan').value=u.plan||'';document.getElementById('editRenewal').value=u.renewal||'';
-  document.getElementById('recordingState').textContent=u.recording?'Enabled':'Disabled';
-  document.getElementById('powerState').textContent=u.power?'Enabled':'Disabled';
-  document.getElementById('smsState').textContent=u.sms?'Enabled':(u.number?'Disabled':'Disabled · needs a calling number');
-  document.getElementById('creditsInput').value=(u.credits===''||u.credits==null)?'':u.credits;
-  document.getElementById('creditsState').textContent=(u.credits===''||u.credits==null)?'Unlimited':(u.credits+' messages left');
-  document.getElementById('advState').textContent=u.provider==='twilio'?'Telnyx lines only':(u.adv?'Enabled · user must refresh the dialer':'Disabled · incoming calls can still be transferred');
-  const zs=(u.zones||'').split(',');document.getElementById('zoneUS').checked=zs.includes('US');document.getElementById('zoneUK').checked=zs.includes('UK');
-  document.getElementById('zonesState').textContent='Now: '+(u.zone_text||'any country')+((u.zones||'')?'':' (from the number)');
-  document.getElementById('changeNumberLink').href='/customers/'+encodeURIComponent(u.email);
-  tab('account');backdrop.hidden=false;drawer.classList.add('open');drawer.setAttribute('aria-hidden','false');document.body.style.overflow='hidden';
+  const u=JSON.parse(button.dataset.user);if(u.role==='admin')return;
+  $('drawerHeading').textContent=u.name;$('drawerSubtitle').textContent=u.email;
+  $('umNumber').textContent=u.number||'No number';$('umProvider').textContent=u.provider_label||(u.provider==='twilio'?'Twilio':'Telnyx');
+  $('editOriginalEmail').value=u.email;document.querySelectorAll('.drawer-target-email').forEach(x=>x.value=u.email);
+  $('editName').value=u.name;$('editEmail').value=u.email;$('editPlan').value=u.plan||'';$('editRenewal').value=u.renewal||'';
+  $('chkRecording').checked=!!u.recording;$('chkPower').checked=!!u.power;
+  const tw=u.provider==='twilio';
+  $('chkSms').checked=!!u.sms;$('chkSms').disabled=!u.number||tw;$('smsHint').textContent=tw?'Telnyx lines only':(u.number?'Text messages from the user\'s number':'Needs a calling number');
+  $('chkAdv').checked=!!u.adv;$('chkAdv').disabled=tw;$('advHint').textContent=tw?'Telnyx lines only':'Transfer outgoing calls (user must refresh the dialer)';
+  $('creditsInput').value=(u.credits===''||u.credits==null)?'':u.credits;
+  $('creditsState').textContent=(u.credits===''||u.credits==null)?'· now unlimited':('· '+u.credits+' left');
+  const zs=(u.zones||'').split(',');$('zoneUS').checked=zs.includes('US');$('zoneUK').checked=zs.includes('UK');
+  $('zonesState').textContent='Now: '+(u.zone_text||'any country')+((u.zones||'')?'':' (from the number). Nothing ticked = only the country of the user\'s own number.');
+  $('changeNumberLink').href='/customers/'+encodeURIComponent(u.email);
+  backdrop.hidden=false;drawer.classList.add('open');drawer.setAttribute('aria-hidden','false');document.body.style.overflow='hidden';
  }));
- document.querySelectorAll('.drawer-tab').forEach(b=>b.addEventListener('click',()=>tab(b.dataset.tab)));
- document.getElementById('drawerClose').addEventListener('click',close);backdrop.addEventListener('click',close);
+ $('drawerClose').addEventListener('click',close);$('drawerCancel').addEventListener('click',close);backdrop.addEventListener('click',close);
  document.addEventListener('keydown',e=>{if(e.key==='Escape')close()});
- document.getElementById('deleteForm').addEventListener('submit',async e=>{const f=e.target;if(f.dataset.ok)return;e.preventDefault();if(await window.dnConfirm('Disable this user, revoke sessions and release their number? Payment history will remain.','Yes, disable user')){f.dataset.ok='1';f.submit()}});
+ document.querySelectorAll('#purgeForm,#deleteForm').forEach(f=>f.addEventListener('submit',async e=>{
+  if(f.id==='purgeForm')return;   // handled by the shared data-purge dialog
+  if(f.dataset.ok)return;e.preventDefault();if(await window.dnConfirm('Disable this user, revoke sessions and release their number? Payment history will remain.','Yes, disable user')){f.dataset.ok='1';f.submit()}}));
  window.dnTableSearch(document.getElementById('userSearch'),()=>document.querySelectorAll('.premium-user-row'),r=>r.dataset.search||'');
 })();
 </script>

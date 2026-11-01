@@ -1666,6 +1666,64 @@ async def edit_user_details(request: Request, email: str = Form(...), name: str 
     refresh_users()
     return RedirectResponse("/users?updated=1", status_code=303)
 
+@app.post("/users/save")
+async def save_user_all(request: Request):
+    """One Save for the edit popup: profile, plan, add-on check boxes, SMS allowance and countries."""
+    admin = get_current_user(request)
+    if not admin or admin.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    f = await request.form()
+    old_email = str(f.get("email") or "").strip().lower()
+    new_email = str(f.get("new_email") or "").strip().lower()
+    name = str(f.get("name") or "").strip()[:200]
+    plan_name = str(f.get("plan_name") or "").strip()[:120]
+    renewal = str(f.get("plan_renewal") or "").strip()
+    def bounce(msg):
+        return RedirectResponse("/users?error=" + urllib.parse.quote(msg), status_code=303)
+    if not name or "@" not in new_email:
+        return bounce("Invalid name or email")
+    try:
+        date.fromisoformat(renewal)
+    except ValueError:
+        return bounce("Invalid renewal date")
+    credits_raw = str(f.get("credits") or "").strip()
+    credits = None
+    if credits_raw:
+        if not credits_raw.isdigit() or int(credits_raw) % 100 or int(credits_raw) > 1000000:
+            return bounce("SMS allowance must be a multiple of 100 (100, 200, 300 ...) or blank for unlimited")
+        credits = int(credits_raw)
+    zones = ",".join(z for z in CALL_ZONES if z in f.getlist("zones"))
+    want_rec, want_power = bool(f.get("recording")), bool(f.get("power"))
+    want_sms, want_adv = bool(f.get("sms")), bool(f.get("adv"))
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id,role,sms_enabled,adv_calling FROM public.dialnytics_users
+                WHERE email=%s AND is_active=TRUE FOR UPDATE""", (old_email,))
+            target = cur.fetchone()
+            if not target or target["role"] == "admin":
+                return bounce("Protected or missing user")
+            cur.execute("SELECT 1 FROM public.dialnytics_users WHERE email=%s AND id<>%s", (new_email, target["id"]))
+            if cur.fetchone():
+                return bounce("Email already exists")
+            cur.execute("""UPDATE public.dialnytics_users SET name=%s,email=%s,plan_name=%s,plan_renewal=%s::date,
+                recording_premium=%s,power_enabled=%s,sms_credits=%s,call_countries=%s WHERE id=%s""",
+                        (name, new_email, plan_name, renewal, want_rec, want_power, credits, zones, target["id"]))
+    refresh_users()
+    problems = []
+    # SMS and Advanced calling talk to the phone provider, so they reuse the existing toggle handlers.
+    async def flip(handler, current, wanted):
+        if bool(current) == wanted:
+            return
+        resp = await handler(request, email=new_email)
+        loc = resp.headers.get("location", "") if resp is not None else ""
+        if "error=" in loc:
+            problems.append(urllib.parse.unquote(loc.split("error=", 1)[1].split("&")[0]).replace("+", " "))
+    await flip(toggle_sms, target["sms_enabled"], want_sms)
+    await flip(toggle_advanced_calling, target["adv_calling"], want_adv)
+    if problems:
+        return bounce("Saved, but: " + " | ".join(problems))
+    return RedirectResponse("/users?updated=1", status_code=303)
+
 @app.post("/users/delete")
 async def delete_user(request: Request, email: str = Form(...)):
     admin = get_current_user(request)
@@ -2568,7 +2626,7 @@ async def save_recording(
     if kind != "call":
         raise HTTPException(status_code=422, detail="Only call recordings can be uploaded")
     if not has_recording(user):
-        raise HTTPException(status_code=402, detail="Recording is a $25 upgrade")
+        raise HTTPException(status_code=402, detail="Call recording is an add-on ($5 per user / month). Ask your admin to enable it.")
     data = await file.read(MAX_RECORDING_BYTES + 1)
     if not data:
         raise HTTPException(status_code=422, detail="Empty recording")
@@ -3700,7 +3758,7 @@ async def create_campaign(request: Request):
     if not has_power(user):
         raise HTTPException(status_code=403, detail="Campaigns are an optional add-on for your plan")
     if not (has_recording(user) or user.get("signup_source") == "website"):
-        raise HTTPException(status_code=402, detail="Campaigns are part of the $25 upgrade")
+        raise HTTPException(status_code=402, detail="Campaigns & Power Dialer is an add-on ($8 per user / month). Ask your admin to enable it.")
     data = await request.json()
     if user["email"] not in campaigns_db:
         campaigns_db[user["email"]] = []
