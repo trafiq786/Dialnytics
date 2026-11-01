@@ -12,6 +12,8 @@
 {% if user.role == 'admin' %}
 <div class="admin-revenue">
  <div class="revenue-card"><small>This Month Earnings</small><strong>Rs. {{ "{:,}".format(revenue) }}</strong><span>Recorded payments · PKR</span></div>
+ <div class="revenue-card"><small>Lifetime Earnings</small><strong>Rs. {{ "{:,}".format(revenue_life) }}</strong><span>All recorded payments · PKR</span></div>
+ {% if costs and costs.usd_earnings %}<div class="revenue-card"><small>Lifetime Earnings (USD)</small><strong>${{ '{:,.2f}'.format(costs.usd_earnings.life) }}</strong><span>This month ${{ '{:,.2f}'.format(costs.usd_earnings.month) }} · payments received in $</span></div>{% endif %}
  <div class="revenue-card"><small>Renewals Due Within 7 Days</small><strong>{{ renewals|length }}</strong><span>Upcoming repayments</span></div>
 </div>
 {% if costs %}
@@ -20,8 +22,8 @@
   <div><h2 id="costTitle">Cost, Revenue &amp; Margin — All Customers</h2>
   <p>Cost = Telnyx + Twilio charges estimated from call minutes (rates in <a href="/settings">Settings</a>). Revenue = payments recorded in that period. Margin = revenue − cost.</p></div>
  </div>
- <div class="cost-grid">
-  {% for key,label in [('today','Today'),('week','This Week'),('month','This Month')] %}
+ <div class="cost-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+  {% for key,label in [('today','Today'),('d7','Last 7 Days'),('d30','Last 30 Days'),('life','Lifetime')] %}
   <div class="cost-cell">
    <small>{{ label }}</small>
    <strong>${{ '%.2f'|format(costs[key].usd) }}</strong>
@@ -38,8 +40,8 @@
   {% endfor %}
  </div>
  {% if costs.lines %}
- <div class="table-scroll" style="margin-top:14px"><table class="modern-table fin-lines"><thead><tr><th>Account</th><th>Today</th><th>This Week</th><th>This Month</th><th>Minutes (month)</th></tr></thead><tbody>
- {% for l in costs.lines %}<tr><td><strong>{{ l.label }}</strong></td><td>${{ '%.2f'|format(l.today) }}</td><td>${{ '%.2f'|format(l.week) }}</td><td>${{ '%.2f'|format(l.month) }}</td><td>{{ l.month_min }}</td></tr>{% endfor %}
+ <div class="table-scroll" style="margin-top:14px"><table class="modern-table fin-lines"><thead><tr><th>Account</th><th>Today</th><th>Last 7 Days</th><th>Last 30 Days</th><th>Lifetime</th><th>Minutes (month)</th></tr></thead><tbody>
+ {% for l in costs.lines %}<tr><td><strong>{{ l.label }}</strong></td><td>${{ '%.2f'|format(l.today) }}</td><td>${{ '%.2f'|format(l.d7) }}</td><td>${{ '%.2f'|format(l.d30) }}</td><td>${{ '%.2f'|format(l.life) }}</td><td>{{ l.month_min }}</td></tr>{% endfor %}
  </tbody></table></div>
  {% endif %}
 </section>

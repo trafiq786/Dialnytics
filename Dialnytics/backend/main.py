@@ -292,6 +292,7 @@ def _db_user(row):
         "recording_premium": row["recording_premium"],
         "dnd_enabled": row["dnd_enabled"],
         "sms_enabled": bool(row.get("sms_enabled", False)),
+        "sms_credits": row.get("sms_credits"),
         "adv_calling": bool(row.get("adv_calling", False)),
         "telnyx_account": tx_key(row.get("telnyx_account") or "t1"),
         "call_countries": row.get("call_countries") or "",
@@ -551,9 +552,13 @@ def _period_starts():
     today = datetime.now(tz).date()
     def at(d):
         return datetime.combine(d, datetime.min.time(), tzinfo=tz)
+    now = datetime.now(tz)
     return {"today": at(today),
             "week": at(today - timedelta(days=today.weekday())),
-            "month": at(today.replace(day=1))}
+            "month": at(today.replace(day=1)),
+            "d7": now - timedelta(days=7),
+            "d30": now - timedelta(days=30),
+            "life": datetime(2000, 1, 1, tzinfo=tz)}
 
 def cost_summary(user_id=None):
     """Estimated provider cost (USD) for today / this week / this month.
@@ -563,8 +568,7 @@ def cost_summary(user_id=None):
     """
     rates = get_rates()
     starts = _period_starts()
-    params = {"since": min(starts.values()), "today": starts["today"],
-              "week": starts["week"], "month": starts["month"], "uid": user_id,
+    params = {"since": min(starts.values()), **starts, "uid": user_id,
               "tw_client": float(rates["twilio_client"])}
     # Rate per provider / direction / country zone (outgoing: dialed number,
     # incoming: our own number). Values come from get_rates() as floats.
@@ -597,17 +601,29 @@ def cost_summary(user_id=None):
         )
         SELECT
           COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(today)s),0) AS today_cost,
-          COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(week)s),0)  AS week_cost,
-          COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(month)s),0) AS month_cost,
           COALESCE(SUM(mins) FILTER (WHERE created_at >= %(today)s AND direction='incoming'),0) AS today_in,
           COALESCE(SUM(mins) FILTER (WHERE created_at >= %(today)s AND direction<>'incoming'),0) AS today_out,
+          COUNT(*) FILTER (WHERE created_at >= %(today)s) AS today_calls,
+          COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(week)s),0) AS week_cost,
           COALESCE(SUM(mins) FILTER (WHERE created_at >= %(week)s AND direction='incoming'),0) AS week_in,
           COALESCE(SUM(mins) FILTER (WHERE created_at >= %(week)s AND direction<>'incoming'),0) AS week_out,
+          COUNT(*) FILTER (WHERE created_at >= %(week)s) AS week_calls,
+          COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(month)s),0) AS month_cost,
           COALESCE(SUM(mins) FILTER (WHERE created_at >= %(month)s AND direction='incoming'),0) AS month_in,
           COALESCE(SUM(mins) FILTER (WHERE created_at >= %(month)s AND direction<>'incoming'),0) AS month_out,
-          COUNT(*) FILTER (WHERE created_at >= %(today)s) AS today_calls,
-          COUNT(*) FILTER (WHERE created_at >= %(week)s) AS week_calls,
           COUNT(*) FILTER (WHERE created_at >= %(month)s) AS month_calls,
+          COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(d7)s),0) AS d7_cost,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(d7)s AND direction='incoming'),0) AS d7_in,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(d7)s AND direction<>'incoming'),0) AS d7_out,
+          COUNT(*) FILTER (WHERE created_at >= %(d7)s) AS d7_calls,
+          COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(d30)s),0) AS d30_cost,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(d30)s AND direction='incoming'),0) AS d30_in,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(d30)s AND direction<>'incoming'),0) AS d30_out,
+          COUNT(*) FILTER (WHERE created_at >= %(d30)s) AS d30_calls,
+          COALESCE(SUM(mins*rate) FILTER (WHERE created_at >= %(life)s),0) AS life_cost,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(life)s AND direction='incoming'),0) AS life_in,
+          COALESCE(SUM(mins) FILTER (WHERE created_at >= %(life)s AND direction<>'incoming'),0) AS life_out,
+          COUNT(*) FILTER (WHERE created_at >= %(life)s) AS life_calls,
           line
         FROM c GROUP BY line"""
     with db_connect() as conn:
@@ -617,7 +633,7 @@ def cost_summary(user_id=None):
     pkr = rates["usd_to_pkr"]
     out = {"rates": rates, "lines": []}
     labels = {l["value"]: l["label"] for l in calling_lines()}
-    for period in ("today", "week", "month"):
+    for period in ("today", "week", "month", "d7", "d30", "life"):
         usd = sum(float(r[f"{period}_cost"] or 0) for r in line_rows)
         out[period] = {"usd": usd, "pkr": usd * pkr,
                        "in_min": sum(int(r[f"{period}_in"] or 0) for r in line_rows),
@@ -625,26 +641,37 @@ def cost_summary(user_id=None):
                        "calls": sum(int(r[f"{period}_calls"] or 0) for r in line_rows)}
     for r in sorted(line_rows, key=lambda r: r["line"] or ""):
         out["lines"].append({"label": labels.get(r["line"], r["line"]),
-                             **{p: float(r[f"{p}_cost"] or 0) for p in ("today", "week", "month")},
+                             **{p: float(r[f"{p}_cost"] or 0) for p in ("today", "week", "month", "d7", "d30", "life")},
                              "month_min": int(r["month_in"] or 0) + int(r["month_out"] or 0)})
     return out
 
 def admin_finance():
-    """Admin dashboard: provider cost, revenue (recorded payments) and margin."""
+    """Admin dashboard: provider cost, revenue (recorded payments) and margin.
+
+    A payment recorded only in USD (card/Stripe with no PKR rate) is converted with the
+    Settings rate (1 USD = PKR) so it never shows as 0.
+    """
     costs = cost_summary()
     starts = _period_starts()
+    rate = float(costs["rates"].get("usd_to_pkr") or 280)
+    pk = "COALESCE(NULLIF(amount_pkr,0), COALESCE(amount_usd,0)*%(rate)s)"
+    cols = []
+    for k in ("today", "week", "month", "d7", "d30", "life"):
+        cols.append(f"COALESCE(SUM({pk}) FILTER (WHERE paid_at >= %({k})s),0) AS {k}")
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT
-                  COALESCE(SUM(amount_pkr) FILTER (WHERE paid_at >= %(today)s),0) AS today,
-                  COALESCE(SUM(amount_pkr) FILTER (WHERE paid_at >= %(week)s),0) AS week,
-                  COALESCE(SUM(amount_pkr) FILTER (WHERE paid_at >= %(month)s),0) AS month
-                FROM public.payments WHERE status='paid' AND paid_at >= %(since)s""",
-                dict(starts, since=min(starts.values())))
+            cur.execute("SELECT " + ",".join(cols) + """,
+                  COALESCE(SUM(amount_usd) FILTER (WHERE paid_at >= %(life)s),0) AS life_usd,
+                  COALESCE(SUM(amount_usd) FILTER (WHERE paid_at >= %(month)s),0) AS month_usd,
+                  COALESCE(SUM(CASE WHEN COALESCE(amount_usd,0)=0 THEN amount_pkr/%(rate)s ELSE amount_usd END)
+                           FILTER (WHERE paid_at >= %(life)s),0) AS life_usd_est
+                FROM public.payments WHERE status='paid'""", dict(starts, rate=rate))
             rev = cur.fetchone()
-    for p in ("today", "week", "month"):
+    for p in ("today", "week", "month", "d7", "d30", "life"):
         costs[p]["revenue_pkr"] = float(rev[p] or 0)
         costs[p]["margin_pkr"] = costs[p]["revenue_pkr"] - costs[p]["pkr"]
+    costs["usd_earnings"] = {"life": float(rev["life_usd"] or 0), "month": float(rev["month_usd"] or 0),
+                             "life_est": float(rev["life_usd_est"] or 0)}
     return costs
 
 templates.env.globals["call_cost"] = vh.call_cost
@@ -1115,6 +1142,9 @@ def _customer_data(email):
                 (SELECT count(*) FROM public.calls c WHERE c.user_id=u.id AND c.created_at >= date_trunc('month',now())) AS calls_month,
                 (SELECT COALESCE(sum(c.duration_seconds),0) FROM public.calls c WHERE c.user_id=u.id AND c.created_at >= date_trunc('month',now())) AS talk_seconds,
                 (SELECT COALESCE(sum(p.amount_pkr),0) FROM public.payments p WHERE p.user_id=u.id AND p.status='paid') AS collected,
+                (SELECT COALESCE(sum(p.amount_usd),0) FROM public.payments p WHERE p.user_id=u.id AND p.status='paid') AS collected_usd,
+                (SELECT p.amount_usd FROM public.payments p WHERE p.user_id=u.id AND p.status='paid' ORDER BY p.paid_at DESC NULLS LAST LIMIT 1) AS last_payment_usd,
+                u.sms_credits,
                 (SELECT max(p.paid_at) FROM public.payments p WHERE p.user_id=u.id AND p.status='paid') AS last_payment_at
                 FROM public.dialnytics_users u WHERE lower(u.email)=lower(%s)""", (email,))
             row=cur.fetchone()
@@ -1278,8 +1308,11 @@ async def invoice_new(request:Request,customer:str=''):
 async def invoice_create(request:Request,customer_email:str=Form(...),issue_date:str=Form(...),due_date:str=Form(...),
     description:List[str]=Form(...),qty:List[int]=Form(...),unit_price:List[int]=Form(...),
     discount:int=Form(0),tax_percent:int=Form(0),notes:str=Form(''),terms:str=Form('Payment is due by the due date shown.'),
-    action:str=Form('save')):
+    action:str=Form('save'),payment_method:str=Form('bank'),card_name:str=Form(''),renewal_date:str=Form('')):
     require_admin(request)
+    if payment_method not in ('bank','card','usdt','other'): payment_method='bank'
+    try: renewal=date.fromisoformat(renewal_date) if renewal_date else None
+    except ValueError: raise HTTPException(422,'Invalid renewal date')
     c=_customer_data(customer_email)
     if not description or len(description)>30 or len(description)!=len(qty) or len(qty)!=len(unit_price):
         raise HTTPException(422,'Invalid invoice items')
@@ -1298,10 +1331,12 @@ async def invoice_create(request:Request,customer_email:str=Form(...),issue_date
             number=f'INV-{issued.year}-{cur.fetchone()["n"]:04d}'
             cur.execute("""INSERT INTO public.dialnytics_invoices
                 (invoice_number,customer_id,customer_name,customer_email,contact_phone,contact_address,
-                 issue_date,due_date,notes,terms,subtotal_pkr,discount_pkr,tax_percent,tax_pkr,total_pkr,status)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'draft') RETURNING id""",
+                 issue_date,due_date,notes,terms,subtotal_pkr,discount_pkr,tax_percent,tax_pkr,total_pkr,status,
+                 payment_method,card_name,renewal_date)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'draft',%s,%s,%s) RETURNING id""",
                 (number,c['id'],c['name'],c['email'],c.get('contact_phone') or '',c.get('contact_address') or '',
-                issued,due,notes[:3000],terms[:3000],subtotal,discount,tax_percent,tax_amount,total))
+                issued,due,notes[:3000],terms[:3000],subtotal,discount,tax_percent,tax_amount,total,
+                payment_method,card_name.strip()[:60],renewal))
             invoice_id=cur.fetchone()['id']
             for i,(d,q,price) in enumerate(zip(description,qty,unit_price)):
                 cur.execute("""INSERT INTO public.dialnytics_invoice_items(invoice_id,position,description,qty,unit_price_pkr,amount_pkr)
@@ -1329,6 +1364,20 @@ async def invoice_status(request:Request,invoice_id:uuid.UUID,status:str=Form(..
     return RedirectResponse('/invoices/'+str(invoice_id),status_code=303)
 
 
+@app.post('/invoices/{invoice_id}/method')
+async def invoice_method(request:Request,invoice_id:uuid.UUID,payment_method:str=Form('bank'),card_name:str=Form(''),renewal_date:str=Form('')):
+    require_admin(request)
+    if payment_method not in ('bank','card','usdt','other'): raise HTTPException(422,'Invalid payment method')
+    try: renewal=date.fromisoformat(renewal_date) if renewal_date else None
+    except ValueError: raise HTTPException(422,'Invalid renewal date')
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute('UPDATE public.dialnytics_invoices SET payment_method=%s,card_name=%s,renewal_date=%s,updated_at=NOW() WHERE id=%s RETURNING id',
+                (payment_method,card_name.strip()[:60],renewal,invoice_id))
+            if not cur.fetchone(): raise HTTPException(404,'Invoice not found')
+    return RedirectResponse('/invoices/'+str(invoice_id),status_code=303)
+
+
 @app.post('/invoices/{invoice_id}/delete')
 async def invoice_delete(request:Request,invoice_id:uuid.UUID):
     require_admin(request)
@@ -1352,10 +1401,11 @@ async def invoice_duplicate(request:Request,invoice_id:uuid.UUID):
             number=f'INV-{date.today().year}-{cur.fetchone()["n"]:04d}'
             cur.execute("""INSERT INTO public.dialnytics_invoices
                 (invoice_number,customer_id,customer_name,customer_email,contact_phone,contact_address,issue_date,due_date,
-                 notes,terms,subtotal_pkr,discount_pkr,tax_percent,tax_pkr,total_pkr,status)
-                VALUES(%s,%s,%s,%s,%s,%s,CURRENT_DATE,CURRENT_DATE+INTERVAL '3 days',%s,%s,%s,%s,%s,%s,%s,'draft') RETURNING id""",
+                 notes,terms,subtotal_pkr,discount_pkr,tax_percent,tax_pkr,total_pkr,status,payment_method,card_name)
+                VALUES(%s,%s,%s,%s,%s,%s,CURRENT_DATE,CURRENT_DATE+INTERVAL '3 days',%s,%s,%s,%s,%s,%s,%s,'draft',%s,%s) RETURNING id""",
                 (number,inv['customer_id'],inv['customer_name'],inv['customer_email'],inv['contact_phone'],inv['contact_address'],
-                inv['notes'],inv['terms'],inv['subtotal_pkr'],inv['discount_pkr'],inv['tax_percent'],inv['tax_pkr'],inv['total_pkr']))
+                inv['notes'],inv['terms'],inv['subtotal_pkr'],inv['discount_pkr'],inv['tax_percent'],inv['tax_pkr'],inv['total_pkr'],
+                inv.get('payment_method') or 'bank',inv.get('card_name') or ''))
             new_id=cur.fetchone()['id']
             for item in items:
                 cur.execute("""INSERT INTO public.dialnytics_invoice_items(invoice_id,position,description,qty,unit_price_pkr,amount_pkr)
@@ -1372,6 +1422,13 @@ async def invoice_pdf(request:Request,invoice_id:uuid.UUID):
     data=ipdf.build_invoice_pdf(inv,[dict(i) for i in items],logo)
     return Response(data,media_type='application/pdf',headers={'Content-Disposition':f'attachment; filename="{inv["invoice_number"]}.pdf"','Cache-Control':'private, no-store'})
 
+def _disabled_users():
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT name,email,plan_name,plan_renewal,created_at FROM public.dialnytics_users
+                WHERE is_active=FALSE AND role<>'admin' AND signup_status<>'pending' ORDER BY created_at DESC LIMIT 500""")
+            return cur.fetchall()
+
 def _users_page(request, mode):
     user = get_current_user(request)
     if not user or user.get("role") != "admin":
@@ -1384,6 +1441,8 @@ def _users_page(request, mode):
         "error": request.query_params.get("error"),
         "created": request.query_params.get("created"),
         "deleted": request.query_params.get("deleted"),
+        "purged": request.query_params.get("purged"),
+        "disabled_users": _disabled_users(),
     })
 
 @app.get("/users", response_class=HTMLResponse)
@@ -1923,6 +1982,7 @@ async def dashboard(request: Request):
     avg = round(sum(talk) / len(talk)) if talk else 0
     avg_talk = f"{avg // 60}:{avg % 60:02d}"
     revenue = 0
+    revenue_life = 0
     renewals = []
     refresh_users()
     if user.get("role") == "admin":
@@ -1935,17 +1995,15 @@ async def dashboard(request: Request):
             if 0 <= remaining <= 7:
                 renewals.append({"name": account.get("name"), "email": account.get("email"), "renewal": account.get("plan_renewal"), "amount": account.get("last_paid_amount", 0), "days": remaining})
         renewals.sort(key=lambda r: r["days"])
-        with db_connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""SELECT COALESCE(SUM(amount_pkr),0) AS total FROM public.payments
-                    WHERE status='paid' AND paid_at >= date_trunc('month',NOW())""")
-                revenue = float(cur.fetchone()["total"])
     costs = None
     if user.get("role") == "admin":
         try:
             costs = admin_finance()
         except Exception:
             log.exception("Dashboard cost summary failed")
+        if costs:
+            revenue = int(round(costs["month"]["revenue_pkr"]))
+            revenue_life = int(round(costs["life"]["revenue_pkr"]))
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) AS n FROM public.dialnytics_recordings WHERE user_id=%s AND kind='call'",
@@ -1953,7 +2011,7 @@ async def dashboard(request: Request):
             recordings_count = cur.fetchone()["n"]
     return templates.TemplateResponse(request=request, name="dashboard.html", context={
         "chart_bars": chart_bars,
-        "period": period, "revenue": revenue, "renewals": renewals, "costs": costs,
+        "period": period, "revenue": revenue, "revenue_life": revenue_life, "renewals": renewals, "costs": costs,
         "user": user, "total_calls": total_calls, "answer_rate": answer_rate,
         "avg_talk_time": avg_talk, "contacts_count": _count_contacts(user["id"]),
         "followups": 0, "failed_calls": failed, "answered_calls": answered,
@@ -3841,10 +3899,28 @@ async def sms_send(request: Request):
                 raise HTTPException(status_code=429, detail="Daily message limit reached. Please contact support.")
     if not tx_conf()["api_key"]:
         raise HTTPException(status_code=503, detail=SMS_UNAVAILABLE)
+    # SMS credits (packs of 100). NULL = unlimited (older users). One credit per message segment.
+    segs = _sms_segments(text)
+    charged = False
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT sms_credits FROM public.dialnytics_users WHERE id=%s", (user["id"],))
+            cr = (cur.fetchone() or {}).get("sms_credits")
+            if cr is not None:
+                cur.execute("""UPDATE public.dialnytics_users SET sms_credits=sms_credits-%s
+                    WHERE id=%s AND sms_credits>=%s RETURNING sms_credits""", (segs, user["id"], segs))
+                left = cur.fetchone()
+                if not left:
+                    raise HTTPException(status_code=402, detail="You have used all your SMS. Buy another pack of 100 on dialnytics.uk or contact support.")
+                charged = True
     try:
         provider_id, status, error = _telnyx_sms_send(user["phone_number"], to, text)
     except vh.ProviderError as exc:
         provider_id, status, error = None, "failed", str(exc)[:500]
+    if charged and error:   # failed sends cost nothing
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE public.dialnytics_users SET sms_credits=sms_credits+%s WHERE id=%s", (segs, user["id"]))
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO public.sms_messages(user_id,our_number,contact_number,direction,body,status,error,provider_id,is_read)
@@ -4016,6 +4092,99 @@ async def toggle_sms(request: Request, email: str = Form(...)):
             log.warning("SMS profile link for %s: %s", email, problem)
             return RedirectResponse(url=back + sep + "error=" + urllib.parse.quote("SMS turned ON, but: " + problem), status_code=302)
     return RedirectResponse(url=back + sep + "created=1", status_code=302)
+
+@app.post("/users/sms-credits")
+async def set_sms_credits(request: Request, email: str = Form(...), credits: str = Form("")):
+    """Admin: SMS allowance in multiples of 100 (100, 200, 300 ...). Blank = unlimited."""
+    admin = get_current_user(request)
+    if not admin or admin.get("role") != "admin":
+        return RedirectResponse(url="/login", status_code=302)
+    email = email.strip().lower()
+    credits = credits.strip()
+    value = None
+    if credits:
+        if not credits.isdigit() or int(credits) % 100 != 0 or int(credits) > 1000000:
+            return RedirectResponse(url="/users?error=" + urllib.parse.quote("SMS must be a multiple of 100 (100, 200, 300 ...) or blank for unlimited"), status_code=303)
+        value = int(credits)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE public.dialnytics_users SET sms_credits=%s WHERE email=%s AND role<>'admin' RETURNING id", (value, email))
+            if not cur.fetchone():
+                return RedirectResponse(url="/users?error=User+not+found", status_code=303)
+    refresh_users()
+    back = urllib.parse.urlsplit(request.headers.get("referer") or "").path or "/users"
+    if not (back.startswith("/users") or back.startswith("/customers/")):
+        back = "/users"
+    return RedirectResponse(url=back + "?created=1", status_code=303)
+
+@app.post("/users/enable")
+async def enable_user(request: Request, email: str = Form(...)):
+    """Admin: switch a disabled user back on (keeps their data)."""
+    admin = get_current_user(request)
+    if not admin or admin.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE public.dialnytics_users SET is_active=TRUE
+                WHERE email=%s AND role<>'admin' AND signup_status<>'pending' RETURNING id""", (email.strip().lower(),))
+            if not cur.fetchone():
+                return RedirectResponse(url="/users?error=User+not+found", status_code=303)
+    refresh_users()
+    return RedirectResponse(url="/users?created=1", status_code=303)
+
+@app.post("/users/delete-permanent")
+async def delete_user_permanently(request: Request, email: str = Form(...), confirm: str = Form("")):
+    """Admin: erase a user and ALL their data from the database. Cannot be undone."""
+    admin = get_current_user(request)
+    if not admin or admin.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    email = email.strip().lower()
+    if email == admin["email"]:
+        return RedirectResponse(url="/users?error=Cannot+delete+your+own+account", status_code=303)
+    if confirm.strip().lower() != email:
+        return RedirectResponse(url="/users?error=" + urllib.parse.quote("Type the user's email exactly to confirm permanent delete"), status_code=303)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id,role,account_id FROM public.dialnytics_users WHERE email=%s FOR UPDATE", (email,))
+            target = cur.fetchone()
+            if not target or target["role"] == "admin":
+                return RedirectResponse(url="/users?error=User+not+found+or+protected", status_code=303)
+            uid, account_id = target["id"], target["account_id"]
+            # Every table with a user_id / *_user column, plus every foreign key into the users table.
+            cur.execute("""SELECT DISTINCT c.table_name, c.column_name FROM information_schema.columns c
+                JOIN information_schema.tables t ON t.table_schema=c.table_schema AND t.table_name=c.table_name
+                WHERE c.table_schema='public' AND t.table_type='BASE TABLE' AND c.table_name<>'dialnytics_users'
+                  AND c.column_name IN ('user_id','from_user','to_user','agent_id','owner_id')
+                  AND c.data_type='uuid'""")
+            targets = {(r["table_name"], r["column_name"]) for r in cur.fetchall()}
+            cur.execute("""SELECT cl.relname AS t, a.attname AS col FROM pg_constraint k
+                JOIN pg_class cl ON cl.oid=k.conrelid JOIN pg_namespace n ON n.oid=cl.relnamespace
+                JOIN pg_attribute a ON a.attrelid=k.conrelid AND a.attnum=ANY(k.conkey)
+                WHERE k.contype='f' AND k.confrelid='public.dialnytics_users'::regclass AND n.nspname='public'
+                  AND cl.relname<>'dialnytics_users'""")
+            targets |= {(r["t"], r["col"]) for r in cur.fetchall()}
+            for table, col in sorted(targets):
+                cur.execute("SAVEPOINT pdel")
+                try:
+                    cur.execute('DELETE FROM public."%s" WHERE "%s"=%%s' % (table.replace('"', ''), col.replace('"', '')), (uid,))
+                    cur.execute("RELEASE SAVEPOINT pdel")
+                except Exception:
+                    cur.execute("ROLLBACK TO SAVEPOINT pdel")
+                    log.exception("Permanent delete: could not clear %s.%s", table, col)
+            for tbl, q in (("sms_messages", "DELETE FROM public.sms_messages WHERE user_id=%s"),
+                           ("dialnytics_invoice_items", "DELETE FROM public.dialnytics_invoice_items WHERE invoice_id IN (SELECT id FROM public.dialnytics_invoices WHERE customer_id=%s)"),
+                           ("dialnytics_invoices", "DELETE FROM public.dialnytics_invoices WHERE customer_id=%s")):
+                cur.execute("SAVEPOINT pdel2")
+                try:
+                    cur.execute(q, (uid,)); cur.execute("RELEASE SAVEPOINT pdel2")
+                except Exception:
+                    cur.execute("ROLLBACK TO SAVEPOINT pdel2")
+            cur.execute("DELETE FROM public.dialnytics_users WHERE id=%s", (uid,))
+            if account_id:
+                cur.execute("""DELETE FROM public.dialnytics_accounts a WHERE a.id=%s
+                    AND NOT EXISTS (SELECT 1 FROM public.dialnytics_users u WHERE u.account_id=a.id)""", (account_id,))
+    refresh_users()
+    return RedirectResponse(url="/users?purged=1", status_code=303)
 
 @app.post("/users/power")
 async def toggle_power(request: Request, email: str = Form(...)):
@@ -5232,7 +5401,7 @@ async def admin_force_logout(user_id: uuid.UUID, request: Request):
 # admin page and the 10-minute / 1-hour expiry sweeper. See backend/website_orders.py.
 _wo = wo.register(app, dict(
     db_connect=db_connect, templates=templates, get_current_user=get_current_user,
-    refresh_users=refresh_users, hash_password=hash_password, get_setting=get_setting,
+    refresh_users=refresh_users, hash_password=hash_password, get_setting=get_setting, get_rates=get_rates,
     telnyx_number_accounts=telnyx_number_accounts, twilio_number_accounts=twilio_number_accounts,
     _set_user_twilio_account=_set_user_twilio_account, _twilio_configure_number=_twilio_configure_number,
     _set_user_telnyx_account=_set_user_telnyx_account, tx_ctx=tx_ctx, _ensure_credential=_ensure_credential,

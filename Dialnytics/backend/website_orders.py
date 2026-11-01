@@ -94,6 +94,20 @@ REVOKE ALL ON public.number_holds FROM anon, authenticated;
 ALTER TABLE public.payments ADD COLUMN IF NOT EXISTS amount_usd numeric(12,2);
 ALTER TABLE public.payments ADD COLUMN IF NOT EXISTS method text;
 ALTER TABLE public.payments ADD COLUMN IF NOT EXISTS reference text;
+-- SMS packs (100 messages each). NULL sms_credits = unlimited (existing users keep working as before).
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS sms_credits integer;
+ALTER TABLE public.website_orders ADD COLUMN IF NOT EXISTS sms_packs integer NOT NULL DEFAULT 0;
+-- A disabled user who buys again on the website is re-activated in place (history kept).
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS signup_reactivate boolean NOT NULL DEFAULT false;
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS signup_prev_account uuid;
+-- Invoices: payment method (bank shows the UBL account; card shows the card name + renewal date)
+DO $$ BEGIN
+  IF to_regclass('public.dialnytics_invoices') IS NOT NULL THEN
+    ALTER TABLE public.dialnytics_invoices ADD COLUMN IF NOT EXISTS payment_method text NOT NULL DEFAULT 'bank';
+    ALTER TABLE public.dialnytics_invoices ADD COLUMN IF NOT EXISTS card_name text NOT NULL DEFAULT '';
+    ALTER TABLE public.dialnytics_invoices ADD COLUMN IF NOT EXISTS renewal_date date;
+  END IF;
+END $$;
 """
 
 # ------------------------------------------------------------------ number classes
@@ -251,6 +265,7 @@ def register(app, d):
         whatsapp: str = ""
         addons: List[str] = []
         toll_free: bool = False
+        sms_packs: int = 0
         amount_usd: float = 0
         hold_minutes: int = SELECTION_HOLD_MINUTES
         members: List[MemberIn]
@@ -304,8 +319,12 @@ def register(app, d):
                     return JSONResponse({"ok": True, "ref": body.ref, "status": existing["status"], "duplicate": True,
                                          "expires_at": existing["hold_expires_at"].isoformat() if existing["hold_expires_at"] else None,
                                          "users": [{"email": u["email"], "number": u["signup_number"]} for u in order_summary(cur, body.ref)]})
-                cur.execute("SELECT lower(email) AS e FROM public.dialnytics_users WHERE lower(email)=ANY(%s)", (emails,))
-                used = [r["e"] for r in cur.fetchall()]
+                cur.execute("""SELECT lower(email) AS e, id, is_active, role, signup_status, account_id
+                    FROM public.dialnytics_users WHERE lower(email)=ANY(%s) FOR UPDATE""", (emails,))
+                found = {r["e"]: r for r in cur.fetchall()}
+                # A DISABLED customer account (switched off by admin) may buy again and is re-activated.
+                used = [e for e, r in found.items()
+                        if r["is_active"] or r["role"] == "admin" or r["signup_status"] == "pending"]
                 if used:
                     raise HTTPException(status_code=409, detail="This email already has a Dialnytics account: "
                                         + ", ".join(used) + ". Use a different email.")
@@ -332,15 +351,25 @@ def register(app, d):
                 account_id = cur.fetchone()["id"]
                 cur.execute("""INSERT INTO public.website_orders
                     (ref,status,payment_method,plan_slug,plan_name,company_name,account_id,owner_email,whatsapp,
-                     addons,toll_free,amount_usd,token,hold_expires_at)
-                    VALUES (%s,'pending',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now() + make_interval(mins => %s))
+                     addons,toll_free,amount_usd,token,sms_packs,hold_expires_at)
+                    VALUES (%s,'pending',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now() + make_interval(mins => %s))
                     RETURNING hold_expires_at""",
                             (body.ref, body.payment_method, body.plan_slug, body.plan_name[:120], company, account_id,
                              owner.email, body.whatsapp[:40], Jsonb(sorted(set(body.addons))), bool(body.toll_free),
-                             round(max(0.0, body.amount_usd), 2), token, minutes))
+                             round(max(0.0, body.amount_usd), 2), token, max(0, min(int(body.sms_packs), 100)), minutes))
                 expires = cur.fetchone()["hold_expires_at"]
                 for i, m in enumerate(body.members):
                     provider = "twilio" if owned.get(m.number) == "twilio" else "telnyx"
+                    old = found.get(m.email)
+                    if old:   # re-activate the disabled account in place; its history stays
+                        cur.execute("""UPDATE public.dialnytics_users SET name=%s, password_hash=%s, plan_name=%s,
+                            provider=%s, signup_prev_account=account_id, account_id=%s, account_role=%s,
+                            signup_status='pending', signup_ref=%s, signup_source='website', signup_number=%s,
+                            signup_expires_at=%s, signup_reactivate=TRUE, power_enabled=FALSE, sms_enabled=FALSE,
+                            recording_premium=FALSE, phone_number=NULL WHERE id=%s""",
+                                    (m.name, passwords[m.email], body.plan_name[:120], provider, account_id,
+                                     "owner" if i == 0 else "agent", body.ref, m.number, expires, old["id"]))
+                        continue
                     cur.execute("""INSERT INTO public.dialnytics_users
                         (name,email,password_hash,role,phone_number,credential_id,sip_username,plan_name,plan_start,plan_renewal,
                          last_paid_amount,recording_premium,dnd_enabled,is_demo,provider,account_id,account_role,user_type,
@@ -354,11 +383,12 @@ def register(app, d):
 
     # ------------------------------------------------------------- activation
     def usd_to_pkr(amount):
+        """USD -> PKR with the rate from Settings (1 USD = PKR). Falls back to 280 so it is never 0."""
         try:
-            rate = float(get_setting("usd_pkr_rate", "") or 0)
-        except (TypeError, ValueError):
+            rate = float(d["get_rates"]().get("usd_to_pkr") or 0)
+        except Exception:
             rate = 0
-        return int(round(float(amount or 0) * rate)) if rate > 0 else 0
+        return int(round(float(amount or 0) * (rate if rate > 0 else 280.0)))
 
     def activate_order(ref, method="manual", amount_usd=None, reference="", actor="system"):
         """Pending -> active. Safe to call twice. Returns a dict for the caller."""
@@ -377,6 +407,7 @@ def register(app, d):
                 if o["status"] != "pending":
                     raise ValueError("This order has expired or was cancelled.")
                 addons = set(o["addons"] or [])
+                packs = int(o["sms_packs"] or 0)
                 amount = float(amount_usd) if amount_usd not in (None, "") else float(o["amount_usd"] or 0)
                 pkr = usd_to_pkr(amount)
                 today = date.today()
@@ -406,10 +437,14 @@ def register(app, d):
                         is_active=TRUE, signup_status='active', signup_expires_at=NULL,
                         phone_number=%s, provider=%s, plan_start=%s, plan_renewal=%s,
                         recording_premium=%s, sms_enabled=%s, power_enabled=%s,
+                        sms_credits=%s, signup_reactivate=FALSE, signup_prev_account=NULL,
                         last_paid_amount=CASE WHEN id=%s THEN %s ELSE last_paid_amount END
                         WHERE id=%s""",
                                 (number or None, provider, today, renewal,
-                                 "recording" in addons, "sms" in addons, "campaigns" in addons,
+                                 "recording" in addons,
+                                 "sms" in addons or (packs > 0 and m["id"] == owner_id),
+                                 "campaigns" in addons,
+                                 (packs * 100) if (packs > 0 and m["id"] == owner_id) else None,
                                  owner_id, pkr, m["id"]))
                     if number:
                         cur.execute("""INSERT INTO public.caller_id_assignments(user_id,phone_number)
@@ -513,6 +548,9 @@ def register(app, d):
                     return "unknown"
                 if o["status"] != "pending":
                     return o["status"]
+                cur.execute("""UPDATE public.dialnytics_users SET signup_status='', signup_ref=NULL, signup_number='',
+                    signup_expires_at=NULL, signup_reactivate=FALSE, account_id=signup_prev_account, signup_prev_account=NULL
+                    WHERE signup_ref=%s AND signup_status='pending' AND signup_reactivate""", (ref,))
                 cur.execute("DELETE FROM public.dialnytics_users WHERE signup_ref=%s AND signup_status='pending'", (ref,))
                 if o["account_id"]:
                     cur.execute("""DELETE FROM public.dialnytics_accounts a WHERE a.id=%s
@@ -633,5 +671,23 @@ def register(app, d):
                 cur.execute("""SELECT phone_number, order_ref FROM public.number_holds
                     WHERE expires_at > now() AND phone_number = ANY(%s)""", (list(numbers),))
                 return {r["phone_number"]: r["order_ref"] for r in cur.fetchall()}
+
+    def backfill_pkr():
+        """One-off repair: card payments saved with PKR 0 get the converted amount."""
+        try:
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    rate = usd_to_pkr(1)
+                    cur.execute("""UPDATE public.payments SET amount_pkr=ROUND(amount_usd*%s)
+                        WHERE COALESCE(amount_pkr,0)=0 AND COALESCE(amount_usd,0)>0""", (rate,))
+                    cur.execute("""UPDATE public.dialnytics_users u SET last_paid_amount=(
+                            SELECT p.amount_pkr FROM public.payments p WHERE p.user_id=u.id AND p.status='paid'
+                            ORDER BY p.paid_at DESC NULLS LAST LIMIT 1)
+                        WHERE COALESCE(u.last_paid_amount,0)=0 AND EXISTS (
+                            SELECT 1 FROM public.payments p WHERE p.user_id=u.id AND p.status='paid' AND p.amount_pkr>0)""")
+        except Exception:
+            log.exception("PKR backfill failed")
+
+    threading.Thread(target=lambda: (time.sleep(20), backfill_pkr(), d["refresh_users"]()), daemon=True).start()
 
     return {"hold_info": hold_info, "activate_order": activate_order, "sweep": sweep}

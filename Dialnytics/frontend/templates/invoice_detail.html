@@ -16,12 +16,12 @@
 .inv-notes{margin-top:16px;font-size:13px;color:#374151;white-space:pre-line}
 .inv-paper .inv-st{display:inline-block;margin-top:8px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:800;letter-spacing:.06em;background:#f3f4f6;color:#374151}.inv-paper .inv-st.paid{background:#d1fae5;color:#065f46}.inv-paper .inv-st.sent{background:#dbeafe;color:#1e40af}.inv-paper .inv-st.void{background:#fee2e2;color:#991b1b}
 @media(max-width:700px){.inv-cards{grid-template-columns:1fr}.inv-totals{width:100%}}
-</style><div class="cm-head"><div><a href="/invoices">← All Invoices</a><h1>{{ invoice.invoice_number }}</h1><span class="cm-pill">{{ invoice.status|upper }}</span></div><a class="cm-btn" href="/invoices/{{ invoice.id }}/pdf">⬇ Download PDF</a></div>
+.inv-paper{position:relative}.inv-stamp{position:absolute;right:60px;top:46%;transform:rotate(-14deg);border:4px solid rgba(16,185,129,.55);color:rgba(16,185,129,.6);font-weight:900;font-size:44px;letter-spacing:.08em;padding:2px 22px;border-radius:12px;pointer-events:none}</style><div class="cm-head"><div><a href="/invoices">← All Invoices</a><h1>{{ invoice.invoice_number }}</h1><span class="cm-pill">{{ invoice.status|upper }}</span></div><a class="cm-btn" href="/invoices/{{ invoice.id }}/pdf">⬇ Download PDF</a></div>
 <div class="cm-grid" style="grid-template-columns:minmax(0,2fr) minmax(0,1fr)">
 <div class="inv-paper">
   <div class="inv-top"><div><img src="/static/img/dialnytics-logo-dark.png" alt="Dialnytics"><small>dialnytics.co.uk · WhatsApp +44 7476 629105</small></div>
     <div class="inv-title"><b>INVOICE</b><span>{{ invoice.invoice_number }}</span><br><span class="inv-st {{ invoice.status }}">{{ invoice.status|upper }}</span></div></div>
-  <div class="inv-stripe"></div>
+  <div class="inv-stripe"></div>{% if invoice.status == 'paid' %}<div class="inv-stamp">PAID</div>{% endif %}
   <div class="inv-body">
     <div class="inv-cards">
       <div class="inv-box"><div class="inv-lab">BILL TO</div><strong>{{ invoice.customer_name }}</strong><p>{{ invoice.customer_email }}</p>{% if invoice.contact_phone %}<p>{{ invoice.contact_phone }}</p>{% endif %}{% if invoice.contact_address %}<p>{{ invoice.contact_address }}</p>{% endif %}</div>
@@ -36,14 +36,19 @@
       {% if invoice.discount_pkr %}<div><span>Discount</span><b>- PKR {{ '{:,.0f}'.format(invoice.discount_pkr) }}</b></div>{% endif %}
       {% if invoice.tax_pkr %}<div><span>Tax ({{ invoice.tax_percent }}%)</span><b>PKR {{ '{:,.0f}'.format(invoice.tax_pkr) }}</b></div>{% endif %}
       <div class="due"><span>{{ 'TOTAL PAID' if invoice.status == 'paid' else 'TOTAL DUE' }}</span><b>PKR {{ '{:,.0f}'.format(invoice.total_pkr) }}</b></div></div>
-    {% if invoice.status != 'void' %}<div class="inv-pay"><div class="inv-lab">HOW TO PAY · BANK TRANSFER</div>
+    {% set pm = invoice.payment_method or 'bank' %}{% if invoice.status != 'void' %}{% if pm == 'bank' %}<div class="inv-pay"><div class="inv-lab">HOW TO PAY · BANK TRANSFER</div>
       <div class="inv-kv"><span>Account name</span><b>{{ bank.name }}</b></div><div class="inv-kv"><span>Bank</span><b>{{ bank.bank }}</b></div>
-      <div class="inv-kv"><span>Account number</span><b>{{ bank.number }}</b></div><div class="inv-kv"><span>Reference</span><b>{{ invoice.invoice_number }}</b></div></div>{% endif %}
+      <div class="inv-kv"><span>Account number</span><b>{{ bank.number }}</b></div><div class="inv-kv"><span>Reference</span><b>{{ invoice.invoice_number }}</b></div></div>
+    {% elif pm == 'card' %}<div class="inv-pay"><div class="inv-lab">{{ 'PAYMENT RECEIVED · CARD' if invoice.status == 'paid' else 'PAYMENT · CARD' }}</div>
+      <div class="inv-kv"><span>Payment method</span><b>Card</b></div><div class="inv-kv"><span>Card</span><b>{{ invoice.card_name or 'Card' }}</b></div>
+      {% if invoice.renewal_date %}<div class="inv-kv"><span>Renewal date</span><b>{{ invoice.renewal_date }}</b></div>{% endif %}</div>
+    {% else %}<div class="inv-pay"><div class="inv-lab">PAYMENT · {{ 'CRYPTO (USDT)' if pm == 'usdt' else 'OTHER' }}</div><div class="inv-kv"><span>Reference</span><b>{{ invoice.invoice_number }}</b></div></div>{% endif %}{% endif %}
     {% if invoice.notes %}<div class="inv-notes"><div class="inv-lab">NOTES</div>{{ invoice.notes }}</div>{% endif %}
     {% if invoice.terms %}<div class="inv-notes"><div class="inv-lab">TERMS</div>{{ invoice.terms }}</div>{% endif %}
   </div>
 </div>
 <div class="cm-card"><h2>Invoice Actions</h2><div style="display:grid;gap:12px">
+<form method="post" action="/invoices/{{ invoice.id }}/method" style="display:grid;gap:6px;margin-bottom:10px"><label class="cm-muted" style="font-size:12px">Payment method (shown on the PDF)</label><select name="payment_method" id="pmSel">{% for k,l in [('bank','Bank transfer (UBL account)'),('card','Card'),('usdt','Crypto (USDT)'),('other','Other')] %}<option value="{{ k }}" {{ 'selected' if (invoice.payment_method or 'bank')==k }}>{{ l }}</option>{% endfor %}</select><input name="card_name" placeholder="Card name (for card)" value="{{ invoice.card_name or '' }}" maxlength="60"><input type="date" name="renewal_date" value="{{ invoice.renewal_date or '' }}" title="Renewal date (for card)"><button class="cm-btn cm-btn-alt" style="width:100%">Save payment method</button></form>
 <form method="post" action="/invoices/{{ invoice.id }}/status"><input type="hidden" name="status" value="paid"><button class="cm-btn" style="width:100%;background:#10b981">Mark as Paid</button></form>
 <form method="post" action="/invoices/{{ invoice.id }}/status"><input type="hidden" name="status" value="sent"><button class="cm-btn cm-btn-alt" style="width:100%">Mark as Sent</button></form>
 <form method="post" action="/invoices/{{ invoice.id }}/duplicate"><button class="cm-btn cm-btn-alt" style="width:100%">Duplicate Invoice</button></form>
