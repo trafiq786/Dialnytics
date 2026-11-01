@@ -988,6 +988,8 @@ def _twilio_configure_number_now(number):
                 _twilio_request("POST", f"/IncomingPhoneNumbers/{record['sid']}.json", {
                     "VoiceUrl": PUBLIC_BASE_URL + "/twilio/incoming",
                     "VoiceMethod": "POST",
+                    "SmsUrl": PUBLIC_BASE_URL + "/twilio/sms",      # inbound texts
+                    "SmsMethod": "POST",
                 })
                 return True
     except Exception:
@@ -1845,7 +1847,7 @@ def locked_page(request, user, feature):
 def has_sms(user):
     """Text messages: only users with the SMS add-on switched on by admin, and a number of their own."""
     return bool(user and user.get("sms_enabled") and user.get("phone_number")
-                and user.get("user_type") != "reseller" and (user.get("provider") or "telnyx") == "telnyx")
+                and user.get("user_type") != "reseller" and (user.get("provider") or "telnyx") in ("telnyx", "twilio"))
 
 def plan_status(user):
     if user.get("is_demo"):
@@ -3903,6 +3905,20 @@ def _telnyx_sms_send(from_number, to_number, text):
     to = (msg.get("to") or [{}])[0] if isinstance(msg.get("to"), list) else {}
     return msg.get("id"), to.get("status") or "queued", ""
 
+def _twilio_sms_send(from_number, to_number, text, acct):
+    """Send through the user's Twilio account. Returns (sid, status, error)."""
+    with tw_ctx(acct):
+        if not twilio_enabled(tw_current()):
+            return None, "failed", "Twilio account is not configured"
+        form = {"From": from_number, "To": to_number, "Body": text}
+        if PUBLIC_BASE_URL:
+            form["StatusCallback"] = PUBLIC_BASE_URL + "/twilio/sms-status"
+        try:
+            data = _twilio_request("POST", "/Messages.json", form)
+        except HTTPException as exc:
+            return None, "failed", str(exc.detail)[:500]
+    return data.get("sid"), data.get("status") or "queued", ""
+
 def _link_number_to_sms_profile(number):
     """Assign the number to the SMS messaging profile so inbound texts reach the dialer. Returns error or ''."""
     conf = tx_conf()
@@ -4041,7 +4057,8 @@ async def sms_send(request: Request):
                 AND created_at > NOW() - INTERVAL '24 hours'""", (user["id"],))
             if int(cur.fetchone()["n"]) >= SMS_DAILY_LIMIT:
                 raise HTTPException(status_code=429, detail="Daily message limit reached. Please contact support.")
-    if not tx_conf()["api_key"]:
+    is_twilio = (user.get("provider") or "telnyx") == "twilio"
+    if not is_twilio and not tx_conf()["api_key"]:
         raise HTTPException(status_code=503, detail=SMS_UNAVAILABLE)
     # SMS credits (packs of 100). NULL = unlimited (older users). One credit per message segment.
     segs = _sms_segments(text)
@@ -4058,7 +4075,10 @@ async def sms_send(request: Request):
                     raise HTTPException(status_code=402, detail="You have used all your SMS. Buy another pack of 100 on dialnytics.uk or contact support.")
                 charged = True
     try:
-        provider_id, status, error = _telnyx_sms_send(user["phone_number"], to, text)
+        if is_twilio:
+            provider_id, status, error = _twilio_sms_send(user["phone_number"], to, text, user.get("twilio_account"))
+        else:
+            provider_id, status, error = _telnyx_sms_send(user["phone_number"], to, text)
     except vh.ProviderError as exc:
         provider_id, status, error = None, "failed", str(exc)[:500]
     if charged and error:   # failed sends cost nothing
@@ -4088,6 +4108,52 @@ async def sms_delete_thread(request: Request, number: str = ""):
             scope, sp = _sms_scope(user)
             cur.execute("DELETE FROM public.sms_messages WHERE " + scope + " AND contact_number=%s", sp + [contact])
     return {"ok": True}
+
+@app.post("/twilio/sms")
+async def twilio_sms_inbound(request: Request):
+    """Twilio number 'A message comes in' webhook. Stores the text for the number's owner."""
+    params = await _twilio_params(request)
+    ours = _sms_number(params.get("To"))
+    sender = _sms_number(params.get("From")) or str(params.get("From") or "")[:40]
+    sid = params.get("MessageSid") or params.get("SmsSid") or ""
+    body = str(params.get("Body") or "")[:5000]
+    if not ours or not sender:
+        return _twiml_response()
+    media = []
+    try:
+        for i in range(int(params.get("NumMedia") or 0)):
+            if params.get(f"MediaUrl{i}"):
+                media.append({"url": params.get(f"MediaUrl{i}"), "type": params.get(f"MediaContentType{i}")})
+    except ValueError:
+        pass
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id FROM public.dialnytics_users WHERE phone_number=%s AND is_active=TRUE
+                ORDER BY sms_enabled DESC, created_at ASC LIMIT 1""", (ours,))
+            owner = cur.fetchone()
+            if not owner:
+                log.info("Inbound Twilio SMS to unassigned number %s ignored", ours)
+                return _twiml_response()
+            cur.execute("""INSERT INTO public.sms_messages(user_id,our_number,contact_number,direction,body,media,status,provider_id)
+                VALUES(%s,%s,%s,'in',%s,%s::jsonb,'received',%s) ON CONFLICT (provider_id) DO NOTHING""",
+                (owner["id"], ours, sender, body, json.dumps(media), sid or None))
+    return _twiml_response()
+
+@app.post("/twilio/sms-status")
+async def twilio_sms_status(request: Request):
+    """Delivery status of texts sent through Twilio (queued, sent, delivered, failed ...)."""
+    params = await _twilio_params(request)
+    sid = params.get("MessageSid") or params.get("SmsSid") or ""
+    status = (params.get("MessageStatus") or params.get("SmsStatus") or "")[:40]
+    error = ""
+    if params.get("ErrorCode"):
+        error = ("Twilio error %s %s" % (params.get("ErrorCode"), params.get("ErrorMessage") or ""))[:500]
+    if sid and status:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE public.sms_messages SET status=%s, error=CASE WHEN %s<>'' THEN %s ELSE error END
+                    WHERE provider_id=%s AND direction='out'""", (status, error, error, sid))
+    return Response(status_code=204)
 
 @app.post("/webhooks/telnyx/sms")
 async def telnyx_sms_webhook(request: Request):
@@ -4229,6 +4295,11 @@ async def toggle_sms(request: Request, email: str = Form(...)):
     if not (back.startswith("/users") or back.startswith("/customers/")):
         back = "/users"
     sep = "?"
+    if row["sms_enabled"] and row["phone_number"] and (row["provider"] or "telnyx") == "twilio":
+        ok = _twilio_configure_number(row["phone_number"])
+        if not ok:
+            return RedirectResponse(url=back + sep + "error=" + urllib.parse.quote(
+                "SMS turned ON, but the Twilio number webhook could not be set. Check PUBLIC_BASE_URL and the Twilio credentials."), status_code=302)
     if row["sms_enabled"] and row["phone_number"] and (row["provider"] or "telnyx") == "telnyx":
         with tx_ctx(telnyx_number_accounts().get(row["phone_number"], "t1")):
             problem = _link_number_to_sms_profile(row["phone_number"])

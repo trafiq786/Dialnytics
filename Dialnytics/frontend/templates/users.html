@@ -267,7 +267,7 @@ aside#userDrawer.user-drawer.open{transform:translate(-50%,-50%) scale(1);opacit
   $('editName').value=u.name;$('editEmail').value=u.email;$('editPlan').value=u.plan||'';$('editRenewal').value=u.renewal||'';
   $('chkRecording').checked=!!u.recording;$('chkPower').checked=!!u.power;
   const tw=u.provider==='twilio';
-  $('chkSms').checked=!!u.sms;$('chkSms').disabled=!u.number||tw;$('smsHint').textContent=tw?'Telnyx lines only':(u.number?'Text messages from the user\'s number':'Needs a calling number');
+  $('chkSms').checked=!!u.sms;$('chkSms').disabled=!u.number;$('smsHint').textContent=(u.number?'Text messages from the user\'s number':'Needs a calling number');
   $('chkAdv').checked=!!u.adv;$('chkAdv').disabled=tw;$('advHint').textContent=tw?'Telnyx lines only':'Transfer outgoing calls (user must refresh the dialer)';
   $('creditsInput').value=(u.credits===''||u.credits==null)?'':u.credits;
   $('creditsState').textContent=(u.credits===''||u.credits==null)?'· now unlimited':('· '+u.credits+' left');
