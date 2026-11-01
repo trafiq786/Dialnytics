@@ -33,6 +33,7 @@ LETTERHEAD = os.path.join(STATIC, 'img', 'letterhead.png')
 CONTACT_PHONE = os.getenv('INVOICE_PHONE', '+44 7476 629105')
 METHOD_LABELS = {'bank': 'Bank transfer', 'card': 'Card', 'usdt': 'Crypto (USDT)', 'other': 'Other'}
 
+STAMP_X, STAMP_Y = 150, 372
 _fonts = {}
 
 
@@ -125,23 +126,10 @@ def build_invoice_pdf(inv, items, logo_path):
             canvas.drawString(x_name, y0, ln); y0 -= size + 1.2
         canvas.setFont(med, 7.5)
         canvas.drawString(x_phone, H - 275 * KX, CONTACT_PHONE)
-        # title row
-        canvas.setFillColor(PURPLE); canvas.setFont(bold, 20)
-        canvas.drawString(40, H - 194, 'INVOICE')
-        canvas.setFillColor(gray); canvas.setFont(reg, 8.5)
-        canvas.drawString(40, H - 207, str(inv.get('invoice_number') or ''))
-        bg, fg = STATUS_COLORS.get(status, STATUS_COLORS['draft'])
-        label = status.upper()
-        canvas.setFont(med, 8)
-        tw = canvas.stringWidth(label, med, 8) + 20
-        canvas.setFillColor(colors.HexColor(bg))
-        canvas.roundRect(W - 40 - tw, H - 202, tw, 17, 8.5, fill=1, stroke=0)
-        canvas.setFillColor(colors.HexColor(fg))
-        canvas.drawCentredString(W - 40 - tw / 2, H - 197, label)
         # PAID stamp
         if status == 'paid':
             canvas.saveState()
-            canvas.translate(175, 318)
+            canvas.translate(STAMP_X, STAMP_Y)
             canvas.rotate(14)
             canvas.setStrokeColor(colors.HexColor('#10b981')); canvas.setFillColor(colors.HexColor('#10b981'))
             canvas.setLineWidth(3)
@@ -154,125 +142,155 @@ def build_invoice_pdf(inv, items, logo_path):
         canvas.drawRightString(W - 40, 172, 'Page %d' % doc.page)
         canvas.restoreState()
 
-    doc = SimpleDocTemplate(buf, pagesize=(W, H), leftMargin=40, rightMargin=40, topMargin=216, bottomMargin=164,
+    doc = SimpleDocTemplate(buf, pagesize=(W, H), leftMargin=36, rightMargin=36, topMargin=172, bottomMargin=162,
                             title=str(inv.get('invoice_number') or 'Invoice'), author='Dialnytics')
-    lab = ParagraphStyle('lab', fontName='Helvetica-Bold', fontSize=7.5, textColor=MUTED, leading=10, spaceAfter=3)
-    val = ParagraphStyle('val', fontName='Helvetica', fontSize=9.5, textColor=INK, leading=13.5)
-    valb = ParagraphStyle('valb', parent=val, fontName='Helvetica-Bold', fontSize=11.5, leading=15)
-    cell = ParagraphStyle('cell', fontName='Helvetica', fontSize=9.5, textColor=INK, leading=13)
-    cellr = ParagraphStyle('cellr', parent=cell, alignment=TA_RIGHT)
-    head = ParagraphStyle('head', fontName='Helvetica-Bold', fontSize=8, textColor=colors.white, leading=10)
-    headr = ParagraphStyle('headr', parent=head, alignment=TA_RIGHT)
-    small = ParagraphStyle('small', fontName='Helvetica', fontSize=8.8, textColor=colors.HexColor('#374151'), leading=13)
-
+    reg = _font('P-R', 'Poppins-Regular.ttf', 'Helvetica')
+    med = _font('P-M', 'Poppins-Medium.ttf', 'Helvetica-Bold')
+    bold = _font('P-B', 'Poppins-Bold.ttf', 'Helvetica-Bold')
+    NAVYD = colors.HexColor('#0f1a44')
+    SOFTP = colors.HexColor('#f1ecff')
+    BORDER = colors.HexColor('#ddd5fb')
+    CW = W - 72                                   # content width
+    st = lambda name, **kw: ParagraphStyle(name, **kw)
+    lbl = st('lbl', fontName=reg, fontSize=8.6, textColor=colors.HexColor('#3b4262'), leading=12)
+    vl = st('vl', fontName=med, fontSize=8.8, textColor=NAVYD, leading=12)
+    vlr = st('vlr', parent=vl, alignment=TA_RIGHT)
+    h2 = st('h2', fontName=bold, fontSize=10.5, textColor=NAVYD, leading=14)
+    th = st('th', fontName=med, fontSize=8.6, textColor=colors.white, leading=11, alignment=1)
+    thl = st('thl', parent=th, alignment=0)
+    td = st('td', fontName=reg, fontSize=8.8, textColor=NAVYD, leading=12)
+    tdc = st('tdc', parent=td, alignment=1)
+    note = st('note', fontName=reg, fontSize=7.4, textColor=colors.HexColor('#2b3355'), leading=9.4)
+    inv_lbl = st('il', fontName=med, fontSize=8.6, textColor=colors.white, leading=12)
+    inv_val = st('iv', fontName=reg, fontSize=8.6, textColor=colors.white, leading=12, alignment=TA_RIGHT)
+    status_ = status
+    total = float(inv.get('total_pkr') or 0)
+    received = total if status_ == 'paid' else min(total, float(inv.get('paid_pkr') or 0))
+    remaining = max(0.0, total - received)
     story = []
-    # Bill to / details cards
-    bill = [Paragraph('BILL TO', lab), Paragraph(_e(inv.get('customer_name')), valb)]
-    for k in ('customer_email', 'contact_phone', 'contact_address'):
-        if inv.get(k):
-            bill.append(Paragraph(_e(inv.get(k)), val))
-    det_rows = [('Invoice number', inv.get('invoice_number')), ('Issue date', _date(inv.get('issue_date'))),
-                ('Due date', _date(inv.get('due_date'))), ('Amount paid' if status == 'paid' else 'Amount due', _pkr(inv.get('total_pkr')))]
-    det = Table([[Paragraph(_e(a), ParagraphStyle('dl', parent=val, textColor=MUTED, fontSize=9)),
-                  Paragraph('<b>%s</b>' % _e(b), ParagraphStyle('dr', parent=val, alignment=TA_RIGHT))] for a, b in det_rows],
-                colWidths=[95, 135])
-    det.setStyle(TableStyle([('BOTTOMPADDING', (0, 0), (-1, -1), 3), ('TOPPADDING', (0, 0), (-1, -1), 3),
-                             ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-                             ('LINEBELOW', (0, 0), (-1, -2), 0.5, LINE)]))
-    cards = Table([[bill, [Paragraph('INVOICE DETAILS', lab), det]]], colWidths=[270, 245])
-    cards.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP'), ('BACKGROUND', (0, 0), (-1, -1), SOFT),
-                               ('BOX', (0, 0), (0, 0), 0.6, LINE), ('BOX', (1, 0), (1, 0), 0.6, LINE),
-                               ('LEFTPADDING', (0, 0), (-1, -1), 14), ('RIGHTPADDING', (0, 0), (-1, -1), 14),
-                               ('TOPPADDING', (0, 0), (-1, -1), 6), ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-                               ('LINEAFTER', (0, 0), (0, 0), 8, colors.white)]))
-    story += [cards, Spacer(1, 12)]
 
-    # items
-    rows = [[Paragraph('#', head), Paragraph('DESCRIPTION', head), Paragraph('QTY', headr),
-             Paragraph('UNIT PRICE', headr), Paragraph('AMOUNT', headr)]]
+    def card(title, rows_, width, header_fill=SOFTP):
+        head_p = Paragraph('<font color="#5b2ee0">&#9679;</font>&nbsp;&nbsp;' + _e(title), h2)
+        t = Table([[head_p]] + rows_, colWidths=[width])
+        t.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), header_fill), ('BOX', (0, 0), (-1, -1), 0.8, BORDER),
+                               ('LEFTPADDING', (0, 0), (-1, -1), 10), ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+                               ('TOPPADDING', (0, 0), (-1, 0), 7), ('BOTTOMPADDING', (0, 0), (-1, 0), 7),
+                               ('TOPPADDING', (0, 1), (-1, -1), 1), ('BOTTOMPADDING', (0, 1), (-1, -1), 1),
+                               ('BACKGROUND', (0, 1), (-1, -1), colors.white)]))
+        return t
+
+    # --- Bill To (left) + Invoice box (right)
+    lw, rw = CW * 0.585, CW * 0.395
+    brow = lambda a, b: Table([[Paragraph(_e(a), lbl), Paragraph(_e(b), vl)]], colWidths=[lw * 0.36, lw * 0.64 - 20])
+    items_b = [('Customer Name:', inv.get('customer_name')), ('Email:', inv.get('customer_email')),
+               ('Contact:', inv.get('contact_phone')), ('Address:', inv.get('contact_address'))]
+    brows = []
+    for a, b in items_b:
+        if b:
+            r = brow(a, b)
+            r.setStyle(TableStyle([('LEFTPADDING', (0, 0), (-1, -1), 0), ('TOPPADDING', (0, 0), (-1, -1), 1), ('BOTTOMPADDING', (0, 0), (-1, -1), 1)]))
+            brows.append([r])
+    billbox = card('Bill To:', brows or [[Paragraph('-', vl)]], lw)
+    iv_rows = [('Invoice No:', inv.get('invoice_number')), ('Invoice Date:', _date(inv.get('issue_date'))),
+               ('Due Date:', _date(inv.get('due_date')))]
+    ivt = Table([[Paragraph(_e(a), inv_lbl), Paragraph(_e(b), inv_val)] for a, b in iv_rows], colWidths=[rw * 0.42, rw * 0.58 - 24])
+    ivt.setStyle(TableStyle([('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+                             ('TOPPADDING', (0, 0), (-1, -1), 3), ('BOTTOMPADDING', (0, 0), (-1, -1), 3)]))
+    right = Table([[Paragraph('INVOICE', st('big', fontName=bold, fontSize=20, textColor=NAVYD, leading=24, alignment=1))], [ivt]], colWidths=[rw])
+    right.setStyle(TableStyle([('BACKGROUND', (0, 0), (0, 0), SOFTP), ('BACKGROUND', (0, 1), (0, 1), NAVYD),
+                               ('BOX', (0, 0), (-1, -1), 0.8, BORDER),
+                               ('TOPPADDING', (0, 0), (0, 0), 6), ('BOTTOMPADDING', (0, 0), (0, 0), 6),
+                               ('LEFTPADDING', (0, 1), (0, 1), 12), ('RIGHTPADDING', (0, 1), (0, 1), 12),
+                               ('TOPPADDING', (0, 1), (0, 1), 8), ('BOTTOMPADDING', (0, 1), (0, 1), 8)]))
+    top = Table([[billbox, right]], colWidths=[lw + 8, rw], style=[('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (0, 0), 8), ('RIGHTPADDING', (1, 0), (1, 0), 0),
+                ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0)])
+    story += [top, Spacer(1, 8)]
+
+    # --- items
+    rows = [[Paragraph('#', th), Paragraph('Description', thl), Paragraph('Quantity', th),
+             Paragraph('Unit Price (PKR)', th), Paragraph('Amount (PKR)', th)]]
     for n, it in enumerate(items, 1):
-        rows.append([Paragraph(str(n), ParagraphStyle('n', parent=cell, textColor=MUTED)), Paragraph(_e(it.get('description')), cell),
-                     Paragraph(_e(it.get('qty')), cellr), Paragraph(_pkr(it.get('unit_price_pkr')), cellr),
-                     Paragraph('<b>%s</b>' % _pkr(it.get('amount_pkr')), cellr)])
-    t = Table(rows, colWidths=[24, 251, 45, 95, 100], repeatRows=1)
-    t.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), NAVY), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                           ('TOPPADDING', (0, 0), (-1, 0), 9), ('BOTTOMPADDING', (0, 0), (-1, 0), 9),
-                           ('TOPPADDING', (0, 1), (-1, -1), 7), ('BOTTOMPADDING', (0, 1), (-1, -1), 7),
+        rows.append([Paragraph(str(n), tdc), Paragraph(_e(it.get('description')), td), Paragraph(_e(it.get('qty')), tdc),
+                     Paragraph('{:,.0f}'.format(float(it.get('unit_price_pkr') or 0)), tdc),
+                     Paragraph('{:,.0f}'.format(float(it.get('amount_pkr') or 0)), tdc)])
+    t = Table(rows, colWidths=[28, CW - 28 - 60 - 100 - 100, 60, 100, 100], repeatRows=1)
+    t.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), PURPLE), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                           ('TOPPADDING', (0, 0), (-1, 0), 8), ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                           ('TOPPADDING', (0, 1), (-1, -1), 6), ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
                            ('LEFTPADDING', (0, 0), (-1, -1), 8), ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-                           ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, SOFT]),
-                           ('LINEBELOW', (0, 1), (-1, -1), 0.5, LINE)]))
-    story += [t, Spacer(1, 8)]
+                           ('BOX', (0, 0), (-1, -1), 0.8, BORDER), ('INNERGRID', (0, 0), (-1, -1), 0.5, BORDER),
+                           ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#faf8ff')])]))
+    story += [t, Spacer(1, 6)]
 
-    # totals
-    tot = [['Subtotal', _pkr(inv.get('subtotal_pkr'))]]
+    # --- totals (right)
+    tot = []
     if float(inv.get('discount_pkr') or 0):
-        tot.append(['Discount', '- ' + _pkr(inv.get('discount_pkr'))])
+        tot.append(('Discount', '- ' + _pkr(inv.get('discount_pkr'))))
     if float(inv.get('tax_pkr') or 0) or float(inv.get('tax_percent') or 0):
-        tot.append(['Tax (%s%%)' % ('{:g}'.format(float(inv.get('tax_percent') or 0))), _pkr(inv.get('tax_pkr'))])
-    tl = ParagraphStyle('tl', parent=val, textColor=MUTED)
-    tr = ParagraphStyle('tr', parent=val, alignment=TA_RIGHT)
-    trows = [[Paragraph(a, tl), Paragraph(b, tr)] for a, b in tot]
-    due_label = 'TOTAL PAID' if status == 'paid' else 'TOTAL DUE'
-    trows.append([Paragraph('<font color="white"><b>%s</b></font>' % due_label, ParagraphStyle('x', parent=val, fontSize=10)),
-                  Paragraph('<font color="white"><b>%s</b></font>' % _pkr(inv.get('total_pkr')),
-                            ParagraphStyle('y', parent=val, alignment=TA_RIGHT, fontSize=13, leading=16))])
-    totals = Table(trows, colWidths=[110, 125])
-    totals.setStyle(TableStyle([('LINEBELOW', (0, 0), (-1, -3), 0.5, LINE), ('TOPPADDING', (0, 0), (-1, -1), 4),
-                                ('BOTTOMPADDING', (0, 0), (-1, -1), 4), ('BACKGROUND', (0, -1), (-1, -1), PURPLE),
-                                ('TOPPADDING', (0, -1), (-1, -1), 7), ('BOTTOMPADDING', (0, -1), (-1, -1), 7),
+        tot.append(('Tax (%s%%)' % '{:g}'.format(float(inv.get('tax_percent') or 0)), _pkr(inv.get('tax_pkr'))))
+    tot += [('Total Amount', _pkr(total)), ('Payment Received', _pkr(received))]
+    trows = [[Paragraph(_e(a), vl), Paragraph(_e(b), st('tv', parent=vl, alignment=TA_RIGHT, fontName=bold, fontSize=10))] for a, b in tot]
+    trows.append([Paragraph('Remaining Payment', st('rl', parent=vl, textColor=colors.white)),
+                  Paragraph(_e(_pkr(remaining)), st('rv', parent=vl, textColor=colors.white, alignment=TA_RIGHT, fontName=bold, fontSize=10.5))])
+    tw = 250
+    totals = Table(trows, colWidths=[tw * 0.5, tw * 0.5])
+    totals.setStyle(TableStyle([('BOX', (0, 0), (-1, -1), 0.8, BORDER), ('LINEBELOW', (0, 0), (-1, -2), 0.5, BORDER),
+                                ('BACKGROUND', (0, 0), (-1, -2), colors.white), ('BACKGROUND', (0, -1), (-1, -1), PURPLE),
+                                ('TOPPADDING', (0, 0), (-1, -1), 4), ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
                                 ('LEFTPADDING', (0, 0), (-1, -1), 10), ('RIGHTPADDING', (0, 0), (-1, -1), 10),
                                 ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
-    wrap = Table([['', totals]], colWidths=[280, 235])
-    wrap.setStyle(TableStyle([('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 0)]))
-    story += [wrap, Spacer(1, 12)]
+    wrap = Table([['', totals]], colWidths=[CW - tw, tw], style=[('LEFTPADDING', (0, 0), (-1, -1), 0),
+                 ('RIGHTPADDING', (0, 0), (-1, -1), 0), ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                 ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0)])
+    story += [wrap, Spacer(1, 8)]
 
-    # how to pay: bank details ONLY on bank-transfer invoices
+    # --- payment details (left) + important notes (right). Bank account ONLY on bank-transfer invoices.
     method = str(inv.get('payment_method') or 'bank').lower()
-    box_style = [('BOX', (0, 0), (-1, -1), 0.8, colors.HexColor('#d9d2fb')),
-                 ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#f8f6ff')),
-                 ('LINEBEFORE', (0, 0), (0, -1), 4, PURPLE),
-                 ('LEFTPADDING', (0, 0), (-1, -1), 14), ('RIGHTPADDING', (0, 0), (-1, -1), 12),
-                 ('TOPPADDING', (0, 0), (-1, -1), 8), ('BOTTOMPADDING', (0, 0), (-1, -1), 8)]
-    ph = ParagraphStyle('ph', parent=lab, textColor=PURPLE, fontSize=8)
+    pw = CW * 0.5 - 6
+    kv = lambda a, b, w: Table([[Paragraph(_e(a), lbl), Paragraph('<b>%s</b>' % _e(b), vl)]], colWidths=[w * 0.40, w * 0.60 - 20],
+                               style=[('LEFTPADDING', (0, 0), (-1, -1), 0), ('TOPPADDING', (0, 0), (-1, -1), 2), ('BOTTOMPADDING', (0, 0), (-1, -1), 2)])
     if method == 'card':
-        card = str(inv.get('card_name') or '').strip() or 'Card'
-        rows = [[Paragraph('Payment method', tl), Paragraph('<b>Card</b>', val)],
-                [Paragraph('Card', tl), Paragraph('<b>%s</b>' % _e(card), val)]]
+        card_name = str(inv.get('card_name') or '').strip() or 'Card'
+        prow = [[kv('Payment Method:', 'Card', pw)], [kv('Card:', card_name, pw)]]
         if inv.get('renewal_date'):
-            rows.append([Paragraph('Renewal date', tl), Paragraph('<b>%s</b>' % _e(_date(inv.get('renewal_date'))), val)])
-        head_txt = 'PAYMENT RECEIVED · CARD' if status == 'paid' else 'PAYMENT · CARD'
-        foot = None
+            prow.append([kv('Renewal Date:', _date(inv.get('renewal_date')), pw)])
+        ptitle = 'Payment Details - Card'
     elif method == 'bank':
         b = bank_details()
-        rows = [[Paragraph('Account name', tl), Paragraph('<b>%s</b>' % _e(b['name']), val)],
-                [Paragraph('Bank', tl), Paragraph('<b>%s</b>' % _e(b['bank']), val)],
-                [Paragraph('Account number', tl), Paragraph('<b>%s</b>' % _e(b['number']), ParagraphStyle('an', parent=val, fontSize=11))]]
-        head_txt = 'HOW TO PAY · BANK TRANSFER'
-        foot = 'Use %s as the payment reference and send the receipt to us on WhatsApp.' % (inv.get('invoice_number') or 'the invoice number')
+        prow = [[Paragraph('You may complete your payment via bank transfer:', note)],
+                [kv('Account Name:', b['name'], pw)], [kv('Bank:', b['bank'], pw)], [kv('Account Number:', b['number'], pw)]]
+        if remaining > 0:
+            prow.append([kv('Amount:', _pkr(remaining), pw)])
+        ptitle = 'Payment Details - Bank Transfer'
     else:
-        rows = [[Paragraph('Payment method', tl), Paragraph('<b>%s</b>' % _e(METHOD_LABELS.get(method, method.title())), val)],
-                [Paragraph('Reference', tl), Paragraph(_e(inv.get('invoice_number')), val)]]
-        head_txt = 'PAYMENT · ' + METHOD_LABELS.get(method, method.title()).upper()
-        foot = 'Payment details are shared with you on WhatsApp: %s' % CONTACT_PHONE
-    pay = Table(rows, colWidths=[100, 380])
-    pay.setStyle(TableStyle([('TOPPADDING', (0, 0), (-1, -1), 2), ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-                             ('LEFTPADDING', (0, 0), (-1, -1), 0)]))
-    inner = [Paragraph(_e(head_txt), ph), Spacer(1, 3), pay]
-    if foot and status != 'paid':
-        inner += [Spacer(1, 4), Paragraph(_e(foot), small)]
-    paybox = Table([[inner]], colWidths=[515])
-    paybox.setStyle(TableStyle(box_style))
-    if status != 'void':
-        story += [KeepTogether([paybox]), Spacer(1, 10)]
-
-    tiny = ParagraphStyle('tiny', parent=small, fontSize=8, leading=10.5)
-    bits = []
-    for title, key in (('Notes', 'notes'), ('Terms', 'terms')):
-        text = str(inv.get(key) or '').strip()
-        if text and not (key == 'terms' and status == 'paid'):
-            bits.append('<b>%s:</b> %s' % (title, _e(text).replace('\n', ' ')))
-    if bits:
-        story += [Paragraph('  &nbsp;·&nbsp;  '.join(bits), tiny)]
+        prow = [[kv('Payment Method:', METHOD_LABELS.get(method, method.title()), pw)],
+                [Paragraph('Payment details are shared on WhatsApp: %s' % _e(CONTACT_PHONE), note)]]
+        ptitle = 'Payment Details'
+    paybox = card(ptitle, prow, pw)
+    note_lines = [x.strip() for x in str(inv.get('notes') or '').splitlines() if x.strip()]
+    terms_txt = str(inv.get('terms') or '').strip()
+    if terms_txt and status_ != 'paid':
+        note_lines.append(terms_txt.replace('\n', ' '))
+    nrows = []
+    for i, line in enumerate(note_lines[:6], 1):
+        nrows.append([Table([[Paragraph('<font color="white"><b>%d</b></font>' % i, st('nn', fontName=bold, fontSize=7.5, leading=9, alignment=1)),
+                              Paragraph(_e(line), note)]], colWidths=[15, pw - 20 - 21],
+                            style=[('BACKGROUND', (0, 0), (0, 0), NAVYD), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                                   ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (0, 0), 0),
+                                   ('LEFTPADDING', (1, 0), (1, 0), 7), ('TOPPADDING', (0, 0), (-1, -1), 2), ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+                                   ('ROUNDEDCORNERS', [7, 7, 7, 7])]) ])
+    if status_ != 'void' or nrows:
+        cells = [paybox if status_ != 'void' else '', card('Important Notes', nrows, pw) if nrows else '']
+        if not nrows:
+            cells = [paybox]; cws = [CW]
+        elif status_ == 'void':
+            cells = [card('Important Notes', nrows, CW)]; cws = [CW]
+        else:
+            cws = [pw + 6, pw + 6]
+        story.append(Table([cells], colWidths=cws, style=[('VALIGN', (0, 0), (-1, -1), 'TOP'), ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                     ('RIGHTPADDING', (0, 0), (0, 0), 6), ('RIGHTPADDING', (1, 0), (1, 0), 0),
+                     ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0)]))
 
     doc.build(story, onFirstPage=page, onLaterPages=page)
     return buf.getvalue()

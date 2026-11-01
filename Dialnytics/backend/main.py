@@ -1308,9 +1308,10 @@ async def invoice_new(request:Request,customer:str=''):
 async def invoice_create(request:Request,customer_email:str=Form(...),issue_date:str=Form(...),due_date:str=Form(...),
     description:List[str]=Form(...),qty:List[int]=Form(...),unit_price:List[int]=Form(...),
     discount:int=Form(0),tax_percent:int=Form(0),notes:str=Form(''),terms:str=Form('Payment is due by the due date shown.'),
-    action:str=Form('save'),payment_method:str=Form('bank'),card_name:str=Form(''),renewal_date:str=Form('')):
+    action:str=Form('save'),payment_method:str=Form('bank'),card_name:str=Form(''),renewal_date:str=Form(''),paid_pkr:int=Form(0)):
     require_admin(request)
     if payment_method not in ('bank','card','usdt','other'): payment_method='bank'
+    paid_pkr=max(0,paid_pkr)
     try: renewal=date.fromisoformat(renewal_date) if renewal_date else None
     except ValueError: raise HTTPException(422,'Invalid renewal date')
     c=_customer_data(customer_email)
@@ -1332,11 +1333,11 @@ async def invoice_create(request:Request,customer_email:str=Form(...),issue_date
             cur.execute("""INSERT INTO public.dialnytics_invoices
                 (invoice_number,customer_id,customer_name,customer_email,contact_phone,contact_address,
                  issue_date,due_date,notes,terms,subtotal_pkr,discount_pkr,tax_percent,tax_pkr,total_pkr,status,
-                 payment_method,card_name,renewal_date)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'draft',%s,%s,%s) RETURNING id""",
+                 payment_method,card_name,renewal_date,paid_pkr)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'draft',%s,%s,%s,%s) RETURNING id""",
                 (number,c['id'],c['name'],c['email'],c.get('contact_phone') or '',c.get('contact_address') or '',
                 issued,due,notes[:3000],terms[:3000],subtotal,discount,tax_percent,tax_amount,total,
-                payment_method,card_name.strip()[:60],renewal))
+                payment_method,card_name.strip()[:60],renewal,min(paid_pkr,total)))
             invoice_id=cur.fetchone()['id']
             for i,(d,q,price) in enumerate(zip(description,qty,unit_price)):
                 cur.execute("""INSERT INTO public.dialnytics_invoice_items(invoice_id,position,description,qty,unit_price_pkr,amount_pkr)
@@ -1365,15 +1366,15 @@ async def invoice_status(request:Request,invoice_id:uuid.UUID,status:str=Form(..
 
 
 @app.post('/invoices/{invoice_id}/method')
-async def invoice_method(request:Request,invoice_id:uuid.UUID,payment_method:str=Form('bank'),card_name:str=Form(''),renewal_date:str=Form('')):
+async def invoice_method(request:Request,invoice_id:uuid.UUID,payment_method:str=Form('bank'),card_name:str=Form(''),renewal_date:str=Form(''),paid_pkr:int=Form(0)):
     require_admin(request)
     if payment_method not in ('bank','card','usdt','other'): raise HTTPException(422,'Invalid payment method')
     try: renewal=date.fromisoformat(renewal_date) if renewal_date else None
     except ValueError: raise HTTPException(422,'Invalid renewal date')
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute('UPDATE public.dialnytics_invoices SET payment_method=%s,card_name=%s,renewal_date=%s,updated_at=NOW() WHERE id=%s RETURNING id',
-                (payment_method,card_name.strip()[:60],renewal,invoice_id))
+            cur.execute('UPDATE public.dialnytics_invoices SET payment_method=%s,card_name=%s,renewal_date=%s,paid_pkr=LEAST(GREATEST(%s,0),total_pkr),updated_at=NOW() WHERE id=%s RETURNING id',
+                (payment_method,card_name.strip()[:60],renewal,paid_pkr,invoice_id))
             if not cur.fetchone(): raise HTTPException(404,'Invoice not found')
     return RedirectResponse('/invoices/'+str(invoice_id),status_code=303)
 
@@ -2282,6 +2283,89 @@ def _clean_number(value):
     if not value or "anonymous" in value.lower():
         return ""
     return value
+
+def _like(q):
+    return "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+@app.get("/api/search")
+async def global_search(request: Request, q: str = "", scope: str = ""):
+    """Header search. Admin: users/customers (name, email, phone, plan, assigned numbers), contacts of all users
+    and call logs of all users. Normal users: only their own contacts and call logs.
+    scope=customers returns just the matching customer emails (used to filter the Users / Customers tables)."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    q = (q or "").strip()[:80]
+    out = {"q": q, "users": [], "contacts": [], "calls": [], "emails": []}
+    if len(q) < 2:
+        return out
+    admin = user.get("role") == "admin"
+    like = _like(q)
+    digits = re.sub(r"\D", "", q)
+    dlike = "%" + digits + "%" if len(digits) >= 3 else None
+    lim = 200 if scope == "customers" else 8
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            emails = set()
+            if admin:
+                cur.execute(r"""SELECT u.name,u.email,u.phone_number,u.plan_name,u.is_active,u.signup_status
+                    FROM public.dialnytics_users u WHERE u.role<>'admin' AND (
+                        u.name ILIKE %(l)s ESCAPE '\' OR u.email ILIKE %(l)s ESCAPE '\' OR COALESCE(u.plan_name,'') ILIKE %(l)s ESCAPE '\'
+                        OR COALESCE(u.phone_number,'') ILIKE %(l)s ESCAPE '\'
+                        OR (%(d)s::text IS NOT NULL AND regexp_replace(COALESCE(u.phone_number,''), '\D', '', 'g') LIKE %(d)s)
+                        OR u.id IN (SELECT a.user_id FROM public.caller_id_assignments a
+                                    WHERE a.phone_number ILIKE %(l)s ESCAPE '\'
+                                       OR (%(d)s::text IS NOT NULL AND regexp_replace(a.phone_number, '\D', '', 'g') LIKE %(d)s)))
+                    ORDER BY u.is_active DESC, u.created_at DESC LIMIT %(n)s""", {"l": like, "d": dlike, "n": lim})
+                rows = cur.fetchall()
+                out["users"] = [{"name": r["name"], "email": r["email"], "number": r["phone_number"] or "",
+                                 "plan": r["plan_name"] or "", "active": bool(r["is_active"]),
+                                 "href": "/customers/" + urllib.parse.quote(r["email"], safe="")} for r in rows]
+                emails |= {r["email"].lower() for r in rows}
+            # contacts
+            where = r"""(c.name ILIKE %(l)s ESCAPE '\' OR c.number ILIKE %(l)s ESCAPE '\'
+                         OR (%(d)s::text IS NOT NULL AND regexp_replace(c.number,'\D','','g') LIKE %(d)s))"""
+            if admin:
+                cur.execute("""SELECT c.name,c.number,u.name AS owner,u.email FROM public.dialnytics_contacts c
+                    JOIN public.dialnytics_users u ON u.id=c.user_id WHERE """ + where + " ORDER BY c.created_at DESC LIMIT %(n)s",
+                            {"l": like, "d": dlike, "n": lim})
+            else:
+                cur.execute("""SELECT c.name,c.number,NULL AS owner,NULL AS email FROM public.dialnytics_contacts c
+                    WHERE c.user_id=%(u)s AND """ + where + " ORDER BY c.created_at DESC LIMIT %(n)s",
+                            {"l": like, "d": dlike, "n": lim, "u": user["id"]})
+            for r in cur.fetchall():
+                out["contacts"].append({"name": r["name"], "number": r["number"], "owner": r["owner"] or "",
+                    "href": ("/customers/" + urllib.parse.quote(r["email"], safe="")) if admin and r["email"]
+                            else "/contacts?q=" + urllib.parse.quote(q)})
+                if r["email"]: emails.add(r["email"].lower())
+            # call logs (by number)
+            cw = r"""(c.from_number ILIKE %(l)s ESCAPE '\' OR c.to_number ILIKE %(l)s ESCAPE '\'
+                     OR (%(d)s::text IS NOT NULL AND (regexp_replace(COALESCE(c.from_number,''),'\D','','g') LIKE %(d)s
+                                                      OR regexp_replace(COALESCE(c.to_number,''),'\D','','g') LIKE %(d)s)))"""
+            if digits or re.search(r"\d", q):
+                if admin:
+                    cur.execute("""SELECT c.from_number,c.to_number,c.direction,c.status,c.created_at,u.name AS owner,u.email
+                        FROM public.calls c LEFT JOIN public.dialnytics_users u ON u.id=c.user_id WHERE """ + cw +
+                                " ORDER BY c.created_at DESC LIMIT %(n)s", {"l": like, "d": dlike, "n": lim})
+                else:
+                    cur.execute("""SELECT c.from_number,c.to_number,c.direction,c.status,c.created_at,NULL AS owner,NULL AS email
+                        FROM public.calls c WHERE c.user_id=%(u)s AND """ + cw + " ORDER BY c.created_at DESC LIMIT %(n)s",
+                                {"l": like, "d": dlike, "n": lim, "u": user["id"]})
+                for r in cur.fetchall():
+                    out["calls"].append({"from": r["from_number"] or "", "to": r["to_number"] or "", "direction": r["direction"] or "",
+                        "status": r["status"] or "", "when": r["created_at"].strftime("%d %b %Y %H:%M") if r["created_at"] else "",
+                        "owner": r["owner"] or "",
+                        "href": ("/customers/" + urllib.parse.quote(r["email"], safe="")) if admin and r["email"]
+                                else "/call-logs?q=" + urllib.parse.quote(q)})
+                    if r["email"]: emails.add(r["email"].lower())
+            if admin:
+                out["emails"] = sorted(emails)
+    if scope == "customers":
+        return {"emails": out["emails"]}
+    out["users"] = out["users"][:8]; out["contacts"] = out["contacts"][:8]; out["calls"] = out["calls"][:8]
+    out.pop("emails", None)
+    return out
+
 
 @app.get("/call-logs", response_class=HTMLResponse)
 async def call_logs_page(request: Request):

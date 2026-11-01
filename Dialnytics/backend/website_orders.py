@@ -106,6 +106,7 @@ DO $$ BEGIN
     ALTER TABLE public.dialnytics_invoices ADD COLUMN IF NOT EXISTS payment_method text NOT NULL DEFAULT 'bank';
     ALTER TABLE public.dialnytics_invoices ADD COLUMN IF NOT EXISTS card_name text NOT NULL DEFAULT '';
     ALTER TABLE public.dialnytics_invoices ADD COLUMN IF NOT EXISTS renewal_date date;
+    ALTER TABLE public.dialnytics_invoices ADD COLUMN IF NOT EXISTS paid_pkr numeric NOT NULL DEFAULT 0;
   END IF;
 END $$;
 """
@@ -627,6 +628,25 @@ def register(app, d):
         return templates.TemplateResponse(request=request, name="pending_orders.html", context={
             "user": admin, "orders": orders, "numberless": numberless,
             "error": request.query_params.get("error"), "done": request.query_params.get("done")})
+
+    @app.get("/users/website-orders")
+    def website_orders_page(request: Request):
+        """Everyone who bought from the website (paid orders) with their users, numbers and plan dates."""
+        admin = need_admin(request)
+        if not admin:
+            return RedirectResponse("/login", status_code=302)
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT * FROM public.website_orders WHERE status='paid'
+                    ORDER BY paid_at DESC NULLS LAST, created_at DESC LIMIT 500""")
+                orders = [dict(r) for r in cur.fetchall()]
+                for o in orders:
+                    cur.execute("""SELECT name,email,account_role,phone_number,is_active,plan_renewal,sms_credits
+                        FROM public.dialnytics_users WHERE signup_ref=%s ORDER BY (account_role='owner') DESC, created_at""", (o["ref"],))
+                    o["users"] = [dict(r) for r in cur.fetchall()]
+        total = sum(float(o["amount_usd"] or 0) for o in orders)
+        return templates.TemplateResponse(request=request, name="website_orders.html", context={
+            "user": admin, "orders": orders, "total_usd": total})
 
     @app.post("/users/pending/{ref}/paid")
     def pending_mark_paid(ref: str, request: Request, method: str = Form("bank"), amount_usd: str = Form(""),
