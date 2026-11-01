@@ -1,0 +1,36 @@
+/* Dialnytics premium buttons: hover glow + lift + mouse spotlight, press + click pop. Uses the theme accent. */
+:root{--fx-accent:var(--accent,#6366f1);--fx-glow:var(--accent-glow,rgba(99,102,241,.35))}
+:is(button,input[type=button],input[type=submit],input[type=reset],[role=button],.btn,.cm-btn,.cm-btn-alt,.drawer-action,.premium-edit,.refer-btn,.header-icon,.extra-btn,a.button,[class^="btn-"],[class*=" btn-"],.um-save,.um-cancel,.um-del,.um-mini,.um-x,.dn-btn-ghost,.dn-btn-danger,.seg a,summary):not(:disabled):not(.dn-no-fx){
+  cursor:pointer;
+  transition:translate .2s cubic-bezier(.2,.8,.2,1),scale .2s cubic-bezier(.2,.8,.2,1),box-shadow .28s ease,filter .25s ease,background-color .2s ease,border-color .2s ease,color .2s ease;
+}
+:is(button,input[type=button],input[type=submit],input[type=reset],[role=button],.btn,.cm-btn,.cm-btn-alt,.drawer-action,.premium-edit,.refer-btn,.header-icon,.extra-btn,a.button,[class^="btn-"],[class*=" btn-"],.um-save,.um-cancel,.um-del,.um-mini,.um-x,.dn-btn-ghost,.dn-btn-danger,.seg a,summary):not(:disabled):not(.dn-no-fx):hover{
+  translate:0 -2px;
+  box-shadow:0 10px 24px -8px var(--fx-glow),0 0 0 1px color-mix(in srgb,var(--fx-accent) 55%,transparent);
+  filter:brightness(1.1) saturate(1.12);
+}
+:is(button,input[type=button],input[type=submit],input[type=reset],[role=button],.btn,.cm-btn,.cm-btn-alt,.drawer-action,.premium-edit,.refer-btn,.header-icon,.extra-btn,a.button,[class^="btn-"],[class*=" btn-"],.um-save,.um-cancel,.um-del,.um-mini,.um-x,.dn-btn-ghost,.dn-btn-danger,.seg a,summary):not(:disabled):not(.dn-no-fx):active{
+  translate:0 1px;scale:.95;filter:brightness(.93);transition-duration:.07s;
+  box-shadow:0 2px 8px -2px var(--fx-glow),inset 0 2px 6px rgba(0,0,0,.25);
+}
+/* click: a quick pop with an expanding ring */
+.dn-pop{animation:dnPop .5s cubic-bezier(.2,.8,.2,1)}
+@keyframes dnPop{
+  0%{scale:.92;box-shadow:0 0 0 0 var(--fx-glow)}
+  45%{scale:1.06;box-shadow:0 0 0 7px color-mix(in srgb,var(--fx-accent) 38%,transparent)}
+  100%{scale:1;box-shadow:0 0 0 16px transparent}
+}
+/* mouse spotlight that follows the cursor (JS sets --mx/--my and the .dn-spot class) */
+.dn-rel{position:relative}
+.dn-spot::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:0;transition:opacity .25s ease;
+  background:radial-gradient(110px circle at var(--mx,50%) var(--my,50%),rgba(255,255,255,.3),transparent 62%)}
+.dn-spot:hover::after{opacity:1}
+/* side navigation: slide + glow instead of lift */
+.shell-nav a,.nav-settings{transition:translate .2s ease,background-color .2s ease,color .2s ease,box-shadow .25s ease}
+.shell-nav a:hover,.nav-settings:hover{translate:4px 0;box-shadow:inset 3px 0 0 var(--fx-accent)}
+.shell-nav a:active,.nav-settings:active{scale:.97}
+:is(button,input[type=button],input[type=submit],a.button,.btn,.cm-btn):focus-visible{outline:2px solid var(--fx-accent);outline-offset:3px}
+@media (prefers-reduced-motion:reduce){
+  :is(button,input,a,.btn,.cm-btn,summary,[role=button]){transition:none!important;animation:none!important}
+  .dn-pop{animation:none!important}
+}
