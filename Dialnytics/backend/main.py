@@ -3356,6 +3356,8 @@ async def twilio_token(request: Request):
     return JSONResponse({"token": token, "identity": identity, "from_number": user.get("phone_number") or ""},
                         headers={"Cache-Control": "no-store"})
 
+@app.post("/twilio/voice/outgoing")   # alias: a TwiML App configured with this URL works too
+@app.post("/twilio/outgoing")
 @app.post("/twilio/voice")
 async def twilio_voice(request: Request):
     """TwiML App Voice URL: outgoing calls placed from the browser."""
