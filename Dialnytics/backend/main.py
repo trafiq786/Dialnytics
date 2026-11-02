@@ -560,14 +560,43 @@ def _period_starts():
             "d30": now - timedelta(days=30),
             "life": datetime(2000, 1, 1, tzinfo=tz)}
 
-def cost_summary(user_id=None):
+def plan_cycle(plan_renewal=None):
+    """A customer's current plan cycle: the 30 days ending on the renewal date.
+
+    It starts when the plan started / was last renewed and restarts at every renewal
+    (not on the 1st of the calendar month). Without a renewal date it falls back to
+    the calendar month. Returns (start, end) as timezone-aware datetimes.
+    """
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(os.getenv("DASHBOARD_TIMEZONE", "Asia/Karachi"))
+    def at(d):
+        return datetime.combine(d, datetime.min.time(), tzinfo=tz)
+    if plan_renewal:
+        if isinstance(plan_renewal, str):
+            try:
+                plan_renewal = date.fromisoformat(plan_renewal[:10])
+            except ValueError:
+                plan_renewal = None
+        elif isinstance(plan_renewal, datetime):
+            plan_renewal = plan_renewal.date()
+    if plan_renewal:
+        return at(plan_renewal - timedelta(days=30)), at(plan_renewal)
+    today = datetime.now(tz).date()
+    start = today.replace(day=1)
+    nxt = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return at(start), at(nxt)
+
+def cost_summary(user_id=None, month_start=None):
     """Estimated provider cost (USD) for today / this week / this month.
 
     Billable minutes are rounded up per call and multiplied by the admin-set
     per-minute rate of the provider and direction the call used.
+    `month_start` replaces the calendar-month start (used for a customer's plan cycle).
     """
     rates = get_rates()
     starts = _period_starts()
+    if month_start is not None:
+        starts["month"] = month_start
     params = {"since": min(starts.values()), **starts, "uid": user_id,
               "tw_client": float(rates["twilio_client"])}
     # Rate per provider / direction / country zone (outgoing: dialed number,
@@ -1141,8 +1170,6 @@ def _customer_data(email):
                 u.plan_start,u.plan_renewal,u.created_at,u.is_active,u.is_demo,
                 u.last_paid_amount,u.recording_premium,u.contact_name,u.contact_phone,
                 u.contact_address,u.customer_notes,
-                (SELECT count(*) FROM public.calls c WHERE c.user_id=u.id AND c.created_at >= date_trunc('month',now())) AS calls_month,
-                (SELECT COALESCE(sum(c.duration_seconds),0) FROM public.calls c WHERE c.user_id=u.id AND c.created_at >= date_trunc('month',now())) AS talk_seconds,
                 (SELECT COALESCE(sum(p.amount_pkr),0) FROM public.payments p WHERE p.user_id=u.id AND p.status='paid') AS collected,
                 (SELECT COALESCE(sum(p.amount_usd),0) FROM public.payments p WHERE p.user_id=u.id AND p.status='paid') AS collected_usd,
                 (SELECT p.amount_usd FROM public.payments p WHERE p.user_id=u.id AND p.status='paid' ORDER BY p.paid_at DESC NULLS LAST LIMIT 1) AS last_payment_usd,
@@ -1151,7 +1178,18 @@ def _customer_data(email):
                 FROM public.dialnytics_users u WHERE lower(u.email)=lower(%s)""", (email,))
             row=cur.fetchone()
             if not row: raise HTTPException(404, 'Customer not found')
-            return dict(row)
+            data=dict(row)
+            # Usage counts the customer's own plan cycle (renewal - 30 days .. renewal),
+            # so it resets on renewal and not on the 1st of the calendar month.
+            start,end=plan_cycle(data.get('plan_renewal'))
+            cur.execute("SELECT count(*) AS n, COALESCE(sum(duration_seconds),0) AS secs "
+                        "FROM public.calls WHERE user_id=%s AND created_at >= %s",(data['id'],start))
+            u=cur.fetchone()
+            data['calls_month']=int(u['n'] or 0)
+            data['talk_seconds']=int(u['secs'] or 0)
+            data['cycle_start']=start.date().isoformat()
+            data['cycle_end']=end.date().isoformat()
+            return data
 
 
 @app.get('/customers', response_class=HTMLResponse)
@@ -1177,15 +1215,17 @@ async def customer_detail(request:Request,email:str):
     c=_customer_data(email)
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute('SELECT amount_pkr,amount_usd,method,reference,status,paid_at,renewal_date FROM public.payments WHERE user_id=%s ORDER BY paid_at DESC NULLS LAST LIMIT 100',(c['id'],))
+            cur.execute('SELECT ctid::text AS pid,amount_pkr,amount_usd,method,reference,status,paid_at,renewal_date FROM public.payments WHERE user_id=%s ORDER BY paid_at DESC NULLS LAST LIMIT 100',(c['id'],))
             payments=cur.fetchall()
     try:
-        costs = cost_summary(c['id'])
+        costs = cost_summary(c['id'], month_start=plan_cycle(c.get('plan_renewal'))[0])
     except Exception:
         log.exception("Cost summary failed for customer")
         costs = None
     return templates.TemplateResponse(request=request,name='customer_detail.html',context={
         'user':admin,'customer':c,'payments':payments,'costs':costs,
+        'payments_json':json.dumps([{'pid':r['pid'],'pkr':float(r['amount_pkr'] or 0),'usd':float(r['amount_usd'] or 0),
+                                    'method':r['method'] or '','reference':r['reference'] or ''} for r in payments]).replace('<','\\u003c'),
         'twilio_ready':twilio_enabled()})
 
 
@@ -1277,6 +1317,47 @@ async def customer_payment(request:Request,email:str,amount:int=Form(0),amount_u
             if amount>0: cur.execute('UPDATE public.dialnytics_users SET last_paid_amount=%s WHERE id=%s',(amount,c['id']))
     refresh_users()
     return RedirectResponse('/customers/'+email+'?payment=1',status_code=303)
+
+
+def _sync_last_paid(cur,user_id):
+    """last_paid_amount (the customer's 'monthly revenue') follows the newest PKR payment."""
+    cur.execute("""SELECT COALESCE(NULLIF(amount_pkr,0),0) AS a FROM public.payments
+        WHERE user_id=%s AND status='paid' AND COALESCE(amount_pkr,0)>0
+        ORDER BY paid_at DESC NULLS LAST LIMIT 1""",(user_id,))
+    r=cur.fetchone()
+    if r: cur.execute('UPDATE public.dialnytics_users SET last_paid_amount=%s WHERE id=%s',(r['a'],user_id))
+
+@app.post('/customers/{email}/payment/edit')
+async def customer_payment_edit(request:Request,email:str,pid:str=Form(...),old_pkr:float=Form(0),
+    amount:int=Form(0),amount_usd:float=Form(0),method:str=Form(''),reference:str=Form('')):
+    require_admin(request)
+    if amount<0 or amount_usd<0 or (amount<=0 and amount_usd<=0):
+        raise HTTPException(422,'Enter an amount in PKR or USD')
+    if not re.fullmatch(r'\(\d+,\d+\)',pid): raise HTTPException(422,'Invalid payment')
+    c=_customer_data(email)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE public.payments SET amount_pkr=%s,amount_usd=%s,method=%s,reference=%s
+                WHERE ctid=%s::tid AND user_id=%s AND COALESCE(amount_pkr,0)=%s RETURNING 1""",
+                (amount,round(amount_usd,2) or None,method.strip()[:40],reference.strip()[:120],pid,c['id'],old_pkr))
+            if not cur.fetchone(): raise HTTPException(409,'Payment changed or not found. Reload the page and try again.')
+            _sync_last_paid(cur,c['id'])
+    refresh_users()
+    return RedirectResponse('/customers/'+email+'?saved=1',status_code=303)
+
+@app.post('/customers/{email}/payment/delete')
+async def customer_payment_delete(request:Request,email:str,pid:str=Form(...),old_pkr:float=Form(0)):
+    require_admin(request)
+    if not re.fullmatch(r'\(\d+,\d+\)',pid): raise HTTPException(422,'Invalid payment')
+    c=_customer_data(email)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""DELETE FROM public.payments WHERE ctid=%s::tid AND user_id=%s
+                AND COALESCE(amount_pkr,0)=%s RETURNING 1""",(pid,c['id'],old_pkr))
+            if not cur.fetchone(): raise HTTPException(409,'Payment changed or not found. Reload the page and try again.')
+            _sync_last_paid(cur,c['id'])
+    refresh_users()
+    return RedirectResponse('/customers/'+email+'?saved=1',status_code=303)
 
 
 def _invoice_row(invoice_id):
@@ -4516,6 +4597,18 @@ async def crm_save_lead(request: Request):
     if not row: raise HTTPException(status_code=404, detail="Lead not found")
     return {"lead": _crm_row(row)}
 
+def _delete_leads(user_id, ids):
+    """Delete the user's own leads, together with any power-dialer queue rows pointing at them."""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM public.crm_leads WHERE user_id=%s AND id=ANY(%s)", (user_id, ids))
+            own = [r["id"] for r in cur.fetchall()]
+            if not own:
+                return 0
+            cur.execute("DELETE FROM public.power_queue_items WHERE lead_id=ANY(%s)", (own,))
+            cur.execute("DELETE FROM public.crm_leads WHERE user_id=%s AND id=ANY(%s)", (user_id, own))
+            return len(own)
+
 @app.delete("/api/crm/leads/{lead_id}")
 async def crm_delete_lead(lead_id: uuid.UUID, request: Request):
     user = get_current_user(request)
@@ -4523,19 +4616,27 @@ async def crm_delete_lead(lead_id: uuid.UUID, request: Request):
         raise HTTPException(status_code=401, detail="Login required")
     if not has_power(user):
         raise HTTPException(status_code=403, detail="CRM is an optional add-on for your plan")
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            # Preserve queue history: a queued lead cannot be deleted until its
-            # queue references have been cleared through the queue workflow.
-            cur.execute("""SELECT 1 FROM public.power_queue_items i
-                JOIN public.crm_leads l ON l.id=i.lead_id
-                WHERE l.id=%s AND l.user_id=%s LIMIT 1""", (lead_id, user["id"]))
-            if cur.fetchone():
-                raise HTTPException(status_code=409, detail="Lead belongs to a power dialer queue; cannot delete while queue history references it")
-            cur.execute("DELETE FROM public.crm_leads WHERE id=%s AND user_id=%s RETURNING id", (lead_id, user["id"]))
-            if not cur.fetchone():
-                raise HTTPException(status_code=404, detail="Lead not found")
+    if not _delete_leads(user["id"], [lead_id]):
+        raise HTTPException(status_code=404, detail="Lead not found")
     return {"deleted": True}
+
+@app.post("/api/crm/leads/bulk-delete")
+async def crm_bulk_delete(request: Request):
+    """Delete many leads at once (CRM and Power Dialer multi-select)."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required")
+    if not has_power(user):
+        raise HTTPException(status_code=403, detail="CRM is an optional add-on for your plan")
+    data = await request.json()
+    raw = data.get("ids")
+    if not isinstance(raw, list) or not raw or len(raw) > 2000:
+        raise HTTPException(status_code=422, detail="Select 1 to 2000 leads")
+    try:
+        ids = list({uuid.UUID(str(x)) for x in raw})
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid lead IDs")
+    return {"deleted": _delete_leads(user["id"], ids)}
 
 @app.post("/api/crm/import")
 async def crm_import(request: Request, file: UploadFile = File(...)):

@@ -134,6 +134,7 @@
     <script src="/static/js/session-guard.js"></script>
     <script src="/static/js/mobile-nav.js"></script>
     <script src="/static/js/buttons-fx.js?v=1"></script>
+    <script src="/static/js/confirm-modal.js?v=1"></script>
     {% if has_sms(user) %}<script>
     (function(){async function smsBadge(){try{const r=await fetch('/api/sms/unread');if(!r.ok)return;const d=await r.json();
       document.querySelectorAll('[data-sms-badge]').forEach(function(b){b.textContent=d.unread>99?'99+':String(d.unread);b.hidden=!d.unread;});}catch(_){}}
