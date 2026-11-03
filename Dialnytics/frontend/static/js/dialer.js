@@ -931,10 +931,48 @@ function hangup() {
         document.getElementById('composeInput').value = '';
         hidePanels();
         document.getElementById('composeView').hidden = false;
+        setTimeout(() => { const c = document.getElementById('composeInput'); if (c) c.focus(); }, 50);
     }
     function composePress(digit) {
-        document.getElementById('composeInput').value += digit;
+        const el = document.getElementById('composeInput');
+        el.value += digit;
+        el.focus();
     }
+    // The number box is a normal input: type, or paste with Ctrl+V / the paste button.
+    function composeClean(raw) {
+        return String(raw || '').replace(/[^\d+*#]/g, '').replace(/(?!^)\+/g, '');
+    }
+    async function composePaste() {
+        const el = document.getElementById('composeInput');
+        try {
+            const text = await navigator.clipboard.readText();
+            if (text) el.value = composeClean(text);
+            el.focus();
+        } catch (err) {
+            el.focus();
+            setStatus('Press Ctrl+V in the number box to paste', 'var(--danger)');
+        }
+    }
+    (function bindComposeInput() {
+        const el = document.getElementById('composeInput');
+        if (!el) return;
+        el.addEventListener('paste', (e) => {
+            const text = (e.clipboardData || window.clipboardData || { getData: () => '' }).getData('text');
+            if (text == null) return;
+            e.preventDefault();
+            const clean = composeClean(text);
+            const s = el.selectionStart == null ? el.value.length : el.selectionStart;
+            const t = el.selectionEnd == null ? el.value.length : el.selectionEnd;
+            el.value = composeClean(el.value.slice(0, s) + clean + el.value.slice(t));
+        });
+        el.addEventListener('input', () => {
+            const clean = composeClean(el.value);
+            if (clean !== el.value) el.value = clean;
+        });
+        el.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); confirmCompose(); }
+        });
+    })();
     function composeBackspace() {
         const el = document.getElementById('composeInput');
         el.value = el.value.slice(0, -1);

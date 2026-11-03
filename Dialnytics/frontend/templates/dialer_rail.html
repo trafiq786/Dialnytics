@@ -263,7 +263,8 @@
         <div id="composeView" hidden>
             <button type="button" class="back-link" onclick="backToCall()">&#8592; Back to call</button>
             <h3 class="compose-title" id="composeTitle">New call</h3>
-            <input id="composeInput" class="number-display" placeholder="Enter a number" readonly>
+            <input id="composeInput" class="number-display" type="tel" inputmode="tel" autocomplete="off" placeholder="Enter or paste a number">
+            <button type="button" class="xfer-number" id="composePasteBtn" onclick="composePaste()" style="margin-bottom:14px">Paste number from clipboard</button>
             <div class="dial-pad">
                 <button class="dial-btn" type="button" onclick="composePress('1')">1</button>
                 <button class="dial-btn" type="button" onclick="composePress('2')">2</button>
