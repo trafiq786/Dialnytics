@@ -3,41 +3,84 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="theme-color" content="#0c1020">
+    <meta name="theme-color" content="#050a18">
     <title>Sign in — Dialnytics</title>
     <link rel="icon" href="{{ brand_icon }}">
-    <link rel="stylesheet" href="/static/css/style.css">
-    <link rel="stylesheet" href="/static/css/buttons.css?v=1">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/login.css?v=1">
     <script src="/static/js/csrf.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
-<body>
-    <div class="auth-wrapper">
-        <div class="auth-card">
-            <div class="auth-logo">
-                <img class="auth-brand-logo" src="{{ brand_logo_dark }}" alt="Dialnytics">
-                <p>Smart Cloud Dialer</p>
+<body class="lg">
+<div class="lg-page">
+    <div class="lg-bg" aria-hidden="true">
+        <div class="lg-far"><div class="lg-blob a"></div><div class="lg-blob b"></div><div class="lg-blob c"></div></div>
+        <div class="lg-grid"></div>
+        <div class="lg-spot"></div>
+    </div>
+
+    <header class="lg-top">
+        <img class="lg-logo" src="/static/img/dialnytics-logo-light.png" alt="Dialnytics">
+        <a class="lg-toplink" href="{{ tour_url }}" target="_blank" rel="noopener">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polygon points="10,8 16,12 10,16" fill="currentColor"/></svg>
+            Product tour
+        </a>
+    </header>
+
+    <main class="lg-main">
+        <section class="lg-hero">
+            <div class="lg-eyebrow"><i></i>SMART CLOUD DIALER</div>
+            <h1>Every call.<br>Every lead.<br><span>One dialer.</span></h1>
+            <p>Call from your browser, follow up with your leads and keep every recording in one place.</p>
+            <div class="lg-wave" id="lgWave" aria-hidden="true"></div>
+            <div class="lg-chips">
+                <span class="lg-chip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.8.7a2 2 0 0 1 1.7 2z"/></svg>Power Dialer</span>
+                <span class="lg-chip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></svg>CRM and follow-ups</span>
+                <span class="lg-chip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg>Call recording</span>
+                <span class="lg-chip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>SMS</span>
+                <span class="lg-chip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>Live reports</span>
+            </div>
+        </section>
+
+        <section class="lg-side">
+            <div class="lg-frame">
+                <div class="lg-card">
+                    <h2>Welcome back</h2>
+                    <p class="sub">Sign in to your dialer.</p>
+
+                    {% if error %}
+                    <div class="lg-err" role="alert">{{ error }}</div>
+                    {% endif %}
+
+                    <form method="POST" action="/login" id="lgForm">
+                        <div class="lg-field">
+                            <label for="lgEmail">Email</label>
+                            <input class="lg-input" id="lgEmail" type="email" name="email" required placeholder="you@example.com" autocomplete="email" autofocus>
+                        </div>
+                        <div class="lg-field last">
+                            <label for="lgPass">Password</label>
+                            <div class="lg-pw">
+                                <input class="lg-input" id="lgPass" type="password" name="password" required placeholder="••••••••" autocomplete="current-password">
+                                <button type="button" class="lg-eye" id="lgEye" aria-label="Show or hide password">Show</button>
+                            </div>
+                        </div>
+                        <button type="submit" class="lg-btn" id="lgSubmit">Sign in</button>
+                    </form>
+                </div>
             </div>
 
-            <h2>Sign in to your dialer</h2>
-
-            {% if error %}
-            <div class="error-msg">{{ error }}</div>
-            {% endif %}
-
-            <form method="POST" action="/login">
-                <div class="form-group">
-                    <label>Email</label>
-                    <input type="email" name="email" required placeholder="you@example.com" autocomplete="email">
+            <div class="lg-tour">
+                <div>
+                    <b>New here? See it in action</b>
+                    <small>2-minute tour of the dialer, recordings, CRM and Power Dialer.</small>
                 </div>
-                <div class="form-group">
-                    <label>Password</label>
-                    <input type="password" name="password" required placeholder="••••••••" autocomplete="current-password">
-                </div>
-                <button type="submit" class="btn btn-primary">Sign in</button>
-            </form>
-        </div>
-    </div>
-<script src="/static/js/buttons-fx.js?v=1"></script>
+                <a class="lg-tourbtn" href="{{ tour_url }}" target="_blank" rel="noopener">
+                    <span><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="6,3 20,12 6,21"/></svg></span>Take the tour
+                </a>
+            </div>
+        </section>
+    </main>
+</div>
+<script src="/static/js/login.js?v=1"></script>
 </body>
 </html>

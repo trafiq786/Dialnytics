@@ -55,6 +55,8 @@ templates = Jinja2Templates(directory=os.path.join(FRONTEND_DIR, "templates"))
 templates.env.globals["brand_logo"] = "/static/img/dialnytics-logo.png"            # for light backgrounds
 templates.env.globals["brand_logo_dark"] = "/static/img/dialnytics-logo-dark.png"  # for dark backgrounds
 templates.env.globals["brand_icon"] = "/static/img/dialnytics-favlogo.png"
+# Product tour on the marketing website, linked from the sign-in page (override with PRODUCT_TOUR_URL).
+templates.env.globals["tour_url"] = os.getenv("PRODUCT_TOUR_URL", "https://dialnytics.uk/product/tour/")
 
 # Security headers (CSP etc.) and CSRF protection for every form and fetch.
 app.add_middleware(
