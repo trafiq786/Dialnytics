@@ -43,9 +43,9 @@ body.glass-ui :is(.dn-drawer,.profile-menu,.dn-detail,.power-lead-dialog,.tour-b
   box-shadow:inset 0 1px 0 var(--g-hi),var(--g-shadow) !important;
   color:var(--text-primary) !important;
 }
-body.glass-ui .shell-top{border-radius:0 0 22px 22px;border-top:0 !important}
-body.glass-ui .shell-nav{border-radius:0 22px 22px 0;border-left:0 !important}
-body.glass-ui .dial-rail{border-radius:22px 0 0 22px;border-right:0 !important}
+body.glass-ui .shell-top{border-radius:0;border-top:0 !important;border-left:0 !important;border-right:0 !important;position:relative;z-index:60}
+body.glass-ui .shell-nav{border-radius:0 0 22px 0;border-left:0 !important;border-top:0 !important}
+body.glass-ui .dial-rail{border-radius:0 0 0 22px;border-right:0 !important;border-top:0 !important}
 body.glass-ui .shell-main :is(.panel,.stat-card,.center-card,.card,.chart-card,.user-panel,.users-hero,.revenue-card,.repayment-panel,.row-card,.prefs-card,.member-card,.client-card,.cost-panel,.users-list-card){border-radius:20px;transition:transform .3s cubic-bezier(.2,.8,.2,1),box-shadow .3s}
 body.glass-ui .shell-main :is(.stat-card,.card,.panel,.member-card,.client-card):hover{transform:translateY(-3px)}
 body.glass-ui :is(.dn-drawer,.profile-menu,.dn-detail,.power-lead-dialog,.tour-box){border-radius:22px}
@@ -123,7 +123,7 @@ body.glass-ui.light-theme :is(.table,.modern-table,.users-admin-table) td{backgr
 body.glass-ui.light-theme .dn-overlay{background:rgba(120,130,200,.25) !important}
 
 /* page entrance */
-body.glass-ui .shell-main>*{animation:gRise .55s cubic-bezier(.2,.8,.2,1) both}
+body.glass-ui .shell-main>*{animation:gRise .55s cubic-bezier(.2,.8,.2,1) backwards}
 body.glass-ui .shell-main>*:nth-child(2){animation-delay:.04s}
 body.glass-ui .shell-main>*:nth-child(3){animation-delay:.08s}
 body.glass-ui .shell-main>*:nth-child(4){animation-delay:.12s}
@@ -150,3 +150,64 @@ body.glass-ui .shell-main>*:nth-child(4){animation-delay:.12s}
 /* inputs that live inside another glass control stay flat */
 body.glass-ui .shell-search input,body.glass-ui .shell-main .shell-search input,body.glass-ui .pn-field input{background:transparent !important;border:0 !important;box-shadow:none !important}
 body.glass-ui .shell-search input:focus{box-shadow:none !important}
+
+/* ===== pages with their own card classes (cm-*, user-drawer, inv-box...) ===== */
+body.glass-ui{--surface:rgba(255,255,255,.07);--surface-secondary:rgba(255,255,255,.10)}
+body.glass-ui.light-theme{--surface:rgba(255,255,255,.62);--surface-secondary:rgba(255,255,255,.75)}
+body.glass-ui :is(.cm-card,.cm-drawer,.user-drawer,.inv-box,.mr-card){
+  background-color:var(--g-fill) !important;
+  background-image:linear-gradient(135deg,rgba(255,255,255,.10),rgba(255,255,255,0) 45%) !important;
+  -webkit-backdrop-filter:blur(var(--g-blur)) saturate(170%);backdrop-filter:blur(var(--g-blur)) saturate(170%);
+  border:1px solid var(--g-line) !important;box-shadow:inset 0 1px 0 var(--g-hi),var(--g-shadow) !important;color:var(--text-primary) !important}
+body.glass-ui :is(.cm-card,.inv-box,.mr-card){border-radius:20px}
+body.glass-ui :is(.cm-metric){background:var(--g-fill) !important;border:1px solid var(--g-line);box-shadow:inset 0 1px 0 var(--g-hi);border-radius:16px;color:var(--text-primary)}
+body.glass-ui .cm-hero{background:linear-gradient(105deg,rgba(40,48,120,.65),rgba(110,70,220,.5),rgba(30,90,170,.55)) !important;border:1px solid var(--g-line);box-shadow:inset 0 1px 0 var(--g-hi),var(--g-shadow);-webkit-backdrop-filter:blur(var(--g-blur));backdrop-filter:blur(var(--g-blur));color:#fff !important}
+body.glass-ui .cm-overlay{background:rgba(5,8,24,.45) !important;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+body.glass-ui .cm-table{border-collapse:separate;border-spacing:0 6px}
+body.glass-ui .cm-table th{background:transparent !important;color:var(--text-muted) !important;border:0 !important}
+body.glass-ui .cm-table td{background:var(--g-fill) !important;border-top:1px solid var(--g-line) !important;border-bottom:1px solid rgba(255,255,255,.04) !important;color:var(--text-primary) !important}
+body.glass-ui .cm-table td:first-child{border-radius:14px 0 0 14px;border-left:1px solid var(--g-line) !important}
+body.glass-ui .cm-table td:last-child{border-radius:0 14px 14px 0;border-right:1px solid var(--g-line) !important}
+body.glass-ui .cm-table tr:hover td{background:var(--g-fill2) !important}
+body.glass-ui :is(.cm-table td strong,.cm-card strong,.cm-metric strong,.cm-drawer strong,.cm-drawer h2,.cm-drawer h3){color:var(--text-primary) !important}
+body.glass-ui :is(.cm-muted,.cm-table small,.cm-metric small,.cm-field label,.cm-table th){color:var(--text-secondary) !important}
+body.glass-ui .cm-table td a:not(.cm-btn){color:var(--accent-hover) !important}
+body.glass-ui .cm-btn:not(.cm-btn-alt){background:linear-gradient(135deg,#7c83ff,#38b6ff) !important;color:#fff !important;border:1px solid rgba(255,255,255,.45) !important;box-shadow:inset 0 1px 0 rgba(255,255,255,.6),0 8px 22px rgba(91,110,255,.4) !important}
+body.glass-ui .cm-btn-alt{background:var(--g-fill) !important;color:var(--text-primary) !important}
+body.glass-ui .cm-field :is(input,select,textarea){background:var(--field-bg) !important;color:var(--text-primary) !important;border:1px solid var(--g-line) !important;border-radius:14px}
+body.glass-ui .cm-pill{background:rgba(124,131,255,.2);color:var(--accent-hover);border:1px solid var(--g-line)}
+body.glass-ui.light-theme .cm-pill{color:#3a40c8}
+body.glass-ui.light-theme .cm-hero{background:linear-gradient(105deg,rgba(90,96,240,.85),rgba(150,100,240,.75),rgba(60,150,230,.8)) !important}
+
+/* admin Users page (hard-coded dark colours in users.html) */
+body.glass-ui .premium-users{background-color:var(--g-fill) !important;border:1px solid var(--g-line) !important;box-shadow:inset 0 1px 0 var(--g-hi),var(--g-shadow);-webkit-backdrop-filter:blur(var(--g-blur)) saturate(170%);backdrop-filter:blur(var(--g-blur)) saturate(170%);color:var(--text-primary) !important}
+body.glass-ui .premium-users th{background:transparent !important;color:var(--text-muted) !important}
+body.glass-ui .premium-users td{color:var(--text-primary)}
+body.glass-ui :is(.premium-search,.um-chip,.um-mini,.drawer-action,.drawer-tab,.um-check,.premium-count,.drawer-info,.drawer-zones){background:var(--g-fill) !important;border:1px solid var(--g-line) !important;color:var(--text-primary) !important}
+body.glass-ui .um-foot{background:var(--g-fill) !important;border-top:1px solid var(--g-line) !important}
+body.glass-ui .user-drawer input{background:var(--field-bg) !important;color:var(--text-primary) !important;border:1px solid var(--g-line) !important}
+
+/* ===== round 2 fixes ===== */
+/* header dropdowns (profile menu etc.) must sit above page cards and be readable */
+body.glass-ui .shell-top :is(.profile-menu,.help-menu,[class*="menu"]):not(.shell-tools){z-index:70}
+body.glass-ui .profile-menu{
+  background-color:rgba(18,24,58,.94) !important;background-image:none !important;
+  -webkit-backdrop-filter:blur(30px) saturate(180%);backdrop-filter:blur(30px) saturate(180%)}
+body.glass-ui.light-theme .profile-menu{background-color:rgba(255,255,255,.96) !important}
+body.glass-ui .shell-nav{position:relative;z-index:5}
+/* users page: explicit text colours so nothing goes dark-on-dark / light-on-light */
+body.glass-ui .premium-users-head :is(h2,h1){color:var(--text-primary) !important}
+body.glass-ui .premium-users-head p,body.glass-ui .premium-table td small{color:var(--text-secondary) !important}
+body.glass-ui .premium-table td,body.glass-ui .premium-table td strong{color:var(--text-primary) !important}
+body.glass-ui .premium-table td{background:var(--g-fill) !important;border-bottom:1px solid var(--g-line) !important}
+body.glass-ui .premium-table{border-collapse:separate;border-spacing:0 6px}
+body.glass-ui .premium-table th{background:transparent !important;color:var(--text-muted) !important;border:0 !important}
+body.glass-ui .premium-search input{background:transparent !important;color:var(--text-primary) !important;border:0 !important;box-shadow:none !important}
+body.glass-ui :is(.premium-edit,.drawer-action){background:var(--g-fill) !important;color:var(--text-primary) !important;border:1px solid var(--g-line) !important}
+body.glass-ui .drawer-delete{background:transparent !important}
+body.glass-ui .user-drawer-backdrop{background:rgba(5,8,24,.45) !important;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+body.glass-ui :is(.drawer-header h2,.drawer-header p,.drawer-pane label,.drawer-info,.drawer-setting,.drawer-zones,.zone-check){color:var(--text-primary) !important}
+body.glass-ui :is(.drawer-setting small,.drawer-zones small,.drawer-header p){color:var(--text-secondary) !important}
+body.glass-ui .plan-pill{background:rgba(124,131,255,.2) !important;color:var(--accent-hover) !important;border:1px solid var(--g-line)}
+body.glass-ui.light-theme .plan-pill{color:#3a40c8 !important}
+body.glass-ui .drawer-tab.active{background:linear-gradient(135deg,#7c83ff,#38b6ff) !important;color:#fff !important}
