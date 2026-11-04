@@ -215,3 +215,13 @@ body.glass-ui .drawer-tab.active{background:linear-gradient(135deg,#7c83ff,#38b6
 /* shine sweep must never escape its button (fixes stray light wedge next to cards) */
 body.glass-ui :is(.btn,.btn-primary,.btn-blue,.btn-secondary,.cm-btn,.cm-btn-alt){position:relative;overflow:hidden;isolation:isolate}
 body.glass-ui :is(.btn,.btn-primary,.btn-blue,.btn-secondary,.cm-btn,.cm-btn-alt)::after{z-index:0}
+
+/* flat inputs inside glass controls: high specificity so the generic glass-input rule never draws a second pill */
+body.glass-ui .shell-top label.shell-search input[type],
+body.glass-ui label.shell-search input[type="search"],
+body.glass-ui .dial-rail .pn-field input[type],
+body.glass-ui .premium-search input[type],
+body.glass-ui .premium-search input:not([type=checkbox]):not([type=radio]):not([type=range]){
+  background:transparent !important;border:0 !important;box-shadow:none !important;border-radius:0 !important;outline:0 !important}
+body.glass-ui .shell-top label.shell-search input[type]:focus,
+body.glass-ui .premium-search input[type]:focus{box-shadow:none !important;border:0 !important}
