@@ -1,0 +1,152 @@
+/* Dialnytics Liquid Glass theme (v1). Scoped to body.glass-ui.
+   To switch it off completely: remove "glass-ui" from <body> in base.html (or delete the glass.css link). */
+body.glass-ui{
+  --g-fill:rgba(255,255,255,.07);--g-fill2:rgba(255,255,255,.12);
+  --g-line:rgba(255,255,255,.15);--g-hi:rgba(255,255,255,.32);
+  --g-blur:22px;
+  --g-b1:#5b5bff;--g-b2:#18c6ff;--g-b3:#ff4fb0;
+  --g-shadow:0 18px 44px rgba(2,4,20,.40);
+  --bg-card:rgba(255,255,255,.07);--bg-hover:rgba(255,255,255,.13);
+  --shell-panel:rgba(255,255,255,.06);--field-bg:rgba(255,255,255,.08);
+  --border:rgba(255,255,255,.15);--text-primary:#f4f6ff;--text-secondary:#c0c8e6;--text-muted:#9aa5cc;
+  --accent:#7c83ff;--accent-hover:#aab0ff;
+  background:radial-gradient(1200px 800px at 15% 0%,#111a46,#070a1a) fixed !important;
+}
+body.glass-ui.light-theme{
+  --g-fill:rgba(255,255,255,.55);--g-fill2:rgba(255,255,255,.8);
+  --g-line:rgba(255,255,255,.95);--g-hi:#fff;
+  --g-b1:#9aa0ff;--g-b2:#8be3ff;--g-b3:#ffb3de;
+  --g-shadow:0 16px 40px rgba(70,80,160,.16);
+  --bg-card:rgba(255,255,255,.62);--bg-hover:rgba(255,255,255,.85);
+  --shell-panel:rgba(255,255,255,.5);--field-bg:rgba(255,255,255,.75);
+  --border:rgba(120,130,200,.25);--text-primary:#141a3a;--text-secondary:#444d78;--text-muted:#6b749c;
+  --accent:#5a60f0;--accent-hover:#4249d8;
+  background:radial-gradient(1200px 800px at 15% 0%,#f6f0ff,#e6ebff) fixed !important;
+}
+/* animated colour blobs behind everything */
+body.glass-ui::before,body.glass-ui::after{content:"";position:fixed;z-index:0;border-radius:50%;filter:blur(80px);pointer-events:none;opacity:.6;will-change:transform}
+body.glass-ui::before{width:520px;height:520px;left:-140px;top:-120px;background:var(--g-b1);animation:gDriftA 20s ease-in-out infinite alternate}
+body.glass-ui::after{width:480px;height:480px;right:-100px;bottom:-160px;background:var(--g-b3);opacity:.45;animation:gDriftB 24s ease-in-out infinite alternate}
+@keyframes gDriftA{to{transform:translate(120px,80px) scale(1.15)}}
+@keyframes gDriftB{to{transform:translate(-140px,-60px) scale(1.2)}}
+body.glass-ui .shell{position:relative;z-index:1;background:transparent !important}
+body.glass-ui .shell-main,body.glass-ui .shell-body{background:transparent !important}
+
+/* glass surfaces */
+body.glass-ui :is(.shell-top,.shell-nav,.dial-rail,.mob-tabbar),
+body.glass-ui .shell-main :is(.panel,.stat-card,.center-card,.card,.chart-card,.user-panel,.users-hero,.revenue-card,.repayment-panel,.script-list-panel,.script-editor-panel,.row-card,.tip,.caught-up,.prefs-card,.member-card,.client-card,.team-stat,.cost-panel,.users-list-card,.logs-list,.sms-side,.sms-main),
+body.glass-ui :is(.dn-drawer,.profile-menu,.dn-detail,.power-lead-dialog,.tour-box){
+  background-color:var(--g-fill) !important;
+  background-image:radial-gradient(260px circle at var(--gx,-200px) var(--gy,-200px),rgba(255,255,255,.16),transparent 60%),linear-gradient(135deg,rgba(255,255,255,.10),rgba(255,255,255,0) 45%) !important;
+  -webkit-backdrop-filter:blur(var(--g-blur)) saturate(170%);backdrop-filter:blur(var(--g-blur)) saturate(170%);
+  border:1px solid var(--g-line) !important;
+  box-shadow:inset 0 1px 0 var(--g-hi),var(--g-shadow) !important;
+  color:var(--text-primary) !important;
+}
+body.glass-ui .shell-top{border-radius:0 0 22px 22px;border-top:0 !important}
+body.glass-ui .shell-nav{border-radius:0 22px 22px 0;border-left:0 !important}
+body.glass-ui .dial-rail{border-radius:22px 0 0 22px;border-right:0 !important}
+body.glass-ui .shell-main :is(.panel,.stat-card,.center-card,.card,.chart-card,.user-panel,.users-hero,.revenue-card,.repayment-panel,.row-card,.prefs-card,.member-card,.client-card,.cost-panel,.users-list-card){border-radius:20px;transition:transform .3s cubic-bezier(.2,.8,.2,1),box-shadow .3s}
+body.glass-ui .shell-main :is(.stat-card,.card,.panel,.member-card,.client-card):hover{transform:translateY(-3px)}
+body.glass-ui :is(.dn-drawer,.profile-menu,.dn-detail,.power-lead-dialog,.tour-box){border-radius:22px}
+body.glass-ui .dn-overlay{background:rgba(5,8,24,.45) !important;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+body.glass-ui .dn-drawer{border-radius:22px 0 0 22px}
+
+/* header controls, search, icons */
+body.glass-ui :is(.shell-search,.nav-collapse,.refer-btn,.tool-dot,.header-icon){
+  background:var(--g-fill) !important;border:1px solid var(--g-line) !important;box-shadow:inset 0 1px 0 var(--g-hi) !important;border-radius:999px !important}
+body.glass-ui .shell-search:focus-within{box-shadow:inset 0 1px 0 var(--g-hi),0 0 0 3px rgba(124,131,255,.35) !important}
+
+/* navigation */
+body.glass-ui .shell-nav a,body.glass-ui .nav-settings{border-radius:14px;border:1px solid transparent}
+body.glass-ui .shell-nav a:hover,body.glass-ui .nav-settings:hover{background:var(--g-fill) !important;color:var(--text-primary) !important;box-shadow:none}
+body.glass-ui .shell-nav a.active{
+  background:linear-gradient(135deg,rgba(124,131,255,.45),rgba(56,213,255,.22)) !important;color:var(--text-primary) !important;
+  border-color:var(--g-line);box-shadow:inset 0 1px 0 var(--g-hi),0 8px 24px rgba(91,91,255,.30) !important;animation:gNavGlow 3.2s ease-in-out infinite}
+@keyframes gNavGlow{50%{box-shadow:inset 0 1px 0 var(--g-hi),0 8px 32px rgba(56,213,255,.50)}}
+
+/* buttons (keeps buttons.css lift/press, adds glass + shine) */
+body.glass-ui :is(.btn,.btn-secondary,.cm-btn-alt,.dn-btn-ghost,.seg button,.chips span,.extra-btn,.premium-edit){
+  background:var(--g-fill) !important;color:var(--text-primary) !important;border:1px solid var(--g-line) !important;
+  box-shadow:inset 0 1px 0 var(--g-hi) !important;border-radius:999px;position:relative;overflow:hidden}
+body.glass-ui :is(.btn-primary,.cm-btn,.btn-blue,.seg button.on,.chips span.on){
+  background:linear-gradient(135deg,#7c83ff,#38b6ff) !important;color:#fff !important;border-color:rgba(255,255,255,.45) !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.6),0 10px 26px rgba(91,110,255,.45) !important}
+body.glass-ui :is(.dn-btn-danger,.um-del,.btn-danger,.hangup-big){background:linear-gradient(135deg,#ff6b82,#ff4f9a) !important;color:#fff !important;border-color:rgba(255,255,255,.4) !important}
+body.glass-ui :is(.btn,.btn-primary,.btn-blue,.cm-btn,.cm-btn-alt,.btn-secondary)::after{content:"";position:absolute;top:0;left:-70%;width:45%;height:100%;pointer-events:none;
+  background:linear-gradient(100deg,transparent,rgba(255,255,255,.5),transparent);transform:skewX(-20deg);transition:left .6s ease}
+body.glass-ui :is(.btn,.btn-primary,.btn-blue,.cm-btn,.cm-btn-alt,.btn-secondary):hover::after{left:130%}
+
+/* dial pad + call button */
+body.glass-ui .dial-rail :is(.your-number,.dial-btn,.dial-paste-btn,.pn-field){
+  background:var(--g-fill) !important;border:1px solid var(--g-line) !important;box-shadow:inset 0 1px 0 var(--g-hi) !important}
+body.glass-ui .dial-rail .dial-btn{transition:transform .15s,box-shadow .2s,background .2s}
+body.glass-ui .dial-rail .dial-btn:hover{background:var(--g-fill2) !important;box-shadow:inset 0 1px 0 var(--g-hi),0 0 18px rgba(124,131,255,.5) !important}
+body.glass-ui .dial-rail :is(.call-btn,#callBtn){animation:gCallPulse 2.4s ease-in-out infinite}
+@keyframes gCallPulse{50%{box-shadow:0 0 0 0 rgba(34,197,94,0),0 10px 40px rgba(40,210,140,.7)}}
+
+/* form fields */
+body.glass-ui :is(input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea),
+body.glass-ui .shell-main :is(input,select,textarea){
+  background:var(--field-bg) !important;border:1px solid var(--g-line) !important;border-radius:14px;color:var(--text-primary) !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.06) !important}
+body.glass-ui :is(input,select,textarea):focus{outline:none;border-color:rgba(170,176,255,.8) !important;box-shadow:0 0 0 3px rgba(124,131,255,.30) !important}
+
+/* tables */
+body.glass-ui :is(.table,.modern-table,.users-admin-table){border-collapse:separate;border-spacing:0 6px}
+body.glass-ui :is(.table,.modern-table,.users-admin-table) th{background:transparent !important;color:var(--text-muted) !important;border:0 !important}
+body.glass-ui :is(.table,.modern-table,.users-admin-table) td{background:var(--g-fill) !important;border-top:1px solid var(--g-line) !important;border-bottom:1px solid rgba(255,255,255,.04) !important;color:var(--text-primary) !important}
+body.glass-ui :is(.table,.modern-table,.users-admin-table) td:first-child{border-radius:14px 0 0 14px;border-left:1px solid var(--g-line) !important}
+body.glass-ui :is(.table,.modern-table,.users-admin-table) td:last-child{border-radius:0 14px 14px 0;border-right:1px solid var(--g-line) !important}
+body.glass-ui :is(.table,.modern-table,.users-admin-table) tr:hover td{background:var(--g-fill2) !important}
+
+/* badges / pills / rows */
+body.glass-ui :is(.badge,.status-pill,.dn-pill){border:1px solid var(--g-line)}
+body.glass-ui :is(.log-row,.sms-row,.script-item,.mini){border-radius:14px}
+body.glass-ui .log-row:hover,body.glass-ui .sms-row:hover{background:var(--g-fill2) !important}
+
+/* progress bars */
+body.glass-ui :is(.bar,.track,.meter){background:rgba(255,255,255,.12) !important;border-radius:99px;overflow:hidden}
+body.glass-ui :is(.bar,.track,.meter)>*{border-radius:99px}
+
+/* incoming-call card + toast */
+body.glass-ui :is(.dn-callcard,.dn-toast,.dn-alertbar){
+  background:rgba(20,26,60,.55) !important;-webkit-backdrop-filter:blur(26px) saturate(180%);backdrop-filter:blur(26px) saturate(180%);
+  border:1px solid var(--g-line) !important;box-shadow:inset 0 1px 0 var(--g-hi),0 24px 60px rgba(2,4,20,.5) !important;color:var(--text-primary) !important}
+body.glass-ui.light-theme :is(.dn-callcard,.dn-toast,.dn-alertbar){background:rgba(255,255,255,.75) !important;color:#141a3a !important}
+
+/* light theme text on glass */
+body.glass-ui.light-theme .shell-main :is(h1,h2,h3,h4,strong,b,.value,.card-title){color:var(--text-primary)}
+body.glass-ui.light-theme :is(.shell-top,.shell-nav,.dial-rail){color:var(--text-primary) !important}
+body.glass-ui.light-theme .shell-nav a{color:var(--text-primary) !important}
+body.glass-ui.light-theme :is(.table,.modern-table,.users-admin-table) td{background:rgba(255,255,255,.6) !important;border-color:rgba(255,255,255,.9) !important;color:var(--text-primary) !important}
+body.glass-ui.light-theme .dn-overlay{background:rgba(120,130,200,.25) !important}
+
+/* page entrance */
+body.glass-ui .shell-main>*{animation:gRise .55s cubic-bezier(.2,.8,.2,1) both}
+body.glass-ui .shell-main>*:nth-child(2){animation-delay:.04s}
+body.glass-ui .shell-main>*:nth-child(3){animation-delay:.08s}
+body.glass-ui .shell-main>*:nth-child(4){animation-delay:.12s}
+@keyframes gRise{from{opacity:0;transform:translateY(12px)}}
+
+/* performance + accessibility fallbacks */
+@media (max-width:900px){
+  body.glass-ui{--g-blur:14px}
+  body.glass-ui::before,body.glass-ui::after{opacity:.35;filter:blur(60px)}
+  body.glass-ui :is(.shell-top,.shell-nav,.dial-rail){border-radius:0}
+}
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  body.glass-ui{--g-fill:rgba(26,34,70,.92)}
+  body.glass-ui.light-theme{--g-fill:rgba(255,255,255,.95)}
+}
+@media (prefers-reduced-motion:reduce){
+  body.glass-ui::before,body.glass-ui::after,body.glass-ui .shell-main>*,body.glass-ui .shell-nav a.active,body.glass-ui .dial-rail :is(.call-btn,#callBtn){animation:none !important}
+}
+@media (prefers-reduced-transparency:reduce){
+  body.glass-ui{--g-blur:0px;--g-fill:rgba(26,34,70,.96)}
+  body.glass-ui.light-theme{--g-fill:rgba(255,255,255,.97)}
+}
+
+/* inputs that live inside another glass control stay flat */
+body.glass-ui .shell-search input,body.glass-ui .shell-main .shell-search input,body.glass-ui .pn-field input{background:transparent !important;border:0 !important;box-shadow:none !important}
+body.glass-ui .shell-search input:focus{box-shadow:none !important}

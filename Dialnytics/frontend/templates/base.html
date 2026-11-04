@@ -9,12 +9,13 @@
     <link rel="icon" href="{{ brand_icon }}">
     <link rel="stylesheet" href="/static/css/style.css">
     <link rel="stylesheet" href="/static/css/buttons.css?v=1">
+    <link rel="stylesheet" href="/static/css/glass.css?v=1">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="/static/js/csrf.js"></script>
     <script src="/static/js/page-nav.js"></script>
 </head>
 {% set is_admin_view = user.role == 'admin' %}{% set no_dialer = is_reseller(user) or is_admin_view %}
-<body class="{% if is_reseller(user) %}no-rail is-reseller{% elif is_admin_view %}no-rail is-admin{% endif %}">
+<body class="glass-ui {% if is_reseller(user) %}no-rail is-reseller{% elif is_admin_view %}no-rail is-admin{% endif %}">
     <script>try{if(localStorage.getItem('dialnytics-theme')==='light')document.body.classList.add('light-theme')}catch(e){}</script>
     <div class="shell">
         <header class="shell-top">
@@ -136,6 +137,7 @@
     <script src="/static/js/mobile-nav.js"></script>
     <script src="/static/js/buttons-fx.js?v=1"></script>
     <script src="/static/js/confirm-modal.js?v=1"></script>
+    <script src="/static/js/glass-fx.js?v=1"></script>
     {% if has_sms(user) %}<script>
     (function(){async function smsBadge(){try{const r=await fetch('/api/sms/unread');if(!r.ok)return;const d=await r.json();
       document.querySelectorAll('[data-sms-badge]').forEach(function(b){b.textContent=d.unread>99?'99+':String(d.unread);b.hidden=!d.unread;});}catch(_){}}
