@@ -232,3 +232,6 @@ body.glass-ui select{color-scheme:light}
 body.glass-ui select option,body.glass-ui select optgroup,body.glass-ui datalist option{background:#ffffff !important;color:#141a3a !important}
 body.glass-ui select option:checked,body.glass-ui select option:hover,body.glass-ui select option:focus{background:#c7d2fe !important;color:#141a3a !important}
 body.glass-ui select option:disabled{color:#8a94b8 !important}
+
+/* the page stylesheet colours options with translucent --bg-card (white list + light text). Override at higher specificity. */
+body.glass-ui .shell-main select option,body.glass-ui .shell-main select optgroup,body.glass-ui .profile-menu select option,body.glass-ui .dn-drawer select option,body.glass-ui .user-drawer select option,body.glass-ui .cm-drawer select option{background-color:#ffffff !important;color:#141a3a !important}
