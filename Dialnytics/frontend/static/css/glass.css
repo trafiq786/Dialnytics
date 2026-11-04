@@ -211,3 +211,7 @@ body.glass-ui :is(.drawer-setting small,.drawer-zones small,.drawer-header p){co
 body.glass-ui .plan-pill{background:rgba(124,131,255,.2) !important;color:var(--accent-hover) !important;border:1px solid var(--g-line)}
 body.glass-ui.light-theme .plan-pill{color:#3a40c8 !important}
 body.glass-ui .drawer-tab.active{background:linear-gradient(135deg,#7c83ff,#38b6ff) !important;color:#fff !important}
+
+/* shine sweep must never escape its button (fixes stray light wedge next to cards) */
+body.glass-ui :is(.btn,.btn-primary,.btn-blue,.btn-secondary,.cm-btn,.cm-btn-alt){position:relative;overflow:hidden;isolation:isolate}
+body.glass-ui :is(.btn,.btn-primary,.btn-blue,.btn-secondary,.cm-btn,.cm-btn-alt)::after{z-index:0}
