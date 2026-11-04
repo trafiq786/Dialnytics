@@ -225,3 +225,10 @@ body.glass-ui .premium-search input:not([type=checkbox]):not([type=radio]):not([
   background:transparent !important;border:0 !important;box-shadow:none !important;border-radius:0 !important;outline:0 !important}
 body.glass-ui .shell-top label.shell-search input[type]:focus,
 body.glass-ui .premium-search input[type]:focus{box-shadow:none !important;border:0 !important}
+
+/* native dropdown lists (select options) are drawn by the browser, not by us.
+   Use ONE scheme that is readable even if the browser ignores the background: dark text on a white list. */
+body.glass-ui select{color-scheme:light}
+body.glass-ui select option,body.glass-ui select optgroup,body.glass-ui datalist option{background:#ffffff !important;color:#141a3a !important}
+body.glass-ui select option:checked,body.glass-ui select option:hover,body.glass-ui select option:focus{background:#c7d2fe !important;color:#141a3a !important}
+body.glass-ui select option:disabled{color:#8a94b8 !important}
