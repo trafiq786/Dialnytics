@@ -235,3 +235,7 @@ body.glass-ui select option:disabled{color:#8a94b8 !important}
 
 /* the page stylesheet colours options with translucent --bg-card (white list + light text). Override at higher specificity. */
 body.glass-ui .shell-main select option,body.glass-ui .shell-main select optgroup,body.glass-ui .profile-menu select option,body.glass-ui .dn-drawer select option,body.glass-ui .user-drawer select option,body.glass-ui .cm-drawer select option{background-color:#ffffff !important;color:#141a3a !important}
+
+/* inputs inside a bordered wrapper stay flat (money fields etc.) */
+body.glass-ui .money-field input[type],body.glass-ui .money-field input:not([type=checkbox]):not([type=radio]):not([type=range]){background:transparent !important;border:0 !important;box-shadow:none !important;border-radius:0 !important;outline:0 !important}
+body.glass-ui .money-field{background:var(--field-bg) !important;border:1px solid var(--g-line) !important;border-radius:14px}
