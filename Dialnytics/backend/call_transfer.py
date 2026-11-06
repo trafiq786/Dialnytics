@@ -176,8 +176,10 @@ def adv_conn():
 
 
 def pstn_connection():
-    """Connection used to dial phone numbers (needs an Outbound Voice Profile)."""
-    return adv_conn() or voice_app()
+    """Connection used to dial phone numbers from the server (POST /v2/calls).
+    Telnyx only accepts a Call Control App (Voice API app) here, never a SIP
+    credential connection, and the app needs an Outbound Voice Profile."""
+    return voice_app()
 
 
 def hold_music_url():
@@ -839,8 +841,8 @@ def on_parked_outbound(payload, find_user):
             "link_to": agent_leg, "bridge_intent": True, "timeout_secs": OUTBOUND_RING_SECONDS,
             "command_id": "cc-" + cid, "client_state": D["cs_encode"]("cc:" + cid)})
         customer = ((resp or {}).get("data") or {}).get("call_control_id") or ""
-    except Exception:
-        log.exception("Advanced outbound dial failed for %s", cid)
+    except Exception as exc:
+        log.warning("Advanced outbound dial failed for %s: %s", cid, getattr(exc, "detail", exc))
         customer = ""
     with _db() as conn:
         with conn.cursor() as cur:
@@ -852,6 +854,8 @@ def on_parked_outbound(payload, find_user):
     if not customer or (st and st["status"] != "dialing"):
         _hangup(customer)
         _hangup(agent_leg)
+    else:
+        log.info("Advanced outbound %s dialing %s for user %s", cid, number, user["id"])
     return True
 
 
@@ -886,6 +890,7 @@ def on_cc_event(event, cid, payload):
         if c["status"] == "dialing":
             cause = str(payload.get("hangup_cause") or "").lower()
             sip = str(payload.get("sip_hangup_cause") or "")
+            log.info("Advanced outbound %s ended while dialing: cause=%s sip=%s", cid, cause, sip)
             reason = ("Busy" if "busy" in cause or sip == "486" else
                       "Call declined" if "reject" in cause or sip == "603" else
                       "No answer" if "timeout" in cause or "no_answer" in cause or sip in ("408", "480", "487") else

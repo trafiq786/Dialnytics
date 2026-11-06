@@ -1205,7 +1205,10 @@ function hangup() {
     function leaveTargets() {
         if (!LEAVE_OK || !activeCall || activeCall._twilio || xfer || ended) return null;
         const legs = [activeCall].concat(confCalls, heldCalls);
-        return legs.length === 2 ? legs : null;
+        if (legs.length !== 2) return null;
+        // Outgoing calls are only server-controlled with Advanced calling.
+        if (!ADV && legs.some((c) => !String(c.direction || '').toLowerCase().startsWith('in'))) return null;
+        return legs;
     }
     function syncLeaveBtn() {
         const b = document.getElementById('leaveBtn');
