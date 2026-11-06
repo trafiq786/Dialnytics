@@ -37,6 +37,7 @@ TRANSFER_WAIT_SECONDS = int(os.getenv("TRANSFER_WAIT_SECONDS", "180"))   # busy 
 TRANSFER_RING_SECONDS = int(os.getenv("TRANSFER_RING_SECONDS", "30"))
 OUTBOUND_RING_SECONDS = int(os.getenv("ADV_OUTBOUND_RING_SECONDS", "45"))
 ADV_CONN = os.getenv("TELNYX_ADV_CONNECTION_ID", "").strip()
+LEAVE_MAX_MINUTES = int(os.getenv("LEAVE_MAX_MINUTES", "120"))   # a call nobody from the team is on ends after 2 h
 
 SCHEMA_SQL = """
 -- 10: call transfer between agents + advanced (server-controlled) outgoing calls
@@ -89,6 +90,25 @@ CREATE TABLE IF NOT EXISTS public.cc_calls (
     ended_at timestamptz
 );
 CREATE INDEX IF NOT EXISTS cc_calls_customer_idx ON public.cc_calls(customer_leg);
+-- 11: "Leave call": the agent leaves, the two other callers stay connected (admin allows per user)
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS conf_leave boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS public.left_calls (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id uuid REFERENCES public.dialnytics_users(id) ON DELETE CASCADE,
+    leg_a text NOT NULL,
+    leg_b text NOT NULL,
+    number_a text NOT NULL DEFAULT '',
+    number_b text NOT NULL DEFAULT '',
+    log_ids uuid[] NOT NULL DEFAULT '{}',
+    tx_account text NOT NULL DEFAULT 't1',
+    started_at timestamptz NOT NULL DEFAULT now(),
+    ended_at timestamptz,
+    end_reason text NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS left_calls_open_idx ON public.left_calls(user_id) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS left_calls_legs_idx ON public.left_calls(leg_a, leg_b) WHERE ended_at IS NULL;
+ALTER TABLE public.left_calls ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.left_calls FROM anon, authenticated;
 ALTER TABLE public.live_legs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.call_transfers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.cc_calls ENABLE ROW LEVEL SECURITY;
@@ -295,6 +315,7 @@ def customer_gone(customer_leg):
             legs += [r["to_leg"] for r in cur.fetchall() if r["to_leg"]]
             cur.execute("""UPDATE public.cc_calls SET status=CASE WHEN status='dialing' THEN 'failed' ELSE 'ended' END,
                 ended_at=now() WHERE customer_leg=%s AND ended_at IS NULL""", (customer_leg,))
+            _close_left(cur, customer_leg)
     for leg in legs:
         _hangup(leg)
 
@@ -649,6 +670,136 @@ def _on_xfer_hangup(tid, payload):
             customer_gone(t["customer_leg"])
 
 
+# ---------------------------------------------------------------- leave call
+# The agent has two callers (e.g. a client and an outside US agent). "Leave call"
+# bridges the two callers' phone legs to each other on Telnyx and releases the
+# agent's browser legs, so the agent is free and the two keep talking.
+# Bookkeeping reuses live_legs: each caller is stored as the 'ext' holder of the
+# other one, so an agent leg hanging up never hangs up a caller, and when one
+# caller hangs up customer_gone() hangs up the other.
+def _ext_leg(cur, holder_leg, user_id, customer_leg, number, ref_id):
+    cur.execute("""INSERT INTO public.live_legs(agent_leg,user_id,customer_leg,customer_number,kind,ref_id)
+        VALUES (%s,%s,%s,%s,'ext',%s)
+        ON CONFLICT (agent_leg) DO UPDATE SET user_id=EXCLUDED.user_id, customer_leg=EXCLUDED.customer_leg,
+            customer_number=EXCLUDED.customer_number, kind='ext', ref_id=EXCLUDED.ref_id,
+            started_at=now(), ended_at=NULL""", (holder_leg, user_id, customer_leg, number or "", ref_id))
+
+
+def _close_left(cur, leg, reason="hangup"):
+    """One of the two callers is gone: close the left call and put the time they
+    talked after the agent left into the call logs (once)."""
+    cur.execute("""UPDATE public.left_calls SET ended_at=now(), end_reason=%s
+        WHERE (leg_a=%s OR leg_b=%s) AND ended_at IS NULL
+        RETURNING log_ids, GREATEST(0, EXTRACT(EPOCH FROM (now()-started_at)))::int AS extra""", (reason, leg, leg))
+    for r in cur.fetchall():
+        if r["log_ids"]:
+            cur.execute("""UPDATE public.calls SET status='completed',
+                    duration_seconds=COALESCE(duration_seconds,0) + %s
+                WHERE id = ANY(%s::uuid[])""", (int(r["extra"] or 0), list(r["log_ids"])))
+
+
+def leave(user, numbers, log_ids=()):
+    if not user.get("conf_leave"):
+        raise TransferError("Leave call is not turned on for your account. Ask your admin.", 403)
+    if (user.get("provider") or "telnyx") != "telnyx":
+        raise TransferError("Leave call is not available on this line yet")
+    nums = [str(n or "").strip() for n in (numbers or []) if str(n or "").strip()]
+    if len(nums) != 2:
+        raise TransferError("Leave call works when exactly two other people are on the call", 422)
+    ids = []
+    for v in (log_ids or [])[:4]:
+        try:
+            ids.append(str(uuid.UUID(str(v))))
+        except ValueError:
+            pass
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT * FROM public.live_legs WHERE user_id=%s AND ended_at IS NULL
+                AND kind<>'ext' ORDER BY started_at DESC""", (user["id"],))
+            rows = cur.fetchall()
+            picked = []
+            for n in nums:
+                r = next((r for r in rows if r not in picked and _same_number(r["customer_number"], n)), None)
+                if r:
+                    picked.append(r)
+            if len(picked) != 2 and len(rows) == 2:
+                picked = rows          # numbers shown differently in the browser; exactly two live calls
+            if len(picked) != 2 or picked[0]["customer_leg"] == picked[1]["customer_leg"]:
+                raise TransferError("These calls are not connected through the server, so they cannot stay on "
+                                    "without you. Outgoing calls need Advanced calling (ask your admin).")
+            a, b = picked
+            cur.execute("""SELECT 1 FROM public.call_transfers WHERE customer_leg = ANY(%s)
+                AND status IN ('queued','ringing') LIMIT 1""", ([a["customer_leg"], b["customer_leg"]],))
+            if cur.fetchone():
+                raise TransferError("Finish or cancel the transfer first")
+            if ids:
+                cur.execute("SELECT id FROM public.calls WHERE id = ANY(%s::uuid[]) AND user_id=%s", (ids, user["id"]))
+                ids = [str(r["id"]) for r in cur.fetchall()]
+            # Bookkeeping first, so a webhook for an agent leg that Telnyx drops
+            # during the re-bridge can never hang up a caller.
+            cur.execute("""INSERT INTO public.left_calls(user_id,leg_a,leg_b,number_a,number_b,log_ids,tx_account)
+                VALUES (%s,%s,%s,%s,%s,%s::uuid[],%s) RETURNING id""",
+                (user["id"], a["customer_leg"], b["customer_leg"], a["customer_number"], b["customer_number"],
+                 ids, _acct()))
+            lid = cur.fetchone()["id"]
+            _ext_leg(cur, b["customer_leg"], user["id"], a["customer_leg"], a["customer_number"], lid)
+            _ext_leg(cur, a["customer_leg"], user["id"], b["customer_leg"], b["customer_number"], lid)
+            cur.execute("""UPDATE public.live_legs SET ended_at=now()
+                WHERE agent_leg = ANY(%s) AND ended_at IS NULL""", ([a["agent_leg"], b["agent_leg"]],))
+    _hold_off(a["customer_leg"])
+    _hold_off(b["customer_leg"])
+    try:
+        _tx("POST", f"/v2/calls/{a['customer_leg']}/actions/bridge", {"call_control_id": b["customer_leg"]})
+    except Exception as exc:
+        log.warning("Leave call bridge failed for %s: %s", lid, getattr(exc, "detail", exc))
+        with _db() as conn:      # undo: the agent is still on both calls
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM public.live_legs WHERE ref_id=%s AND kind='ext'", (lid,))
+                cur.execute("""UPDATE public.live_legs SET ended_at=NULL
+                    WHERE agent_leg = ANY(%s)""", ([a["agent_leg"], b["agent_leg"]],))
+                cur.execute("DELETE FROM public.left_calls WHERE id=%s", (lid,))
+        raise TransferError("Could not connect the two callers. You are still on the call.", 502)
+    _hangup(a["agent_leg"])          # the agent is released
+    _hangup(b["agent_leg"])
+    return {"id": str(lid), "number_a": a["customer_number"], "number_b": b["customer_number"]}
+
+
+def left_calls(user):
+    """Calls this user left that are still running (for the small card in the dialer)."""
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id,number_a,number_b,
+                    GREATEST(0, EXTRACT(EPOCH FROM (now()-started_at)))::int AS secs
+                FROM public.left_calls WHERE user_id=%s AND ended_at IS NULL
+                ORDER BY started_at DESC LIMIT 5""", (user["id"],))
+            return [{"id": str(r["id"]), "number_a": r["number_a"], "number_b": r["number_b"],
+                     "seconds": int(r["secs"] or 0), "max_seconds": LEAVE_MAX_MINUTES * 60}
+                    for r in cur.fetchall()]
+
+
+def _end_left_row(r, reason):
+    with _in_acct(r["tx_account"]):
+        _hangup(r["leg_a"])
+        _hangup(r["leg_b"])
+    with _db() as conn:
+        with conn.cursor() as cur:
+            _close_left(cur, r["leg_a"], reason)
+            cur.execute("""UPDATE public.live_legs SET ended_at=now()
+                WHERE ref_id=%s AND kind='ext' AND ended_at IS NULL""", (r["id"],))
+
+
+def end_left(lid, user):
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT * FROM public.left_calls WHERE id=%s AND user_id=%s AND ended_at IS NULL""",
+                        (lid, user["id"]))
+            r = cur.fetchone()
+    if not r:
+        return False
+    _end_left_row(r, "ended by agent")
+    return True
+
+
 # ---------------------------------------------------------------- advanced outgoing
 def on_parked_outbound(payload, find_user):
     """Browser call on the Advanced connection, parked by Telnyx. Dial the
@@ -823,7 +974,28 @@ def tick():
     for tid, acct in ready:
         with _in_acct(acct):
             _ring(tid)
+    _expire_left()
     return len(ready)
+
+
+_left_checked = [0.0]
+
+
+def _expire_left():
+    """Left calls nobody from the team is on end after LEAVE_MAX_MINUTES (checked every 30 s)."""
+    if time.time() - _left_checked[0] < 30:
+        return
+    _left_checked[0] = time.time()
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT * FROM public.left_calls WHERE ended_at IS NULL
+                AND started_at < now() - make_interval(mins => %s) LIMIT 50""", (LEAVE_MAX_MINUTES,))
+            rows = cur.fetchall()
+    for r in rows:
+        try:
+            _end_left_row(r, "time limit")
+        except Exception:
+            log.exception("Could not end left call %s", r["id"])
 
 
 def _worker():

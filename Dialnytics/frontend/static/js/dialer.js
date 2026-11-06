@@ -6,6 +6,15 @@ const input = document.getElementById('numberInput');
     const RECORDING_OK = cfg.dataset.recording === '1';
     const EXPIRED = cfg.dataset.expired === '1';
     const PROVIDER = cfg.dataset.provider === 'twilio' ? 'twilio' : 'telnyx';
+    const IS_ADMIN = cfg.dataset.admin === '1';
+    // Customers never see provider names or raw provider error codes. Admins keep the full text.
+    function friendlyError(m) {
+        const raw = String(m == null ? '' : m);
+        if (IS_ADMIN) return raw;
+        if (/AccessToken|\b201(01|02|04)\b|token.*(invalid|expired)|invalid.*token/i.test(raw))
+            return 'The calling line could not connect. Reload the page (Ctrl+F5). If it keeps happening, contact support.';
+        return raw.replace(/twilio|telnyx/gi, 'the calling service');
+    }
     let recorder = null;
     let monRec = null, monChunks = [], monStart = 0, monCtx = null, monNumber = '', monDir = 'outgoing';
     let recCtx = null;
@@ -27,6 +36,7 @@ const input = document.getElementById('numberInput');
     let xfer = null;              // transfer in progress {id, call, name, timer}
     const MAX_LINES = 4;
     const ADV = cfg.dataset.adv === '1';
+    const LEAVE_OK = cfg.dataset.leave === '1';     // admin allowed "Leave call" for this user
     const LEGTAG = cfg.dataset.legtag || '';
     // Countries this line may call (empty = no limit). US = +1, UK = +44.
     const ZONES = (cfg.dataset.zones || '').split(',').filter(Boolean);
@@ -77,6 +87,7 @@ const input = document.getElementById('numberInput');
     }
     let msgTimer = null;
     function setStatus(msg, color) {
+        msg = friendlyError(msg);
         statusEl.textContent = msg;
         statusEl.style.color = color || 'var(--text-secondary)';
         // The status line sits under the keypad; during a call show problems on the call screen.
@@ -238,6 +249,7 @@ function markEnded(reason) {
         call._endWatch = true;
         const pc = findPc(call);
         const end = () => {
+            if (call._leaving) return;         // "Leave call": this side is closed by leaveCall()
             // Only end the line this listener belongs to (other lines may be on hold / in a conference).
             if (activeCall !== call) {
                 const side = sideLegById(call.id);
@@ -328,6 +340,7 @@ function markEnded(reason) {
         if (call.on && !call._dnWatched) {
             call._dnWatched = true;
             call.on('telnyx.notification', () => {
+                if (call._leaving) return;     // "Leave call": this side is closed by leaveCall()
                 // This listener belongs to ONE line. If that line is on hold / in a
                 // conference / already gone, it must not end the call you are on now.
                 if (activeCall !== call) {
@@ -478,6 +491,7 @@ function markEnded(reason) {
                 }
             } catch (e) {}
             client.on('registered', () => {
+                client._dnRetried = false;
                 rtcStatus.textContent = 'Ready';
                 rtcStatus.style.color = 'var(--success)';
                 const params = new URLSearchParams(location.search);
@@ -489,7 +503,18 @@ function markEnded(reason) {
             client.on('unregistered', () => {
                 if (rtcStatus.textContent === 'Ready') rtcStatus.textContent = 'Not connected';
             });
-            client.on('error', (err) => {
+            client.on('error', async (err) => {
+                const bad = err && (err.code === 20101 || err.code === 20104 || /AccessToken/i.test(String(err.message || '')));
+                if (bad && !client._dnRetried) {
+                    // Invalid or expired token (for example after the account was topped up): fetch a new one once.
+                    client._dnRetried = true;
+                    try {
+                        rtcStatus.textContent = 'Connecting...';
+                        client.updateToken(await twilioToken());
+                        if (client.register) await client.register();
+                        return;
+                    } catch (e) {}
+                }
                 rtcStatus.textContent = 'RTC error';
                 setStatus((err && err.message) || 'Line error', 'var(--danger)');
             });
@@ -1176,6 +1201,121 @@ function hangup() {
         showInCall(legNumber(activeCall));
         setStatus('Conference · ' + (confCalls.length + 1) + ' callers');
     }
+    // ---- Leave call: you leave, the two other callers stay connected (server bridges them).
+    function leaveTargets() {
+        if (!LEAVE_OK || !activeCall || activeCall._twilio || xfer || ended) return null;
+        const legs = [activeCall].concat(confCalls, heldCalls);
+        return legs.length === 2 ? legs : null;
+    }
+    function syncLeaveBtn() {
+        const b = document.getElementById('leaveBtn');
+        if (b) b.hidden = !leaveTargets();
+    }
+    function askLeave(text, ok, title) {
+        const ask = window.dnConfirmShared || window.dnConfirm;
+        return ask ? ask(text, ok, title) : Promise.resolve(window.confirm(text));
+    }
+    function showNum(n) {
+        return (window.DNNumber && window.DNNumber.pretty && n) ? window.DNNumber.pretty(n) : (n || 'Caller');
+    }
+    async function leaveCall() {
+        let legs = leaveTargets();
+        if (!legs) return setStatus('Leave call works when exactly two other people are on the call', 'var(--danger)');
+        const nums = legs.map((c) => legNumber(c) || '');
+        const ok = await askLeave(showNum(nums[0]) + ' and ' + showNum(nums[1]) + ' stay connected and keep talking. ' +
+            'The call stays on your account (both lines are billed per minute) until one of them hangs up.',
+            'Leave call', 'Leave the call?');
+        if (!ok) return;
+        legs = leaveTargets();
+        if (!legs) return setStatus('The call changed. Try again.', 'var(--danger)');
+        const btn = document.getElementById('leaveBtn');
+        if (btn) btn.disabled = true;
+        setStatus('Connecting them...');
+        legs.forEach((c) => { c._leaving = true; });
+        const ids = legs.map((c) => c === activeCall ? logId : ((c._dn && c._dn.logId) || c._dnLog || null)).filter(Boolean);
+        try {
+            const res = await fetch('/api/conference/leave', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ numbers: legs.map((c) => legNumber(c) || ''), log_ids: ids })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || 'Could not leave the call');
+        } catch (err) {
+            legs.forEach((c) => { c._leaving = false; });
+            if (btn) btn.disabled = false;
+            setStatus(err.message, 'var(--danger)');
+            if (legs.some(callIsDead)) {          // a line dropped meanwhile: let the normal handlers run
+                legs.filter(callIsDead).forEach((c) => {
+                    if (c === activeCall) markEnded(endReason(c));
+                    else { const side = sideLegById(c.id); if (side) dropLeg(side, 'left the call'); }
+                });
+            }
+            return;
+        }
+        if (btn) btn.disabled = false;
+        // Your side ends here; their call goes on without you.
+        teardownMixer();
+        const others = confCalls.splice(0).concat(heldCalls.splice(0));
+        syncHeld();
+        others.forEach((c) => {
+            detachLegAudio(c);
+            finishLeg(c);
+            try { if (c.hangup) c.hangup(); } catch (e) {}
+        });
+        const main = activeCall;
+        try { if (main && main.hangup) main.hangup(); } catch (e) {}
+        markEnded('You left · they keep talking');
+        loadLeftCalls();
+    }
+    // Small card: calls you left that are still running.
+    let leftTimer = null, leftTicks = 0;
+    async function loadLeftCalls() {
+        if (!LEAVE_OK) return;
+        let list = null;
+        try {
+            const r = await fetch('/api/conference/left', { cache: 'no-store' });
+            if (r.ok) list = (await r.json()).calls || [];
+        } catch (e) {}
+        if (list) renderLeft(list);
+    }
+    function renderLeft(list) {
+        const box = document.getElementById('leftCalls');
+        if (!box) return;
+        box._at = Date.now();
+        if (!list.length) {
+            box.hidden = true;
+            box.innerHTML = '';
+            if (leftTimer) { clearInterval(leftTimer); leftTimer = null; }
+            return;
+        }
+        box.innerHTML = list.map((c) => '<div class="left-card"><b>● Still talking without you</b><small>' +
+            esc(showNum(c.number_a)) + ' ↔ ' + esc(showNum(c.number_b)) + '</small><div class="lc-time" data-secs="' +
+            Number(c.seconds || 0) + '">' + clock(Number(c.seconds || 0)) + '</div><small>Ends automatically after ' +
+            Math.round(Number(c.max_seconds || 7200) / 60) + ' min · shows in Call Logs when it ends</small>' +
+            '<button type="button" onclick="endLeftCall(\'' + esc(c.id) + '\')">End their call</button></div>').join('');
+        box.hidden = !!activeCall;
+        if (!leftTimer) leftTimer = setInterval(tickLeft, 1000);
+    }
+    function tickLeft() {
+        const box = document.getElementById('leftCalls');
+        if (!box || !box.innerHTML) return;
+        box.hidden = !!activeCall || !!incomingCall;
+        const extra = Math.floor((Date.now() - (box._at || Date.now())) / 1000);
+        box.querySelectorAll('.lc-time').forEach((el) => { el.textContent = clock(Number(el.dataset.secs || 0) + extra); });
+        if (++leftTicks % 10 === 0) loadLeftCalls();
+    }
+    async function endLeftCall(id) {
+        if (!(await askLeave('This ends the call between the two of them.', 'End their call', 'End their call?'))) return;
+        try {
+            const r = await fetch('/api/conference/left/' + encodeURIComponent(id) + '/end', { method: 'POST' });
+            if (!r.ok) setStatus('That call has already ended');
+        } catch (e) {}
+        loadLeftCalls();
+    }
+    if (LEAVE_OK) {
+        setInterval(syncLeaveBtn, 1000);
+        setTimeout(loadLeftCalls, 1500);
+    }
     function promoteLeg(call) {
         activeCall = call;
         unstash(call);
@@ -1282,6 +1422,7 @@ function hangup() {
         }
         const html = parts.join('');
         if (bar._html !== html) { bar.innerHTML = html; bar._html = html; }
+        syncLeaveBtn();
         bar.hidden = !parts.length;
         const swapBtn = document.getElementById('swapBtn');
         const mergeBtn = document.getElementById('mergeBtn');

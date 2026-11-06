@@ -296,6 +296,7 @@ def _db_user(row):
         "sms_enabled": bool(row.get("sms_enabled", False)),
         "sms_credits": row.get("sms_credits"),
         "adv_calling": bool(row.get("adv_calling", False)),
+        "conf_leave": bool(row.get("conf_leave", False)),
         "telnyx_account": tx_key(row.get("telnyx_account") or "t1"),
         "call_countries": row.get("call_countries") or "",
         "twilio_account": tw_key(row.get("twilio_account") or "w1"),
@@ -1780,6 +1781,7 @@ async def save_user_all(request: Request):
     zones = ",".join(z for z in CALL_ZONES if z in f.getlist("zones"))
     want_rec, want_power = bool(f.get("recording")), bool(f.get("power"))
     want_sms, want_adv = bool(f.get("sms")), bool(f.get("adv"))
+    want_leave = bool(f.get("leave"))
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT id,role,sms_enabled,adv_calling FROM public.dialnytics_users
@@ -1791,8 +1793,9 @@ async def save_user_all(request: Request):
             if cur.fetchone():
                 return bounce("Email already exists")
             cur.execute("""UPDATE public.dialnytics_users SET name=%s,email=%s,plan_name=%s,plan_renewal=%s::date,
-                recording_premium=%s,power_enabled=%s,sms_credits=%s,call_countries=%s WHERE id=%s""",
-                        (name, new_email, plan_name, renewal, want_rec, want_power, credits, zones, target["id"]))
+                recording_premium=%s,power_enabled=%s,sms_credits=%s,call_countries=%s,conf_leave=%s WHERE id=%s""",
+                        (name, new_email, plan_name, renewal, want_rec, want_power, credits, zones, want_leave,
+                         target["id"]))
     refresh_users()
     problems = []
     # SMS and Advanced calling talk to the phone provider, so they reuse the existing toggle handlers.
@@ -5690,6 +5693,32 @@ async def transfer_cancel(tid: uuid.UUID, request: Request):
 async def transfer_decline(tid: uuid.UUID, request: Request):
     user = _xfer_user(request)
     return {"declined": ct.decline(str(tid), user)}
+
+# ---- Leave call: the agent leaves, the two other callers keep talking (admin allows per user)
+@app.post("/api/conference/leave")
+async def conference_leave(request: Request):
+    user = _xfer_user(request)
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    numbers = [str(n)[:40] for n in (data.get("numbers") or [])][:4]
+    try:
+        return ct.leave(user, numbers, data.get("log_ids") or [])
+    except ct.TransferError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+@app.get("/api/conference/left")
+async def conference_left(request: Request):
+    user = _xfer_user(request)
+    return {"calls": ct.left_calls(user) if user.get("conf_leave") else []}
+
+@app.post("/api/conference/left/{lid}/end")
+async def conference_left_end(lid: uuid.UUID, request: Request):
+    user = _xfer_user(request)
+    if not ct.end_left(str(lid), user):
+        raise HTTPException(status_code=404, detail="This call has already ended")
+    return {"ended": True}
 
 @app.get("/api/advanced-call/result")
 async def advanced_call_result(request: Request):
