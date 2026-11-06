@@ -879,10 +879,13 @@ def on_cc_event(event, cid, payload):
         if not c2:
             _hangup(customer)     # agent already gave up
             return
+        # The browser leg is parked (not answered). Telnyx only bridges answered
+        # calls, so answer it first; the bridge happens on its call.answered event.
         try:
-            _tx("POST", f"/v2/calls/{c2['agent_leg']}/actions/bridge", {"call_control_id": c2["customer_leg"]})
-        except Exception:
-            log.exception("Advanced outbound bridge failed for %s", cid)
+            _tx("POST", f"/v2/calls/{c2['agent_leg']}/actions/answer", {
+                "client_state": D["cs_encode"]("cca:" + cid), "command_id": "cca-" + cid})
+        except Exception as exc:
+            log.warning("Advanced outbound answer failed for %s: %s", cid, getattr(exc, "detail", exc))
             _hangup(c2["customer_leg"])
             _hangup(c2["agent_leg"])
             customer_gone(c2["customer_leg"])
@@ -913,6 +916,27 @@ def last_result(user):
     return dict(r) if r else {}
 
 
+def _bridge_cc(cid):
+    """Browser leg of an advanced outgoing call is answered: connect it to the customer."""
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM public.cc_calls WHERE id=%s", (cid,))
+            c = cur.fetchone()
+    if not c:
+        return
+    if c["status"] != "answered" or c.get("ended_at"):
+        _hangup(c["agent_leg"])
+        return
+    try:
+        _tx("POST", f"/v2/calls/{c['agent_leg']}/actions/bridge", {"call_control_id": c["customer_leg"]})
+        log.info("Advanced outbound %s connected", cid)
+    except Exception as exc:
+        log.warning("Advanced outbound bridge failed for %s: %s", cid, getattr(exc, "detail", exc))
+        _hangup(c["customer_leg"])
+        _hangup(c["agent_leg"])
+        customer_gone(c["customer_leg"])
+
+
 # ---------------------------------------------------------------- webhook router
 def handle_webhook(event, payload, client_state, find_user):
     """Returns True when the event was fully handled here."""
@@ -934,6 +958,21 @@ def handle_webhook(event, payload, client_state, find_user):
         except ValueError:
             return True
         on_cc_event(event, cid, payload)
+        return True
+    if client_state.startswith("cca:"):
+        # Browser leg of an advanced outgoing call, answered by the server.
+        cid = client_state[4:]
+        try:
+            uuid.UUID(cid)
+        except ValueError:
+            return True
+        if event == "call.answered":
+            _bridge_cc(cid)
+        elif event == "call.hangup":
+            try:
+                on_plain_hangup(payload.get("call_control_id"))
+            except Exception:
+                log.exception("Hangup bookkeeping failed")
         return True
     if event == "call.initiated" and not client_state and adv_conn() \
             and str(payload.get("connection_id") or "") == adv_conn():

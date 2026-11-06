@@ -1,4 +1,4 @@
-DIALNYTICS UPDATE N  -  Advanced calling + transfer fix (2026-11-07)
+DIALNYTICS UPDATE N2  -  Advanced calling + transfer fix (2026-11-07)
 ====================================================================
 Update M ke upar lagao.
 
@@ -11,6 +11,8 @@ Telnyx is kaam ke liye sirf Call Control App (Voice API app) ki ID leta hai:
 
 FIX
 ---
+- N2: client uthane par server pehle aap ki (ruki hui) browser call answer karta hai,
+  phir dono ko jodta hai (pehle Telnyx "Call not answered yet" de raha tha).
 - Server ab dial ke liye TELNYX_VOICE_APP_ID wali Voice API app use karta hai
   (wohi jo incoming calls ke liye pehle se lagi hai).
 - Render logs mein ab har Advanced call ki line aati hai (dialing / fail ki asli wajah / SIP code).
