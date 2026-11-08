@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS public.cc_calls (
     ended_at timestamptz
 );
 CREATE INDEX IF NOT EXISTS cc_calls_customer_idx ON public.cc_calls(customer_leg);
+ALTER TABLE public.cc_calls ADD COLUMN IF NOT EXISTS bridged_at timestamptz;
 -- 11: "Leave call": the agent leaves, the two other callers stay connected (admin allows per user)
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS conf_leave boolean NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS public.left_calls (
@@ -884,6 +885,7 @@ def on_cc_event(event, cid, payload):
         try:
             _tx("POST", f"/v2/calls/{c2['agent_leg']}/actions/answer", {
                 "client_state": D["cs_encode"]("cca:" + cid), "command_id": "cca-" + cid})
+            _bridge_cc(cid, fast=True)     # usually already answered: no wait for the webhook
         except Exception as exc:
             log.warning("Advanced outbound answer failed for %s: %s", cid, getattr(exc, "detail", exc))
             _hangup(c2["customer_leg"])
@@ -916,25 +918,39 @@ def last_result(user):
     return dict(r) if r else {}
 
 
-def _bridge_cc(cid):
-    """Browser leg of an advanced outgoing call is answered: connect it to the customer."""
+def _bridge_cc(cid, fast=False):
+    """Connect the answered browser leg to the customer, exactly once.
+    fast=True: tried right after our answer command, before Telnyx confirms it;
+    if Telnyx says the leg is not answered yet, the call.answered webhook retries."""
     with _db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM public.cc_calls WHERE id=%s", (cid,))
+            cur.execute("""UPDATE public.cc_calls SET bridged_at=now()
+                WHERE id=%s AND status='answered' AND bridged_at IS NULL AND ended_at IS NULL
+                RETURNING *""", (cid,))
             c = cur.fetchone()
+            if not c:
+                cur.execute("SELECT * FROM public.cc_calls WHERE id=%s", (cid,))
+                old = cur.fetchone()
     if not c:
-        return
-    if c["status"] != "answered" or c.get("ended_at"):
-        _hangup(c["agent_leg"])
-        return
+        if not fast and old and (old["status"] != "answered" or old.get("ended_at")):
+            _hangup(old["agent_leg"])        # the customer is already gone
+        return False
     try:
         _tx("POST", f"/v2/calls/{c['agent_leg']}/actions/bridge", {"call_control_id": c["customer_leg"]})
-        log.info("Advanced outbound %s connected", cid)
+        log.info("Advanced outbound %s connected%s", cid, " (fast)" if fast else "")
+        return True
     except Exception as exc:
-        log.warning("Advanced outbound bridge failed for %s: %s", cid, getattr(exc, "detail", exc))
+        detail = str(getattr(exc, "detail", exc))
+        if fast and ("90034" in detail or "not been answered" in detail):
+            with _db() as conn:            # let the call.answered webhook do it
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE public.cc_calls SET bridged_at=NULL WHERE id=%s", (cid,))
+            return False
+        log.warning("Advanced outbound bridge failed for %s: %s", cid, detail)
         _hangup(c["customer_leg"])
         _hangup(c["agent_leg"])
         customer_gone(c["customer_leg"])
+        return False
 
 
 # ---------------------------------------------------------------- webhook router

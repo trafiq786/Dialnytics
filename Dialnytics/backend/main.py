@@ -3199,7 +3199,7 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
     event = data.get("event_type") or ""
     client_state = _cs_decode(payload.get("client_state"))
     try:
-        if ct.handle_webhook(event, payload, client_state, lambda uid: _db_user_by_id(uid)):
+        if ct.handle_webhook(event, payload, client_state, _user_by_id_fast):
             return JSONResponse({"ok": True})
     except Exception:
         log.exception("Transfer/advanced-calling webhook handling failed (%s)", event)
@@ -3414,6 +3414,15 @@ def _twilio_voicemail_twiml(log_id):
             f'<Record maxLength="{VOICEMAIL_MAX_SECONDS}" playBeep="true" trim="trim-silence" '
             f'action="/twilio/voicemail-done" method="POST" '
             f'recordingStatusCallback="{vh.xml_attr(callback)}" recordingStatusCallbackMethod="POST"/>')
+
+def _user_by_id_fast(user_id):
+    """In-memory user first (saves a database trip while a call is being set up);
+    falls back to the database when the cached copy is missing or not allowed."""
+    uid = str(user_id or "")
+    for u in list(users_db.values()):
+        if str(u.get("id") or "") == uid and u.get("adv_calling") and u.get("is_active", True):
+            return u
+    return _db_user_by_id(user_id)
 
 def _db_user_by_id(user_id):
     with db_connect() as conn:

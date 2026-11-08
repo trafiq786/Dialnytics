@@ -1,41 +1,27 @@
-DIALNYTICS UPDATE N2  -  Advanced calling + transfer fix (2026-11-07)
-====================================================================
-Update M ke upar lagao.
+DIALNYTICS UPDATE O  -  Advanced calling ko tez karna (2026-11-08)
+=================================================================
+Update N2 ke upar lagao. Sirf 2 files: backend/call_transfer.py, backend/main.py
 
-MASLA
------
-Server jab kisi phone number ko khud dial karta tha (Advanced calling ki outgoing call,
-aur bahar ke number par Transfer) to Telnyx ko SIP connection ki ID bhejta tha.
-Telnyx is kaam ke liye sirf Call Control App (Voice API app) ki ID leta hai:
-"Invalid value for connection_id (Call Control App ID)" -> call foran fail.
+KYA TEZ HUA
+-----------
+1. Client uthane ke baad (khamoshi wala hissa):
+   Pehle: answer -> Telnyx ke webhook ka intezar -> phir jodna.
+   Ab:    answer -> foran jodna. Webhook sirf backup ke taur par.
+   Is se ek poora internet chakkar (Telnyx -> Render -> wapas) bach jata hai.
+2. Ghanti bajne se pehle:
+   User ab server ki memory se pehchana jata hai, database ka ek chakkar kam.
 
-FIX
----
-- N2: client uthane par server pehle aap ki (ruki hui) browser call answer karta hai,
-  phir dono ko jodta hai (pehle Telnyx "Call not answered yet" de raha tha).
-- Server ab dial ke liye TELNYX_VOICE_APP_ID wali Voice API app use karta hai
-  (wohi jo incoming calls ke liye pehle se lagi hai).
-- Render logs mein ab har Advanced call ki line aati hai (dialing / fail ki asli wajah / SIP code).
-- "Leave call" ka button ab tab hi dikhta hai jab leave mumkin ho
-  (outgoing call + Advanced calling off ho to button nahi dikhega).
-
-TELNYX MEIN 1 CHEEZ CHECK KARO (zaroori)
---------------------------------------
-Voice -> Programmable Voice (Voice API Applications) -> jo app Dialnytics ki hai
-(jis ki ID Render mein TELNYX_VOICE_APP_ID hai) -> Outbound tab:
-  Outbound Voice Profile = "Dialnytics Profile"   (khali ho to choose karke Save)
-Is ke baghair server se dial ki gayi calls nahi lagengi.
-
-FILES
------
-backend/call_transfer.py
-frontend/static/js/dialer.js
-frontend/templates/base.html   (dialer.js?v=20261107)
+Database khud update hota hai (cc_calls.bridged_at), kuch manually nahi chalana.
 
 TEST
 ----
-1. Deploy -> dialer logout/login.
-2. Advanced calling wale user se apne mobile par call -> ring ho, awaz aaye.
-3. Phir: client call -> Add Call -> US agent -> Leave call.
-4. Transfer -> bahar ka number -> ab ring jani chahiye.
-Masla ho to Render logs mein "Advanced outbound" wali line bhejo.
+Deploy -> dialer Ctrl+F5 -> Advanced user se call.
+Render logs mein "Advanced outbound ... connected (fast)" dikhe to naya tez raasta chal raha hai.
+
+AUR TEZI KE LIYE (aap ki taraf se)
+---------------------------------
+- Render service aur Supabase database ka REGION ek hi ho (dono US East / dono Frankfurt).
+  Alag region = har database chakkar par 100-200 ms extra.
+- Render plan: Free/Starter instance par CPU kam hota hai; Standard par webhooks tez chalti hain.
+- Advanced calling sirf un users ke liye ON rakho jinhe Leave call / Transfer chahiye.
+  Baqi users seedhi calling par sab se tez rehte hain.
