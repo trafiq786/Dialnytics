@@ -3051,10 +3051,30 @@ def _telnyx_start_voicemail(call_control_id, group_id):
         _telnyx_request("POST", f"/v2/calls/{call_control_id}/actions/answer",
                         {"client_state": _cs_encode(f"vm:{group_id}")})
         return True
+    except Exception as exc:
+        log.warning("Voicemail answer failed for group %s: %s", group_id, getattr(exc, "detail", exc))
+    # The answer failed. Usually the call was answered a moment earlier (the agent
+    # picked up while an old ringing leg was ending). Never cut a live call: if it
+    # is still up, undo "missed" and leave it connected.
+    alive = False
+    try:
+        st = _telnyx_request("GET", f"/v2/calls/{call_control_id}")
+        alive = bool(((st or {}).get("data") or {}).get("is_alive"))
     except Exception:
-        log.exception("Voicemail answer failed for group %s", group_id)
-        _telnyx_hangup_quietly(call_control_id)
+        alive = False
+    if alive:
+        log.info("Voicemail skipped for group %s: the call is already connected", group_id)
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE public.incoming_call_groups SET status='answered'
+                    WHERE id=%s AND status='missed' RETURNING call_log_id""", (group_id,))
+                row = cur.fetchone()
+                if row and row["call_log_id"]:
+                    cur.execute("UPDATE public.calls SET status='answered' WHERE id=%s AND status='missed'",
+                                (row["call_log_id"],))
         return False
+    _telnyx_hangup_quietly(call_control_id)
+    return False
 
 def _telnyx_voicemail_answered(call_control_id, group_id):
     """Caller already answered (was waiting on hold): play the greeting, then record."""
@@ -3172,6 +3192,15 @@ def _can_live_team(user, account_id):
         return True
     return _is_owner(user) and str(user.get("account_id")) == str(account_id) and _account_live_listen(account_id)
 
+def _voicemail_after_ring_end(call_control_id, group_id):
+    time.sleep(1.5)                     # runs in the background, never in the webhook request
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status FROM public.incoming_call_groups WHERE id=%s", (group_id,))
+            g = cur.fetchone()
+    if g and g["status"] == "ringing":
+        _telnyx_start_voicemail(call_control_id, group_id)
+
 def _handle_ring_leg_event(event, group_id, background, payload=None):
     """Events from the SIP leg that rings the agent's browser."""
     ring_leg = (payload or {}).get("call_control_id") or ""
@@ -3195,7 +3224,9 @@ def _handle_ring_leg_event(event, group_id, background, payload=None):
         return
     if group["status"] == "ringing":
         # Agent did not pick up (timeout, rejected, offline): go to voicemail.
-        _bg(background, _telnyx_start_voicemail, group["telnyx_call_id"], group_id)
+        # A duplicate ringing leg can end at the same moment the agent answers
+        # another one; wait a moment and re-check before sending to voicemail.
+        _bg(background, _voicemail_after_ring_end, group["telnyx_call_id"], group_id)
     elif group["status"] in ("answered", "transferred"):
         # Agent hung up first: do not leave the caller in silence -- unless the
         # call was transferred and another agent is talking to the caller now.
