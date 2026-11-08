@@ -948,8 +948,12 @@ def _bridge_cc(cid, fast=False):
         return True
     except Exception as exc:
         detail = str(getattr(exc, "detail", exc))
-        if fast and ("90034" in detail or "not been answered" in detail):
-            with _db() as conn:            # let the call.answered webhook do it
+        if fast:
+            # The early try must never end a call: whatever Telnyx says, release the
+            # claim and let the browser leg's call.answered webhook connect them.
+            log.info("Advanced outbound %s: early bridge not possible yet (%s); waiting for answer event",
+                     cid, detail.replace("\n", " ")[:300])
+            with _db() as conn:
                 with conn.cursor() as cur:
                     cur.execute("UPDATE public.cc_calls SET bridged_at=NULL WHERE id=%s", (cid,))
             return False
