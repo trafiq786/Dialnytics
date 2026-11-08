@@ -1,8 +1,8 @@
-DIALNYTICS UPDATE U  -  iPhone jaisa glass look (2026-11-09)
+DIALNYTICS UPDATE U2  -  iPhone jaisa glass look (2026-11-09)
 ===========================================================
 T ke upar lagao. 2 files:
   frontend/static/css/glass.css   (purane glass theme ke aakhir mein naya "iOS glass" hissa)
-  frontend/templates/base.html    (glass.css?v=4, cache ke liye)
+  frontend/templates/base.html    (glass.css?v=5, cache ke liye)
 preview-dark.png / preview-light.png sirf dekhne ke liye hain, upload nahi karni.
 
 KYA BADLA
@@ -18,3 +18,5 @@ KYA BADLA
 
 Wapas purana look chahiye ho to purani glass.css (update L) wapas laga do.
 Deploy ke baad Ctrl+F5.
+
+U2: header ab saaf gehra (neeli patti khatam, logo saaf), sidebar alag tairta card.

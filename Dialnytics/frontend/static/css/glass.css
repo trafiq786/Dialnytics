@@ -337,3 +337,13 @@ body.glass-ui .dial-rail .your-number{border-radius:999px !important}
   body.glass-ui .dial-rail #dialPad .dial-btn{-webkit-backdrop-filter:none;backdrop-filter:none;background:rgba(40,48,90,.95) !important}
   body.glass-ui.light-theme .dial-rail #dialPad .dial-btn{background:#fff !important}
 }
+
+/* v4.1: calmer header (no blue band, logo readable) + floating sidebar card */
+body.glass-ui .shell-top{background-color:rgba(9,12,26,.78) !important;background-image:none !important;
+  border-bottom:1px solid rgba(255,255,255,.08) !important;box-shadow:0 1px 0 rgba(255,255,255,.04),0 10px 30px rgba(0,0,0,.25) !important}
+body.glass-ui.light-theme .shell-top{background-color:rgba(255,255,255,.82) !important;border-bottom:1px solid rgba(16,22,58,.06) !important;box-shadow:0 10px 30px rgba(40,50,120,.08) !important}
+body.glass-ui::before{top:-200px;right:-320px;width:1000px;height:700px;opacity:.32}
+body.glass-ui.light-theme::before{opacity:.45}
+@media (min-width:1025px){
+  body.glass-ui .shell-nav{margin:14px 0 14px 14px;border-radius:26px !important;border:1px solid var(--g-line) !important;align-self:start}
+}
