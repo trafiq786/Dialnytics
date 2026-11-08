@@ -235,11 +235,35 @@
       load();
     }, 4000);
   }
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const el = document.createElement('script');
+      el.src = src; el.onload = resolve; el.onerror = () => reject(new Error('Could not load ' + src));
+      document.head.appendChild(el);
+    });
+  }
+  // Pages without the dialer (super admin) get a small listen-only phone.
+  async function ensureMonitor() {
+    if (!window.DNMonitor) {
+      if (!(window.TelnyxWebRTC && window.TelnyxWebRTC.TelnyxRTC)) await loadScript('https://unpkg.com/@telnyx/webrtc@2.22.15/lib/bundle.js');
+      await loadScript('/static/js/monitor-phone.js?v=1');
+    }
+    if (window.DNMonitor && window.DNMonitor.prepare) await window.DNMonitor.prepare();
+  }
   async function start(mode) {
     const d = sheet._d || {};
     if (window.DNMonitor && window.DNMonitor.busy()) { render(d, 'Finish your own call first.'); return; }
-    if (!window.DNMonitor) { render(d, 'Open the dialer (it must be signed in) to listen.'); return; }
     sheet.querySelectorAll('.ls-act button').forEach((b) => { b.disabled = true; });
+    try {
+      if (!window.DNMonitor || window.DNMonitor.standalone) {
+        const note = sheet.querySelector('.ls-note,.ls-err');
+        if (note) { note.className = 'ls-note'; note.textContent = 'Connecting your listening phone…'; }
+      }
+      await ensureMonitor();
+    } catch (e) {
+      render(d, e.message || 'Could not start the listening phone');
+      return;
+    }
     window.DNMonitor.expect((d.agent && d.agent.phone_number) || '');
     window.DNMonitor.setMuted(mode === 'listen');
     try {
