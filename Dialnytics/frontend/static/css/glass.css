@@ -239,3 +239,101 @@ body.glass-ui .shell-main select option,body.glass-ui .shell-main select optgrou
 /* inputs inside a bordered wrapper stay flat (money fields etc.) */
 body.glass-ui .money-field input[type],body.glass-ui .money-field input:not([type=checkbox]):not([type=radio]):not([type=range]){background:transparent !important;border:0 !important;box-shadow:none !important;border-radius:0 !important;outline:0 !important}
 body.glass-ui .money-field{background:var(--field-bg) !important;border:1px solid var(--g-line) !important;border-radius:14px}
+
+/* ===================================================================
+   iOS-style glass (v4): calm midnight / pearl background, clearer glass,
+   capsule navigation, round dial keys with letters. Overrides the above.
+   =================================================================== */
+body.glass-ui{
+  --g-fill:rgba(255,255,255,.085);--g-fill2:rgba(255,255,255,.15);
+  --g-line:rgba(255,255,255,.22);--g-hi:rgba(255,255,255,.5);
+  --g-blur:28px;
+  --g-glow:#4f6bff;
+  --g-shadow:0 20px 50px rgba(3,5,18,.45);
+  --accent:#7d8cff;--accent-hover:#a9b4ff;
+  background:linear-gradient(180deg,#0a0d1c 0%,#0d1226 55%,#070912 100%) fixed !important;
+}
+body.glass-ui.light-theme{
+  --g-fill:rgba(255,255,255,.62);--g-fill2:rgba(255,255,255,.85);
+  --g-line:rgba(255,255,255,.9);--g-hi:#fff;
+  --g-glow:#a5b4fc;
+  --g-shadow:0 18px 44px rgba(40,50,120,.13);
+  --text-primary:#10163a;--text-secondary:#3a4270;--text-muted:#5b6390;
+  --accent:#3644c9;--accent-hover:#2a36a8;
+  background:linear-gradient(180deg,#f6f7fb 0%,#eceff6 100%) fixed !important;
+}
+/* one soft light from the top right + a dim glow bottom left (no moving blobs) */
+body.glass-ui::before,body.glass-ui::after{animation:none !important;border-radius:50%;filter:blur(40px)}
+body.glass-ui::before{width:1100px;height:760px;left:auto;right:-260px;top:-420px;background:radial-gradient(closest-side,var(--g-glow),transparent);opacity:.5}
+body.glass-ui::after{width:900px;height:680px;right:auto;left:-320px;bottom:-380px;background:radial-gradient(closest-side,#1e3a5f,transparent);opacity:.55}
+body.glass-ui.light-theme::before{opacity:.55}
+body.glass-ui.light-theme::after{background:radial-gradient(closest-side,#dbe4f0,transparent);opacity:.7}
+
+/* clearer glass: top light edge, deeper blur */
+body.glass-ui :is(.shell-top,.shell-nav,.dial-rail,.mob-tabbar),
+body.glass-ui .shell-main :is(.panel,.stat-card,.center-card,.card,.chart-card,.user-panel,.users-hero,.revenue-card,.repayment-panel,.script-list-panel,.script-editor-panel,.row-card,.tip,.caught-up,.prefs-card,.member-card,.client-card,.team-stat,.cost-panel,.users-list-card,.logs-list,.sms-side,.sms-main),
+body.glass-ui :is(.dn-drawer,.profile-menu,.dn-detail,.power-lead-dialog,.tour-box){
+  background-image:radial-gradient(260px circle at var(--gx,-200px) var(--gy,-200px),rgba(255,255,255,.12),transparent 60%),linear-gradient(160deg,rgba(255,255,255,.12),rgba(255,255,255,.02) 55%) !important;
+  -webkit-backdrop-filter:blur(var(--g-blur)) saturate(180%);backdrop-filter:blur(var(--g-blur)) saturate(180%);
+  box-shadow:inset 0 1px 0 var(--g-hi),inset 0 -1px 0 rgba(255,255,255,.05),var(--g-shadow) !important;
+}
+body.glass-ui .shell-main :is(.panel,.stat-card,.center-card,.card,.chart-card,.user-panel,.users-hero,.revenue-card,.repayment-panel,.row-card,.prefs-card,.member-card,.client-card,.cost-panel,.users-list-card){border-radius:26px}
+body.glass-ui .shell-main :is(.stat-card,.card,.panel,.member-card,.client-card):hover{transform:translateY(-2px)}
+body.glass-ui :is(.dn-drawer,.profile-menu,.dn-detail,.power-lead-dialog,.tour-box){border-radius:26px}
+
+/* capsule navigation: active page is a solid white pill (dark ink in light theme) */
+body.glass-ui .shell-nav a,body.glass-ui .nav-settings{border-radius:999px}
+body.glass-ui .shell-nav a.active{
+  background:#fff !important;color:#0b0f2e !important;border-color:#fff !important;
+  box-shadow:0 6px 18px rgba(0,0,0,.25) !important;animation:none !important}
+body.glass-ui .shell-nav a.active :is(svg,.ni){color:#0b0f2e !important;stroke:currentColor}
+body.glass-ui.light-theme .shell-nav a.active{background:#10163a !important;color:#fff !important;border-color:#10163a !important;box-shadow:0 6px 18px rgba(16,22,58,.25) !important}
+body.glass-ui.light-theme .shell-nav a.active :is(svg,.ni){color:#fff !important}
+
+/* primary buttons: calm solid capsule instead of the colour gradient */
+body.glass-ui :is(.btn-primary,.cm-btn,.btn-blue,.seg button.on,.chips span.on){
+  background:linear-gradient(180deg,#7d8cff,#5b6cf0) !important;border-color:rgba(255,255,255,.4) !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.55),0 8px 22px rgba(79,107,255,.35) !important}
+
+/* round glass dial keys with phone letters */
+body.glass-ui .dial-rail #dialPad .dial-btn{
+  border-radius:50% !important;aspect-ratio:1/1;font-weight:400;font-size:26px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1;
+  background:linear-gradient(160deg,rgba(255,255,255,.2),rgba(255,255,255,.05)) !important;
+  border:1px solid var(--g-line) !important;
+  box-shadow:inset 0 1px 0 var(--g-hi),0 8px 20px rgba(3,5,18,.25) !important;
+  -webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%)}
+body.glass-ui.light-theme .dial-rail #dialPad .dial-btn{background:linear-gradient(160deg,rgba(255,255,255,.9),rgba(255,255,255,.55)) !important;color:#10163a !important;box-shadow:inset 0 1px 0 #fff,0 8px 20px rgba(40,50,120,.12) !important}
+body.glass-ui .dial-rail #dialPad .dial-btn:hover{background:linear-gradient(160deg,rgba(255,255,255,.3),rgba(255,255,255,.1)) !important;box-shadow:inset 0 1px 0 var(--g-hi),0 10px 24px rgba(3,5,18,.3) !important}
+body.glass-ui .dial-rail #dialPad .dial-btn:active{transform:scale(.94)}
+body.glass-ui .dial-rail #dialPad .dial-btn::after{font-size:8.5px;letter-spacing:1.8px;font-weight:700;opacity:.7;margin-top:3px}
+body.glass-ui .dial-rail #dialPad .dial-btn:nth-child(2)::after{content:"ABC"}
+body.glass-ui .dial-rail #dialPad .dial-btn:nth-child(3)::after{content:"DEF"}
+body.glass-ui .dial-rail #dialPad .dial-btn:nth-child(4)::after{content:"GHI"}
+body.glass-ui .dial-rail #dialPad .dial-btn:nth-child(5)::after{content:"JKL"}
+body.glass-ui .dial-rail #dialPad .dial-btn:nth-child(6)::after{content:"MNO"}
+body.glass-ui .dial-rail #dialPad .dial-btn:nth-child(7)::after{content:"PQRS"}
+body.glass-ui .dial-rail #dialPad .dial-btn:nth-child(8)::after{content:"TUV"}
+body.glass-ui .dial-rail #dialPad .dial-btn:nth-child(9)::after{content:"WXYZ"}
+body.glass-ui .dial-rail #dialPad #zeroBtn .key-sub{font-size:11px;opacity:.7;margin-top:2px}
+
+/* call / hang up: glossy round buttons */
+body.glass-ui .dial-rail .call-btn{border-radius:50% !important}
+body.glass-ui .dial-rail :is(.call-btn.green,#callBtn){
+  background:linear-gradient(180deg,#5ef08f,#22c55e) !important;border:1px solid rgba(255,255,255,.45) !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.7),0 10px 26px rgba(34,197,94,.4) !important;animation:none !important}
+body.glass-ui .dial-rail .call-btn[title="Hangup"],body.glass-ui .dial-rail .call-btn[title="Decline"],body.glass-ui .hangup-big{
+  background:linear-gradient(180deg,#ff6b6b,#e11d48) !important;border:1px solid rgba(255,255,255,.4) !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.6),0 10px 26px rgba(225,29,72,.4) !important}
+body.glass-ui .dial-rail .call-btn.gray:not([title="Hangup"]):not([title="Decline"]){background:transparent !important;border:0 !important;box-shadow:none !important;color:var(--text-primary) !important}
+/* in-call controls: round glass, white when switched on */
+body.glass-ui #inCallView .incall-btn{color:var(--text-primary) !important}
+body.glass-ui #inCallView .incall-btn svg{border:1px solid var(--g-line) !important;background:linear-gradient(160deg,rgba(255,255,255,.2),rgba(255,255,255,.05));box-shadow:inset 0 1px 0 var(--g-hi),0 8px 20px rgba(3,5,18,.25);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px)}
+body.glass-ui #inCallView .incall-btn.on svg{background:#fff !important;color:#0b0f2e !important;border-color:#fff !important}
+body.glass-ui.light-theme #inCallView .incall-btn svg{background:linear-gradient(160deg,rgba(255,255,255,.95),rgba(255,255,255,.6))}
+body.glass-ui.light-theme #inCallView .incall-btn.on svg{background:#10163a !important;color:#fff !important;border-color:#10163a !important}
+body.glass-ui .dial-rail .your-number{border-radius:999px !important}
+@media (prefers-reduced-transparency:reduce){
+  body.glass-ui .dial-rail #dialPad .dial-btn{-webkit-backdrop-filter:none;backdrop-filter:none;background:rgba(40,48,90,.95) !important}
+  body.glass-ui.light-theme .dial-rail #dialPad .dial-btn{background:#fff !important}
+}

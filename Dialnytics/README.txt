@@ -1,31 +1,20 @@
-DIALNYTICS UPDATE T  -  Live listen se call kat-na (2026-11-08)
-==============================================================
-S ke upar lagao. 4 backend files:
-  backend/call_transfer.py, backend/main.py, backend/ring_group.py, backend/live_listen.py
+DIALNYTICS UPDATE U  -  iPhone jaisa glass look (2026-11-09)
+===========================================================
+T ke upar lagao. 2 files:
+  frontend/static/css/glass.css   (purane glass theme ke aakhir mein naya "iOS glass" hissa)
+  frontend/templates/base.html    (glass.css?v=4, cache ke liye)
+preview-dark.png / preview-light.png sirf dekhne ke liye hain, upload nahi karni.
 
-MASLA (Render log: 90018 "Call has already ended")
-------------------------------------------------
-Listen par caller ko conference mein le jaate hi Telnyx ne agent ki leg band kar di
-(Telnyx ka default: jodd tootte hi doosri leg hang up). Phir caller akela reh gaya aur call kat gayi.
+KYA BADLA
+---------
+- Background: tez pink/cyan/purple blobs hata diye. Dark: gehra navy-kala + upar
+  daayein halki neeli roshni. Light: pearl-white.
+- Glass: zyada saaf, upar roshan kinara, zyada blur, bade gol kone.
+- Sidebar: active page safed capsule (light theme mein gehra capsule).
+- Dial pad: gol glass keys, number ke neeche ABC/DEF letters.
+- Call hara chamakta gol button, Hang up laal gol; in-call buttons gol glass,
+  ON hone par safed.
+- Koi JS ya backend nahi badla.
 
-FIX
----
-1. Har jagah jahan agent ki leg caller se judti hai (Advanced outgoing, incoming, ring group,
-   transfer) ab Telnyx ko "park_after_unbridge: self" bheja jata hai: jodd toote to agent ki
-   leg band nahi hoti, ruki rehti hai. Normal hang up pehle ki tarah server khud karta hai.
-2. Agent conference mein na aa sake to server caller ko wapas agent se jod deta hai
-   (call nahi katti) aur saaf message deta hai.
-3. Listen ka kaam ab alag thread mein chalta hai (baqi app slow nahi hota).
-
-ZAROORI
--------
-Ye sirf NAYI calls par lagta hai. Jo call deploy se PEHLE shuru hui thi, use mat suno
-(wo purane tareeqe se judi hai). Deploy ke baad nayi call karke test karo.
-
-TEST
-----
-1. Deploy -> Ctrl+F5.
-2. Advanced user se nayi outgoing call (mobile par), 10 sec baat.
-3. Super admin -> Team -> Live call -> Listen. Call nahi katni chahiye; awaz aani chahiye.
-4. Phir ek incoming call par bhi Listen.
-Render log mein "Live listen: call ... moved into conference" aur "listener joined" lines aayengi.
+Wapas purana look chahiye ho to purani glass.css (update L) wapas laga do.
+Deploy ke baad Ctrl+F5.
