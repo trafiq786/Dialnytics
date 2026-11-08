@@ -17,6 +17,7 @@ How it works:
   4. The listener leg ends when the listener presses Stop or the call ends.
 """
 import logging
+import time
 import uuid
 
 import call_transfer as ct
@@ -139,15 +140,43 @@ def _ensure_conference(leg):
         resp = ct._tx("POST", "/v2/conferences", {
             "call_control_id": leg["customer_leg"], "name": name, "beep_enabled": "never"})
         conf = ((resp or {}).get("data") or {}).get("id") or ""
-        if not conf:
-            raise LiveError("Telnyx did not create the conference", 502)
-        ct._tx("POST", f"/v2/conferences/{conf}/actions/join", {
-            "call_control_id": leg["agent_leg"], "beep_enabled": "never"})
-    except LiveError:
-        raise
     except Exception as exc:
-        log.warning("Live listen: conference failed for %s: %s", leg["customer_leg"], getattr(exc, "detail", exc))
-        raise LiveError("Could not open the call for listening. The call is not affected.", 502)
+        log.warning("Live listen: could not create conference for %s: %s", leg["customer_leg"],
+                    str(getattr(exc, "detail", exc)).replace("\n", " ")[:300])
+        raise LiveError("Could not open this call for listening. Try again in a moment.", 502)
+    if not conf:
+        raise LiveError("Could not open this call for listening.", 502)
+    # The caller is in the conference now; bring the agent in (Telnyx may need a moment).
+    last = None
+    for attempt in range(4):
+        try:
+            ct._tx("POST", f"/v2/conferences/{conf}/actions/join", {
+                "call_control_id": leg["agent_leg"], "beep_enabled": "never"})
+            last = None
+            break
+        except Exception as exc:
+            last = str(getattr(exc, "detail", exc)).replace("\n", " ")[:300]
+            if "90018" in last:          # the agent leg is gone: retrying will not help
+                break
+            time.sleep(0.4)
+    if last:
+        log.warning("Live listen: agent could not join conference %s: %s", conf, last)
+        # Put the call back the way it was, so it is not dropped.
+        try:
+            ct._tx("POST", f"/v2/conferences/{conf}/actions/leave", {"call_control_id": leg["customer_leg"]})
+        except Exception:
+            pass
+        try:
+            ct._tx("POST", f"/v2/calls/{leg['agent_leg']}/actions/bridge",
+                   {"call_control_id": leg["customer_leg"], "park_after_unbridge": "self"})
+            log.info("Live listen: call %s put back to normal", leg["customer_leg"])
+            raise LiveError("Could not open this call for listening. The call was put back to normal.", 502)
+        except LiveError:
+            raise
+        except Exception as exc:
+            log.warning("Live listen: could not restore call %s: %s", leg["customer_leg"], getattr(exc, "detail", exc))
+            raise LiveError("Could not open this call for listening, and the call may have dropped. "
+                            "Calls that started before this update cannot be heard.", 502)
     with ct._db() as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE public.live_legs SET conference_id=%s WHERE customer_leg=%s AND ended_at IS NULL",

@@ -3375,6 +3375,7 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
                             "bridge_intent": True,
                             "bridge_on_answer": True,
                             "prevent_double_bridge": True,
+                            "park_after_unbridge": "self",   # live listening can move the caller
                             "timeout_secs": 30,
                             "command_id": str(group_id),
                             "client_state": _cs_encode(f"ring:{group_id}"),
@@ -5300,8 +5301,12 @@ async def live_listen_start(agent_id: uuid.UUID, request: Request):
         data = await request.json()
     except Exception:
         data = {}
-    tx_use(agent.get("telnyx_account"))          # the call lives on the agent's Telnyx account
-    return _live_call(ll.start, viewer, agent, str(data.get("mode") or "listen"))
+    acct = agent.get("telnyx_account")             # the call lives on the agent's Telnyx account
+    def run():
+        with tx_ctx(acct):
+            return _live_call(ll.start, viewer, agent, str(data.get("mode") or "listen"))
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(run)
 
 @app.get("/api/live/monitor/{mid}")
 async def live_monitor_status(mid: uuid.UUID, request: Request):

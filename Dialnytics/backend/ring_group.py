@@ -246,7 +246,8 @@ def _telnyx_ring(group_id, customer_leg, origin, users, parked):
             "client_state": _cs(f"rg:{group_id}:{u['id']}"),
         }
         if parked:
-            body.update({"bridge_on_answer": True, "prevent_double_bridge": True})
+            body.update({"bridge_on_answer": True, "prevent_double_bridge": True,
+                         "park_after_unbridge": "self"})   # live listening can move the caller
         if not body["from"]:
             body.pop("from")
         try:
@@ -338,7 +339,8 @@ def on_ring_event(event, group_id, uid, payload):
         if was == "queued":
             _hold_off(g["telnyx_call_id"])
             try:
-                D["telnyx"]("POST", f"/v2/calls/{leg}/actions/bridge", {"call_control_id": g["telnyx_call_id"]})
+                D["telnyx"]("POST", f"/v2/calls/{leg}/actions/bridge",
+                            {"call_control_id": g["telnyx_call_id"], "park_after_unbridge": "self"})
             except Exception:
                 log.exception("Queue bridge failed for %s", group_id)
                 D["hangup"](leg)

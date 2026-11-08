@@ -624,7 +624,8 @@ def _on_xfer_answered(tid, payload):
         return
     _hold_off(t["customer_leg"])
     try:
-        _tx("POST", f"/v2/calls/{t['to_leg']}/actions/bridge", {"call_control_id": t["customer_leg"]})
+        _tx("POST", f"/v2/calls/{t['to_leg']}/actions/bridge",
+            {"call_control_id": t["customer_leg"], "park_after_unbridge": "self"})
     except Exception:
         log.exception("Transfer bridge failed for %s", tid)
         with _db() as conn:
@@ -943,7 +944,11 @@ def _bridge_cc(cid, fast=False):
             _hangup(old["agent_leg"])        # the customer is already gone
         return False
     try:
-        _tx("POST", f"/v2/calls/{c['agent_leg']}/actions/bridge", {"call_control_id": c["customer_leg"]})
+        # park_after_unbridge: if the customer is moved (e.g. into a conference for live
+        # listening) the agent leg waits instead of being hung up by Telnyx. Normal
+        # hang-ups are still handled by customer_gone()/agent_leg_gone().
+        _tx("POST", f"/v2/calls/{c['agent_leg']}/actions/bridge",
+            {"call_control_id": c["customer_leg"], "park_after_unbridge": "self"})
         log.info("Advanced outbound %s connected%s", cid, " (fast)" if fast else "")
         return True
     except Exception as exc:
