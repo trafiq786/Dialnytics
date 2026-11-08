@@ -38,6 +38,7 @@ import voice_helpers as vh  # noqa: E402  (sibling module; works for both start 
 import call_transfer as ct  # noqa: E402  (agent transfer + advanced calling)
 from starlette.concurrency import run_in_threadpool  # noqa: E402
 import ring_group as rg  # noqa: E402  (shared numbers: ring every free member)
+import live_listen as ll  # noqa: E402  (supervisors listen / whisper / join live calls)
 import website_orders as wo  # noqa: E402  (orders from the marketing website)
 
 app = FastAPI(title="Dialnytics", version="1.2.0")
@@ -499,7 +500,7 @@ CREATE INDEX IF NOT EXISTS monitor_recordings_user_idx ON public.monitor_recordi
 CREATE INDEX IF NOT EXISTS monitor_recordings_age_idx ON public.monitor_recordings(created_at);
 ALTER TABLE public.monitor_recordings ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.monitor_recordings FROM anon, authenticated;
-""" + ct.SCHEMA_SQL + rg.SCHEMA_SQL + wo.SCHEMA_SQL
+""" + ct.SCHEMA_SQL + rg.SCHEMA_SQL + wo.SCHEMA_SQL + ll.SCHEMA_SQL
 
 def ensure_schema():
     """Idempotent additive migration (same SQL as SUPABASE_MIGRATION_07)."""
@@ -3146,6 +3147,31 @@ rg.setup(db_connect=db_connect, telnyx=_telnyx_request, cs_encode=_cs_encode,
          account_ctx=_line_ctx, should_run=worker_should_run,
          no_worker=os.getenv("TRANSFER_WORKER", "1") == "0")
 
+_live_cache = {}
+
+def _account_live_listen(account_id):
+    """Super admin turned on live call listening for this company? (cached 20 s)"""
+    hit = _live_cache.get(str(account_id))
+    if hit and time.time() - hit[1] < 20:
+        return hit[0]
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT live_listen FROM public.dialnytics_accounts WHERE id=%s", (account_id,))
+                row = cur.fetchone()
+        val = bool(row and row["live_listen"])
+    except Exception:
+        val = False
+    _live_cache[str(account_id)] = (val, time.time())
+    return val
+
+ll.setup(account_live_listen=_account_live_listen)
+
+def _can_live_team(user, account_id):
+    if _is_admin(user):
+        return True
+    return _is_owner(user) and str(user.get("account_id")) == str(account_id) and _account_live_listen(account_id)
+
 def _handle_ring_leg_event(event, group_id, background, payload=None):
     """Events from the SIP leg that rings the agent's browser."""
     ring_leg = (payload or {}).get("call_control_id") or ""
@@ -5201,6 +5227,7 @@ async def team_page(request: Request):
     return templates.TemplateResponse(request=request, name="team.html", context={
         "user": user, "account": account, "members": members, "summary": _team_summary(members),
         "can_open": _can_manage_account(user, account["id"]),
+        "can_live": _can_live_team(user, account["id"]),
         "back_url": "/clients" if _is_reseller(user) else ("/companies/" + str(account["id"]) if _is_admin(user) else ""),
     })
 
@@ -5212,6 +5239,76 @@ async def team_api(request: Request):
     account_id = _resolve_team_account(user, request.query_params.get("account"))
     members = _team_members(account_id)
     return JSONResponse({"members": members, "summary": _team_summary(members)}, headers={"Cache-Control": "no-store"})
+
+# ---- Live call listening (super admin always; company owner when allowed)
+def _live_viewer_agent(request, agent_id):
+    viewer = get_current_user(request)
+    if not viewer:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    agent = _db_user_by_id(str(agent_id))
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return viewer, agent
+
+def _live_call(fn, *args):
+    try:
+        return fn(*args)
+    except ll.LiveError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+@app.get("/api/live/{agent_id}")
+async def live_details(agent_id: uuid.UUID, request: Request):
+    viewer, agent = _live_viewer_agent(request, agent_id)
+    tx_use(agent.get("telnyx_account"))
+    return JSONResponse(_live_call(ll.details, viewer, agent), headers={"Cache-Control": "no-store"})
+
+@app.post("/api/live/{agent_id}/listen")
+async def live_listen_start(agent_id: uuid.UUID, request: Request):
+    viewer, agent = _live_viewer_agent(request, agent_id)
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    tx_use(agent.get("telnyx_account"))          # the call lives on the agent's Telnyx account
+    return _live_call(ll.start, viewer, agent, str(data.get("mode") or "listen"))
+
+@app.get("/api/live/monitor/{mid}")
+async def live_monitor_status(mid: uuid.UUID, request: Request):
+    viewer = get_current_user(request)
+    if not viewer:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return JSONResponse(_live_call(ll.status, viewer, str(mid)), headers={"Cache-Control": "no-store"})
+
+@app.post("/api/live/monitor/{mid}/mode")
+async def live_monitor_mode(mid: uuid.UUID, request: Request):
+    viewer = get_current_user(request)
+    if not viewer:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    return _live_call(ll.set_mode, viewer, str(mid), str(data.get("mode") or ""))
+
+@app.post("/api/live/monitor/{mid}/stop")
+async def live_monitor_stop(mid: uuid.UUID, request: Request):
+    viewer = get_current_user(request)
+    if not viewer:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return _live_call(ll.stop, viewer, str(mid))
+
+@app.post("/companies/{account_id}/live-listen")
+async def company_live_listen(account_id: uuid.UUID, request: Request):
+    require_admin(request)
+    form = await request.form()
+    on = str(form.get("on") or "") == "1"
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE public.dialnytics_accounts SET live_listen=%s WHERE id=%s RETURNING id", (on, account_id))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Company not found")
+    _live_cache.pop(str(account_id), None)
+    return RedirectResponse(f"/companies/{account_id}?msg=saved", status_code=303)
 
 @app.get("/team/member/{member_id}", response_class=HTMLResponse)
 async def team_member_page(member_id: uuid.UUID, request: Request):

@@ -67,4 +67,14 @@
     <div><button class="btn btn-primary">Save</button></div>
   </form>
 </section>
+<section class="panel" style="max-width:720px">
+  <h2>Live call listening</h2>
+  <p class="muted" style="margin:0 0 12px">When this is on, the company owner can listen to their team's live calls from the Team page (Listen, Whisper to agent, Join call). You can always listen as super admin.</p>
+  <form method="post" action="/companies/{{ account.id }}/live-listen" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <span class="tag {{ 'ok' if account.live_listen else '' }}" style="font-weight:700">{{ 'On' if account.live_listen else 'Off' }}</span>
+    <input type="hidden" name="on" value="{{ '0' if account.live_listen else '1' }}">
+    <button class="btn {{ '' if account.live_listen else 'btn-primary' }}">{{ 'Turn off' if account.live_listen else 'Turn on for this company' }}</button>
+    <a class="btn" href="/team?account={{ account.id }}">Open Team view</a>
+  </form>
+</section>
 {% endblock %}

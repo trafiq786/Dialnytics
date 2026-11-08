@@ -610,6 +610,12 @@ function markEnded(reason) {
                 if (!call || !call.state) return;
                 if (call.id && declinedIncomingIds.has(call.id)) return;
                 const st = String(call.state).toLowerCase();
+                // Live call listening: the supervisor's silent leg (never shown as a call).
+                if (monitorCall && call.id === monitorCall.id) { onMonitorState(call, st); return; }
+                if (!placing && !activeCall && !incomingCall && (st === 'ringing' || st === 'new') && isMonitorOffer(call)) {
+                    takeMonitorCall(call);
+                    return;
+                }
                 if (incomingCall && call.id === incomingCall.id) {
                     if (callIsDead(call)) {
                         stopRing();
@@ -1745,6 +1751,59 @@ function hangup() {
             window._ringCtx = null;
         }
     }
+    // ---- Live call listening (supervisor side). The Team page asks the server to
+    // ring this dialer; we answer that leg silently and keep the mic muted unless
+    // the supervisor chooses Whisper or Join.
+    let monitorCall = null, monitorExpect = null, monitorMuted = true;
+    function monitorDigits(v) { return String(v || '').replace(/\D/g, '').slice(-9); }
+    function isMonitorOffer(call) {
+        if (!monitorExpect || Date.now() > monitorExpect.until) return false;
+        const o = call.options || {};
+        const hs = o.customHeaders || o.custom_headers || [];
+        const hdr = Array.isArray(hs) && hs.find((h) => String(h.name || '').toLowerCase() === 'x-dn-monitor');
+        if (hdr) return true;
+        const from = monitorDigits(o.remoteCallerNumber || o.callerNumber || '');
+        return !!from && from === monitorDigits(monitorExpect.from);
+    }
+    function takeMonitorCall(call) {
+        monitorExpect = null;
+        monitorCall = call;
+        monitorMuted = true;
+        try { call.answer(); } catch (e) {}
+    }
+    function onMonitorState(call, st) {
+        if (callIsDead(call)) {
+            monitorCall = null;
+            document.dispatchEvent(new CustomEvent('dn-monitor', { detail: { state: 'ended' } }));
+            return;
+        }
+        if (st === 'active') {
+            try { if (monitorMuted) call.muteAudio(); } catch (e) {}
+            const audio = document.getElementById('remoteAudio');
+            if (audio && call.remoteStream && audio.srcObject !== call.remoteStream) {
+                audio.srcObject = call.remoteStream;
+                audio.play && audio.play().catch(() => {});
+            }
+            document.dispatchEvent(new CustomEvent('dn-monitor', { detail: { state: 'active' } }));
+        }
+    }
+    window.DNMonitor = {
+        busy: () => !!(activeCall || incomingCall || placing),
+        expect: (from) => { monitorExpect = { from: from || '', until: Date.now() + 45000 }; },
+        cancel: () => { monitorExpect = null; },
+        setMuted: (m) => {
+            monitorMuted = !!m;
+            if (!monitorCall) return;
+            try { if (m) monitorCall.muteAudio(); else monitorCall.unmuteAudio(); } catch (e) {}
+        },
+        hangup: () => {
+            monitorExpect = null;
+            const c = monitorCall;
+            monitorCall = null;
+            if (c) { try { c.hangup(); } catch (e) {} }
+        },
+        active: () => !!monitorCall
+    };
     function showIncoming(call) {
         // A new SIP leg can be offered again while the original PSTN leg is
         // still parked. Do not display it until the backend confirms there is

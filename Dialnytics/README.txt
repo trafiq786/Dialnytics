@@ -1,27 +1,46 @@
-DIALNYTICS UPDATE O  -  Advanced calling ko tez karna (2026-11-08)
-=================================================================
-Update N2 ke upar lagao. Sirf 2 files: backend/call_transfer.py, backend/main.py
+DIALNYTICS UPDATE P  -  Live call: Listen / Whisper / Join (2026-11-08)
+=======================================================================
+Update O ke upar lagao.
 
-KYA TEZ HUA
------------
-1. Client uthane ke baad (khamoshi wala hissa):
-   Pehle: answer -> Telnyx ke webhook ka intezar -> phir jodna.
-   Ab:    answer -> foran jodna. Webhook sirf backup ke taur par.
-   Is se ek poora internet chakkar (Telnyx -> Render -> wapas) bach jata hai.
-2. Ghanti bajne se pehle:
-   User ab server ki memory se pehchana jata hai, database ka ek chakkar kam.
+KAUN SUN SAKTA HAI
+------------------
+- Super admin (aap): har company ki live calls.
+- Company owner: SIRF jab aap us company ke liye allow karo, aur sirf apni team.
+  Allow karna: Companies -> company kholo -> "Live call listening" -> Turn on.
 
-Database khud update hota hai (cc_calls.bridged_at), kuch manually nahi chalana.
+KAISE
+-----
+Team page -> jo agent call par hai us ke card par hara "Live call" button ->
+neeche popup: kis number se baat, incoming/outgoing, timer + buttons:
+  Listen   : chupchap sunna (aap ka mic band, kisi ko pata nahi)
+  Whisper  : sirf agent aap ko sunta hai
+  Join     : sab aap ko sunte hain
+  Stop listening, Call logs, Recordings
+Sunne wali call aap ke APNE dialer mein chupchap aati hai (ringing nahi dikhti).
 
-TEST
-----
-Deploy -> dialer Ctrl+F5 -> Advanced user se call.
-Render logs mein "Advanced outbound ... connected (fast)" dikhe to naya tez raasta chal raha hai.
+SHARTEIN
+--------
+- Sunne wale (aap/owner) ki login par Telnyx calling line ho aur dialer khula + signed in ho.
+- Sirf Telnyx lines. Outgoing calls sirf tab jab us agent ka Advanced calling ON ho;
+  incoming calls hamesha.
+- Sunne wale ki leg ka per-minute charge alag lagta hai.
+- Pehli dafa koi sunta hai to call Telnyx conference mein shift hoti hai
+  (agent/caller ko aadha second ki atkan mehsoos ho sakti hai).
+- Listen ke dauran us call par Transfer / Leave call na karein.
 
-AUR TEZI KE LIYE (aap ki taraf se)
----------------------------------
-- Render service aur Supabase database ka REGION ek hi ho (dono US East / dono Frankfurt).
-  Alag region = har database chakkar par 100-200 ms extra.
-- Render plan: Free/Starter instance par CPU kam hota hai; Standard par webhooks tez chalti hain.
-- Advanced calling sirf un users ke liye ON rakho jinhe Leave call / Transfer chahiye.
-  Baqi users seedhi calling par sab se tez rehte hain.
+FILES
+-----
+backend/live_listen.py  (NAYI file)
+backend/call_transfer.py, backend/main.py
+frontend/templates/team.html, team_member.html, company_detail.html, base.html
+frontend/static/js/dialer.js
+Database khud update hota hai.
+
+PEHLA TEST
+----------
+1. Companies -> apni test company -> Live call listening: Turn on.
+2. Agent (Telnyx line) se apne mobile par call (outgoing ho to agent ka Advanced calling ON).
+3. Aap doosre browser/computer par apne login se Team page -> Live call -> Listen.
+   10-15 sec mein "Listening" aana chahiye aur dono taraf ki awaz aani chahiye.
+4. Whisper -> sirf agent sune. Join -> sab sunein. Stop -> aap nikal jao, call chalti rahe.
+Masla ho to Render logs mein "Live listen" wali lines bhejo.

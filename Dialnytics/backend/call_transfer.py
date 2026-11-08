@@ -37,6 +37,8 @@ TRANSFER_WAIT_SECONDS = int(os.getenv("TRANSFER_WAIT_SECONDS", "180"))   # busy 
 TRANSFER_RING_SECONDS = int(os.getenv("TRANSFER_RING_SECONDS", "30"))
 OUTBOUND_RING_SECONDS = int(os.getenv("ADV_OUTBOUND_RING_SECONDS", "45"))
 ADV_CONN = os.getenv("TELNYX_ADV_CONNECTION_ID", "").strip()
+GONE_HOOKS = []        # called with a customer leg when its call is over (e.g. live listening)
+PREFIX_HOOKS = {}      # client_state prefix -> handler(event, rest, payload), e.g. "mon:"
 LEAVE_MAX_MINUTES = int(os.getenv("LEAVE_MAX_MINUTES", "120"))   # a call nobody from the team is on ends after 2 h
 
 SCHEMA_SQL = """
@@ -321,6 +323,11 @@ def customer_gone(customer_leg):
             _close_left(cur, customer_leg)
     for leg in legs:
         _hangup(leg)
+    for hook in GONE_HOOKS:
+        try:
+            hook(customer_leg)
+        except Exception:
+            log.exception("Call-end hook failed")
 
 
 def on_plain_hangup(call_id):
@@ -956,6 +963,13 @@ def _bridge_cc(cid, fast=False):
 # ---------------------------------------------------------------- webhook router
 def handle_webhook(event, payload, client_state, find_user):
     """Returns True when the event was fully handled here."""
+    for prefix, hook in PREFIX_HOOKS.items():
+        if client_state.startswith(prefix):
+            try:
+                hook(event, client_state[len(prefix):], payload)
+            except Exception:
+                log.exception("Webhook hook %s failed (%s)", prefix, event)
+            return True
     if client_state.startswith("xfer:"):
         tid = client_state[5:]
         try:
