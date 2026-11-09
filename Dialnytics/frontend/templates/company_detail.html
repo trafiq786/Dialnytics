@@ -9,7 +9,7 @@
   </div>
   <div class="cm-actions"><a class="btn btn-primary" href="/team?account={{ account.id }}">🟢 Live team view</a><a class="dn-btn" href="/users">+ Add user</a></div>
 </div>
-{% if msg %}<div class="success-msg">Saved.</div>{% endif %}
+{% if msg == 'has_users' %}<div class="error-msg" style="color:#ef4444;margin:0 0 12px">This company still has active users. Remove or delete them first, then delete the company.</div>{% elif msg %}<div class="success-msg">Saved.</div>{% endif %}
 
 <section class="panel">
   <h2>Team</h2>
@@ -76,5 +76,16 @@
     <button class="btn {{ '' if account.live_listen else 'btn-primary' }}">{{ 'Turn off' if account.live_listen else 'Turn on for this company' }}</button>
     <a class="btn" href="/team?account={{ account.id }}">Open Team view</a>
   </form>
+</section>
+<section class="panel" style="max-width:720px;border-color:rgba(239,68,68,.35)">
+  <h2 style="color:#ef4444">Delete company</h2>
+  {% set active_n = members|selectattr('is_active')|list|length %}{% if active_n %}
+  <p class="muted" style="margin:0">This company has {{ active_n }} active user(s). Remove or delete them first, then you can delete the company.</p>
+  {% else %}
+  <p class="muted" style="margin:0 0 12px">This company has no users. Deleting it removes it from Companies. This cannot be undone.</p>
+  <form method="post" action="/companies/{{ account.id }}/delete" onsubmit="return confirm('Delete company &quot;{{ account.name|e }}&quot;? This cannot be undone.')">
+    <button class="btn" style="background:#ef4444;border-color:#ef4444;color:#fff">Delete company</button>
+  </form>
+  {% endif %}
 </section>
 {% endblock %}

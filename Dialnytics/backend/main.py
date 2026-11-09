@@ -5131,6 +5131,23 @@ def _can_view_account(viewer, account_id):
         return bool(acc) and str(acc["reseller_id"] or "") == viewer["id"]
     return False
 
+EMPTY_COMPANY_GRACE_HOURS = int(os.getenv("EMPTY_COMPANY_GRACE_HOURS", "24"))
+
+def _purge_empty_companies():
+    """Delete companies that have no active user. Brand-new ones get a grace period to add users."""
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""DELETE FROM public.dialnytics_accounts a
+                    WHERE a.created_at < now() - make_interval(hours => %s)
+                      AND NOT EXISTS (SELECT 1 FROM public.dialnytics_users u WHERE u.account_id=a.id AND u.is_active)
+                    RETURNING a.name""", (EMPTY_COMPANY_GRACE_HOURS,))
+                gone = [r["name"] for r in cur.fetchall()]
+        if gone:
+            log.info("Removed %d empty companies: %s", len(gone), ", ".join(gone[:20]))
+    except Exception:
+        log.exception("Empty company cleanup failed")
+
 def _all_companies():
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -5391,6 +5408,7 @@ async def team_member_page(member_id: uuid.UUID, request: Request):
 @app.get("/companies", response_class=HTMLResponse)
 async def companies_page(request: Request):
     admin = require_admin(request)
+    _purge_empty_companies()
     return templates.TemplateResponse(request=request, name="companies.html", context={
         "user": admin, "companies": _all_companies(), "resellers": _all_resellers(),
         "msg": request.query_params.get("msg")})
@@ -5465,6 +5483,19 @@ async def company_update(account_id: uuid.UUID, request: Request, name: str = Fo
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Company not found")
     return RedirectResponse(f"/companies/{account_id}?msg=saved", status_code=303)
+
+@app.post("/companies/{account_id}/delete")
+async def company_delete(account_id: uuid.UUID, request: Request):
+    require_admin(request)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""DELETE FROM public.dialnytics_accounts a WHERE a.id=%s
+                AND NOT EXISTS (SELECT 1 FROM public.dialnytics_users u WHERE u.account_id=a.id AND u.is_active)
+                RETURNING id""", (account_id,))
+            ok = cur.fetchone()
+    if not ok:
+        return RedirectResponse(f"/companies/{account_id}?msg=has_users", status_code=303)
+    return RedirectResponse("/companies?msg=deleted", status_code=303)
 
 @app.post("/companies/{account_id}/members")
 async def company_member(account_id: uuid.UUID, request: Request, user_id: str = Form(...),
