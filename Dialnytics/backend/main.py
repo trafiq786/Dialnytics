@@ -4850,6 +4850,8 @@ async def power_dialer_page(request: Request):
     if not has_power(user): return locked_page(request, user, "Power Dialer")
     return templates.TemplateResponse(request=request,name="power_dialer.html",context={"user":user})
 
+POWER_QUEUE_MAX = int(os.getenv("POWER_QUEUE_MAX", "5000"))
+
 @app.post("/api/power/queue")
 async def power_queue_create(request: Request):
     user=get_current_user(request)
@@ -4864,8 +4866,8 @@ async def power_queue_create(request: Request):
     except (ValueError,TypeError): raise HTTPException(status_code=422,detail="Invalid delay")
     if not 3<=delay<=30: raise HTTPException(status_code=422,detail="Delay must be 3-30 seconds")
     requested=data.get("lead_ids")
-    if not isinstance(requested,list) or not requested or len(requested)>500:
-        raise HTTPException(status_code=422,detail="Select 1 to 500 CRM leads")
+    if not isinstance(requested,list) or not requested or len(requested)>POWER_QUEUE_MAX:
+        raise HTTPException(status_code=422,detail=f"Select 1 to {POWER_QUEUE_MAX} CRM leads")
     try: requested_ids=[uuid.UUID(str(x)) for x in requested]
     except (TypeError,ValueError): raise HTTPException(status_code=422,detail="Invalid lead IDs")
     if len(set(requested_ids))!=len(requested_ids):
@@ -4882,9 +4884,10 @@ async def power_queue_create(request: Request):
             cur.execute("""INSERT INTO public.power_queues(user_id,mode,delay_seconds,status)
                 VALUES(%s,%s,%s,'paused') RETURNING id""",(user["id"],mode,delay))
             qid=cur.fetchone()["id"]
-            for idx,lead in enumerate(ids):
-                cur.execute("""INSERT INTO public.power_queue_items(queue_id,lead_id,position)
-                    VALUES(%s,%s,%s)""",(qid,lead,idx))
+            # one statement for the whole list (fast even for thousands of leads)
+            cur.execute("""INSERT INTO public.power_queue_items(queue_id,lead_id,position)
+                SELECT %s, t.lead, t.pos - 1 FROM unnest(%s::uuid[]) WITH ORDINALITY AS t(lead,pos)""",
+                (qid,ids))
     return {"queue_id":str(qid),"count":len(ids)}
 
 @app.get("/api/power/queue/{queue_id}")

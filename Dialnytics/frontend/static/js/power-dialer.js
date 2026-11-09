@@ -2,7 +2,7 @@
 'use strict';
 const $=id=>document.getElementById(id);let queueId=null,queue=null,items=[],busy=false,activeItem=null,callEnded=false,timer=null,sequence=0,crmLeads=[],selected=new Set(),noteItemId=null,noteDirty=false;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function note(s){$('powerFeedback').textContent=s;}
+function note(s){$('powerFeedback').textContent=s;const d=$('powerDialogFeedback');if(d)d.textContent=$('powerLeadDialog')?.open?s:'';}
 async function api(path,method='GET',body){const r=await fetch(path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});let d;try{d=await r.json()}catch{d={}}if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:`Request failed (${r.status})`);return d;}
 function clearWait(){if(timer)clearTimeout(timer);timer=null;sequence++;$('powerNext').textContent='';}
 function nextItem(){return items.find(i=>!i.finished_at)}
@@ -22,7 +22,7 @@ $('powerSelectAll').onchange=e=>{const q=$('powerLeadSearch').value.trim().toLow
 $('powerLeadOptions').onchange=e=>{const id=e.target.dataset.lead;if(!id)return;e.target.checked?selected.add(id):selected.delete(id);renderLeadPicker();};
 $('powerLeadOptions').addEventListener('click',e=>{const d=e.target.closest('[data-del-lead]');if(!d)return;const l=crmLeads.find(x=>x.id===d.dataset.delLead);if(l)deleteLeads([l.id],l.name);});
 $('powerDeleteSelected').onclick=()=>deleteLeads([...selected],`${selected.size} selected lead${selected.size>1?'s':''}`);
-$('powerConfirmQueue').onclick=async()=>{const ready=selEligible();if(!ready.length)return;const btn=$('powerConfirmQueue');btn.disabled=true;try{clearWait();const d=await api('/api/power/queue','POST',{mode:$('powerMode').value,delay:Number($('powerDelay').value),lead_ids:ready.map(l=>l.id)});queueId=d.queue_id;activeItem=null;noteItemId=null;await load();$('powerLeadDialog').close();note(`Queue created with ${d.count} selected eligible leads. Press Start.`);}catch(e){note(e.message);}finally{btn.disabled=false;}};
+$('powerConfirmQueue').onclick=async()=>{const ready=selEligible();if(!ready.length)return;const btn=$('powerConfirmQueue');btn.disabled=true;try{clearWait();note(`Creating queue with ${ready.length} leads...`);const d=await api('/api/power/queue','POST',{mode:$('powerMode').value,delay:Number($('powerDelay').value),lead_ids:ready.map(l=>l.id)});queueId=d.queue_id;activeItem=null;noteItemId=null;await load();$('powerLeadDialog').close();note(`Queue created with ${d.count} selected eligible leads. Press Start.`);}catch(e){note(e.message);}finally{btn.disabled=false;}};
 async function saveNotes(){if(!queueId||!noteItemId)return;const value=$('powerNotes').value;$('powerNotesStatus').textContent='Saving...';try{await api(`/api/power/queue/${queueId}/notes`,'POST',{item_id:noteItemId,notes:value});const item=items.find(i=>i.id===noteItemId);if(item)item.call_notes=value;noteDirty=false;$('powerNotesStatus').textContent='Saved';}catch(e){$('powerNotesStatus').textContent='Save failed: '+e.message;throw e;}}
 $('powerNotes').oninput=()=>{noteDirty=true;$('powerNotesStatus').textContent='Unsaved';};
 $('powerSaveNotes').onclick=()=>saveNotes().catch(()=>{});
