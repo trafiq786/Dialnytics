@@ -347,3 +347,10 @@ body.glass-ui.light-theme::before{opacity:.45}
 @media (min-width:1025px){
   body.glass-ui .shell-nav{margin:14px 0 14px 14px;border-radius:26px !important;border:1px solid var(--g-line) !important;align-self:start}
 }
+
+/* v4.2: muted = clear red ring around the mute button */
+body.glass-ui #inCallView #muteBtn.on svg,body.glass-ui.light-theme #inCallView #muteBtn.on svg{
+  background:rgba(239,68,68,.16) !important;color:#ef4444 !important;
+  border:2px solid #ef4444 !important;
+  box-shadow:0 0 0 4px rgba(239,68,68,.22),0 0 18px rgba(239,68,68,.45) !important}
+body.glass-ui #inCallView #muteBtn.on,body.glass-ui #inCallView #muteBtn.on #muteLabel{color:#ef4444 !important;font-weight:700}
