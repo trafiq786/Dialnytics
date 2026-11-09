@@ -48,6 +48,49 @@
 #inCallView.keypad-open .incall-avatar { display: none; }
 #inCallView.keypad-open .incall-grid { display: none; }
 #inCallView.keypad-open .incall-number { margin-bottom: 10px; }
+/* The whole dialer fits its screen without scrolling: dialer.js adds fit-1..fit-4 step by step until it fits. */
+#dialRail #inCallView { min-height: 0; flex: 1 1 auto; justify-content: center; padding-top: 4px; }
+#dialRail #inCallView > * { flex-shrink: 0; }
+#dialRail.in-call #rtcStatus { display: none; }
+#dialRail #inCallView .incall-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; max-width: 280px; }
+#dialRail #inCallView .incall-number, #dialRail #incomingView .incall-number { text-align: center; word-break: break-all; }
+/* step 1: a little tighter */
+#dialRail.fit-1 .dial-pad { max-width: 236px; gap: 10px; margin-left: auto; margin-right: auto; margin-bottom: 14px; }
+#dialRail.fit-1 .your-number { margin-bottom: 8px; }
+#dialRail.fit-1 #inCallView .incall-state { margin-bottom: 8px; }
+#dialRail.fit-1 :is(#inCallView, #incomingView) .incall-avatar { width: 54px; height: 54px; margin-bottom: 8px; box-shadow: 0 0 0 7px rgba(34, 197, 94, .16); }
+#dialRail.fit-1 :is(#inCallView, #incomingView) .incall-avatar svg { width: 26px; height: 26px; }
+#dialRail.fit-1 :is(#inCallView, #incomingView) .incall-number { font-size: 19px; margin-bottom: 12px; }
+#dialRail.fit-1 #inCallView .incall-grid { gap: 10px 6px; margin-bottom: 10px; }
+#dialRail.fit-1 #inCallView .incall-btn { gap: 5px; }
+#dialRail.fit-1 #inCallView .incall-btn svg { width: 50px; height: 50px; padding: 14px; }
+#dialRail.fit-1 #inCallView .hangup-big { width: 58px; height: 58px; }
+/* step 2: smaller keys, compact number box */
+#dialRail.fit-2 .dial-pad { max-width: 206px; gap: 8px; margin-bottom: 10px; }
+#dialRail.fit-2 .dial-pad .dial-btn { font-size: 21px !important; }
+#dialRail.fit-2 .your-number { padding-top: 7px !important; padding-bottom: 7px !important; margin-bottom: 6px !important; }
+#dialRail.fit-2 #pnHint { display: none; }
+#dialRail.fit-2 #rtcStatus { margin-bottom: 6px !important; }
+#dialRail.fit-2 .compose-title { margin: 4px 0 8px; }
+#dialRail.fit-2 #inCallView .incall-avatar { display: none; }
+#dialRail.fit-2 #inCallView .incall-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); max-width: 300px; }
+#dialRail.fit-2 #inCallView .incall-btn { font-size: 11px; }
+#dialRail.fit-2 #inCallView .incall-btn svg { width: 46px; height: 46px; padding: 12px; }
+/* step 3: hide the "Your number" box and the floating phone button */
+#dialRail.fit-3 .your-number, #dialRail.fit-3 #pipBtn { display: none !important; }
+#dialRail.fit-3 .dial-pad { max-width: 184px; gap: 7px; }
+#dialRail.fit-3 .dial-pad .dial-btn { font-size: 19px !important; }
+#dialRail.fit-3 #inCallView .incall-btn svg { width: 42px; height: 42px; padding: 11px; }
+#dialRail.fit-3 #inCallView .dtmf-pad .dial-btn { width: 54px; height: 54px; }
+/* step 4: very small screens */
+#dialRail.fit-4 .dial-pad { max-width: 162px; gap: 6px; }
+#dialRail.fit-4 .dial-pad .dial-btn { font-size: 17px !important; }
+#dialRail.fit-4 .dial-pad .dial-btn::after, #dialRail.fit-4 .dial-pad .key-sub { display: none !important; }
+#dialRail.fit-4 .call-actions .call-btn { width: 50px !important; height: 50px !important; }
+#dialRail.fit-4 #inCallView .dtmf-pad .dial-btn { width: 46px; height: 46px; }
+#dialRail.fit-4 #rtcStatus, #dialRail.fit-4 .compose-title, #dialRail.fit-4 #composePasteBtn { display: none !important; }
+#dialRail.fit-4 .back-link { margin-bottom: 4px; }
+#dialRail.fit-4 #composeInput { margin-bottom: 8px !important; }
 #composeView[hidden], #callsView[hidden], #incomingView[hidden] { display: none !important; }
 #incomingView { width: 100%; display: flex; flex-direction: column; align-items: center; text-align: center; padding-top: 12px; }
 #incomingView .incall-avatar {

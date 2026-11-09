@@ -1,13 +1,17 @@
-Update X - Empty companies delete
-Files replace karein:
-  Dialnytics/backend/main.py
-  Dialnytics/frontend/templates/companies.html
-  Dialnytics/frontend/templates/company_detail.html
+Update Y - Poora interface responsive + dialer fit
 
-1) Auto: jis company mein koi active user na ho (aur 24 ghante se purani ho) wo
-   Companies page kholte hi khud delete ho jati ha. Nayi bani company ko 24 ghante milte hain users add karne ke liye.
-   (Render env EMPTY_COMPANY_GRACE_HOURS se time badal sakte hain, default 24)
-2) Manual: Companies list mein jis company ke Users = 0 hain wahan red "Delete" button.
-   Company detail page ke neeche "Delete company" section.
-   Jis company mein active users hain wo delete nahi hogi (pehle users hatayen).
-Database change koi nahi.
+Nayi files (add karein):
+  Dialnytics/frontend/static/css/responsive.css
+  Dialnytics/frontend/static/js/responsive.js
+Replace karein:
+  Dialnytics/frontend/templates/base.html      (nayi files load + cache refresh)
+  Dialnytics/frontend/templates/dialer_rail.html
+  Dialnytics/frontend/static/js/dialer.js
+  Dialnytics/frontend/static/js/mobile-nav.js
+
+Kya badla:
+- Mobile pe har table ki row card ban jati ha (label + value), koi column nahi katta.
+- Billing / Invoice ke side-by-side boxes phone aur tablet pe neeche neeche.
+- Dialer har screen pe fit, scroll nahi; call ke dauran "Calling..." aik dafa.
+- Laptop/bari screen pe kuch nahi badla.
+Database change koi nahi. Note: update W (glass.css v6) pehle laga hona chahiye.

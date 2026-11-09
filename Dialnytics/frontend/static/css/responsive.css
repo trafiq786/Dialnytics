@@ -1,0 +1,69 @@
+/* ===== Responsive layer: every page fits phones, tablets and laptops =====
+   Loaded after style.css and glass.css. Tables turn into cards on phones
+   (labels come from responsive.js), side-by-side panels stack. */
+
+/* never let a page scroll sideways */
+html, body { max-width: 100%; overflow-x: hidden; }
+.shell-main { min-width: 0; }
+.shell-main img, .shell-main video, .shell-main canvas, .shell-main iframe { max-width: 100%; }
+.shell-main pre, .shell-main code { white-space: pre-wrap; word-break: break-word; }
+.shell-main :is(h1, h2, h3) { overflow-wrap: anywhere; }
+
+/* tablets and small laptops */
+@media (max-width: 1100px) {
+  .shell-main .cm-grid[style] { grid-template-columns: minmax(0, 1fr) !important; }
+  .ls-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+}
+
+/* phones */
+@media (max-width: 760px) {
+  .shell-main .page-head, .shell-main .module-head, .shell-main .cm-head { flex-wrap: wrap; gap: 10px; }
+  .shell-main .page-head > *, .shell-main .cm-head > * { min-width: 0; }
+  .shell-main .page-head h1, .shell-main .module-head h1, .shell-main .cm-head h1 { font-size: 23px; }
+  .rsp-stack { grid-template-columns: minmax(0, 1fr) !important; }
+  .um-grid, .um-checks, .um-checks.two { grid-template-columns: minmax(0, 1fr) !important; }
+  .shell-main .panel, .shell-main .module-card, .shell-main .cm-card { padding-left: 14px; padding-right: 14px; }
+  .shell-main input:not([type=checkbox]):not([type=radio]), .shell-main select, .shell-main textarea { max-width: 100%; }
+  .shell-main .inline-form { flex-wrap: wrap; }
+  .shell-main .inv-paper { overflow-x: auto; }
+  .shell-main .inv-body { padding: 16px; }
+  dialog, .module-dialog, .power-lead-dialog { max-width: calc(100vw - 20px) !important; max-height: calc(100dvh - 30px) !important; }
+
+  /* tables -> cards */
+  .shell-main .rt-wrap { overflow: visible !important; }
+  .shell-main table.rt-cards { display: block; width: 100% !important; min-width: 0 !important; border: 0 !important; background: none !important; }
+  .shell-main table.rt-cards thead, .shell-main table.rt-cards tr.rt-head { display: none; }
+  .shell-main table.rt-cards tbody, .shell-main table.rt-cards tfoot { display: block; }
+  .shell-main table.rt-cards tr { display: block; margin: 0 0 10px; padding: 6px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); }
+  .shell-main table.rt-cards tr:hover td { background: transparent !important; }
+  .shell-main table.rt-cards td, .shell-main table.rt-cards th { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    min-width: 0; width: auto !important; padding: 8px 0 !important; border: 0 !important; border-bottom: 1px solid var(--border) !important;
+    text-align: right; white-space: normal !important; background: transparent !important; overflow-wrap: anywhere; }
+  .shell-main table.rt-cards td:last-child { border-bottom: 0 !important; }
+  .shell-main table.rt-cards td::before { content: attr(data-label); flex: 0 0 auto; max-width: 45%; text-align: left; font-size: 11px; font-weight: 600;
+    letter-spacing: .04em; text-transform: uppercase; color: var(--text-secondary); }
+  .shell-main table.rt-cards td > * { min-width: 0; }
+  .shell-main table.rt-cards .rt-v { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; min-width: 0; }
+  .shell-main table.rt-cards td:first-child .rt-v { align-items: flex-start; }
+  .shell-main table.rt-cards .rt-v.rt-act { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+  .shell-main table.rt-cards .rt-v > :is(form, div) { max-width: 100%; }
+  .shell-main table.rt-cards td[data-label=""]::before { display: none; }
+  .shell-main table.rt-cards td[data-label=""] { justify-content: flex-end; }
+  /* the first cell is the card title */
+  .shell-main table.rt-cards td:first-child { justify-content: flex-start; text-align: left; font-size: 15px; }
+  .shell-main table.rt-cards td:first-child::before { display: none; }
+  /* empty-state rows */
+  .shell-main table.rt-cards td[colspan] { display: block; text-align: center; border: 0 !important; }
+  .shell-main table.rt-cards td[colspan]::before { display: none; }
+  /* action buttons wrap instead of squeezing */
+  .shell-main table.rt-cards td :is(form, .actions, .row-actions) { display: inline-flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+}
+
+@media (max-width: 380px) {
+  .ls-grid { grid-template-columns: minmax(0, 1fr) !important; }
+  .shell-main table.rt-cards td { flex-wrap: wrap; }
+  .shell-main table.rt-cards td::before { max-width: 100%; }
+}
+
+/* wider screens: the wrapper is invisible */
+@media (min-width: 761px) { .rt-v { display: contents; } }

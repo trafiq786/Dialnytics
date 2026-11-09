@@ -1927,6 +1927,40 @@ function hangup() {
             if (view) view.hidden = false;
         }
     }
+    // Shrink the dialer step by step until it fits its screen without scrolling.
+    function fitRail() {
+        const rail = document.getElementById('dialRail');
+        const view = document.getElementById('inCallView');
+        if (!rail) return;
+        const levels = ['fit-1', 'fit-2', 'fit-3', 'fit-4'];
+        rail.classList.remove(...levels);
+        rail.classList.toggle('in-call', !!(view && !view.hidden));
+        if (!rail.clientHeight) return;            // dialer closed (phone) or not on screen
+        for (const lv of levels) {
+            if (rail.scrollHeight <= rail.clientHeight + 1) break;
+            rail.classList.add(lv);
+        }
+    }
+    let fitQueued = false;
+    function queueFit() {
+        if (fitQueued) return;
+        fitQueued = true;
+        requestAnimationFrame(() => { fitQueued = false; fitRail(); });
+    }
+    window.dnFitDialer = queueFit;
+    window.addEventListener('resize', queueFit);
+    window.addEventListener('orientationchange', queueFit);
+    {
+        const rail = document.getElementById('dialRail');
+        const view = document.getElementById('inCallView');
+        if (rail && window.ResizeObserver) new ResizeObserver(queueFit).observe(rail);
+        if (rail && window.MutationObserver) {
+            // Views, bars and messages show and hide inside the dialer: refit when they do.
+            new MutationObserver(queueFit).observe(rail, { attributes: true, attributeFilter: ['hidden'], childList: true, subtree: true });
+            if (view) new MutationObserver(queueFit).observe(view, { attributes: true, attributeFilter: ['class'] });
+        }
+        queueFit();
+    }
     function showInCall(number) {
         hidePanels();
         const view = document.getElementById('inCallView');
@@ -1938,9 +1972,11 @@ function hangup() {
         document.getElementById('keypadBtn').classList.remove('on');
         renderLines();
         if (xfer) renderXfer(null);
+        fitRail();
     }
     function showDialPad() {
         hidePanels();
+        queueFit();
         document.getElementById('padBody').hidden = false;
         document.getElementById('inCallView').classList.remove('keypad-open');
         document.getElementById('dtmfPad').hidden = true;

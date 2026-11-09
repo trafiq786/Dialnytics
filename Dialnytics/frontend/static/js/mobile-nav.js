@@ -16,6 +16,7 @@
 
     function setRail(open) {
         body.classList.toggle('rail-open', open);
+        if (open && window.dnFitDialer) setTimeout(window.dnFitDialer, 280);   // after the slide-in
         if (dialBtn) dialBtn.setAttribute('aria-expanded', String(open));
         if (open) closeMore();
     }
