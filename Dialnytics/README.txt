@@ -1,18 +1,12 @@
-Update BB - Dashboard sahi aur live
+Update CC - Call status sahi waqt pe
 
 Replace karein:
-  Dialnytics/backend/main.py
-  Dialnytics/frontend/templates/dashboard.html
-  Dialnytics/frontend/templates/base.html
   Dialnytics/frontend/static/js/dialer.js
-(Is mein AA, Z, X ke changes b shamil hain. Database change koi nahi.)
+  Dialnytics/frontend/templates/base.html   (dialer.js?v=20261113 - cache refresh)
+(BB ke baad lagayein - base.html mein BB wala version b ha.)
 
-Kya theek hua:
-- "Today / This Week / This Month" ab user ke apne time zone se (browser ka) - pehle Pakistan time fix tha,
-  is liye UK/US agents ka "Today" ghalat hota tha.
-- Dashboard har 20 second mein khud update hota ha, aur call khatam hote hi b.
-- Contacts Added: sirf us period mein add hue contacts (pehle sab time ke).
-- Follow-ups Scheduled: CRM leads ke follow-ups jo us period mein hain (pehle hamesha 0).
-- Call Outcomes: "Answered" aur "Not answered" (pehle "Outgoing" ghalat label tha).
-- Disposition (nakli 100%) ki jagah asli Call Breakdown: Outgoing aur Incoming (answered / missed).
-- Ways to Improve: asli data se tips (missed calls, kam pick-up, chhoti calls, follow-ups).
+- Call milte hi 1.5 sec baad "Ringing" (UK/US network aksar ringing ka signal nahi bhejte the,
+  is liye "Calling..." atka rehta tha).
+- Samne wala answer kare tou foran "Active" + timer. Advanced calling mein bilkul foran,
+  normal calling mein ~1 sec "Connecting" (awaz confirm hone tak).
+- Answer ke baad dobara "Ringing" nahi aata.

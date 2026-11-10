@@ -72,6 +72,8 @@ const input = document.getElementById('numberInput');
     let lastState = '';
     let activeConfirmed = false;
     let answerHold = null;
+    let ringShown = false;        // outgoing call reached the carrier: keep showing "Ringing"
+    let ringLabelTimer = null;
     let rtpPackets = -1;
     let rtpStall = 0;
     let silentTicks = 0;
@@ -288,7 +290,7 @@ function markEnded(reason) {
             }
             ticks += 1;
             const grew = rtpPackets > base;
-            if (grew && ticks >= 2) {
+            if (grew && ticks >= 1) {
                 clearInterval(answerHold);
                 answerHold = null;
                 activeConfirmed = true;
@@ -307,10 +309,20 @@ function markEnded(reason) {
         if (ended) return;
         st = String(st || '').toLowerCase();
         if (onHold && st === 'active') st = 'held';          // browser-side hold
+        const outgoing = !String((activeCall && activeCall.direction) || '').toLowerCase().startsWith('in');
         if (st === 'active' && !activeConfirmed) {
-            armAnswerCheck();
-            st = 'ringing';
+            if (ADV && outgoing) {
+                // Advanced calling: the server answers this leg only when the customer
+                // picks up, so "active" here IS the answer. Show it straight away.
+                activeConfirmed = true;
+            } else {
+                armAnswerCheck();
+                st = 'answering';
+            }
         }
+        if (st === 'early' || st === 'ringing') ringShown = true;
+        // Once ringing is shown, late "trying" updates must not flip it back to "Calling...".
+        if (ringShown && ['new', 'requesting', 'trying'].includes(st)) return;
         if (!st || st === lastState) return;
         lastState = st;
         const labels = {
@@ -690,6 +702,8 @@ function markEnded(reason) {
         ended = false;
         lastState = '';
         activeConfirmed = false;
+        ringShown = false;
+        if (ringLabelTimer) { clearTimeout(ringLabelTimer); ringLabelTimer = null; }
         if (answerHold) { clearInterval(answerHold); answerHold = null; }
         talkStart = 0;
         stopTimer();
@@ -739,6 +753,14 @@ function markEnded(reason) {
         placing = false;
         const placed = activeCall;
         if (activeCall) activeCall._dnNumber = number;
+        // Many UK/US networks never send a "ringing" signal back. When the call is
+        // still being set up after 1.5 s it is ringing at the other end: say so.
+        ringLabelTimer = setTimeout(() => {
+            ringLabelTimer = null;
+            if (!ended && activeCall === placed && !activeConfirmed && ['', 'new', 'requesting', 'trying'].includes(lastState)) {
+                showState('ringing');
+            }
+        }, 1500);
         watchCall(activeCall);
         renderLines();
         const res = await fetch('/api/call-log', {
