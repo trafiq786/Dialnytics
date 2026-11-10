@@ -54,18 +54,19 @@
 </section>
 {% endif %}
 {% if user.role != 'admin' %}
+<p class="muted" id="dashUpdated" style="margin:-6px 0 12px;font-size:12px">Live · updated {{ updated }} · {{ timezone }}</p>
 <div class="stat-row">
-    <div class="stat-card"><div class="stat-ico blue">☎</div><div class="value">{{ total_calls }}</div><div class="label">Total Calls</div></div>
-    <div class="stat-card"><div class="stat-ico green">✓</div><div class="value">{{ answer_rate }}</div><div class="label">Answer Rate</div></div>
-    <div class="stat-card"><div class="stat-ico amber">⏱</div><div class="value">{{ avg_talk_time }}</div><div class="label">Avg Talk Time</div></div>
-    <div class="stat-card"><div class="stat-ico purple">👤</div><div class="value">{{ contacts_count }}</div><div class="label">Contacts Added</div></div>
-    <div class="stat-card"><div class="stat-ico red">▦</div><div class="value">{{ followups }}</div><div class="label">Follow-ups Scheduled</div></div>
+    <div class="stat-card"><div class="stat-ico blue">☎</div><div class="value" data-k="total_calls">{{ total_calls }}</div><div class="label">Total Calls</div></div>
+    <div class="stat-card"><div class="stat-ico green">✓</div><div class="value" data-k="answer_rate">{{ answer_rate }}</div><div class="label">Answer Rate</div></div>
+    <div class="stat-card"><div class="stat-ico amber">⏱</div><div class="value" data-k="avg_talk_time">{{ avg_talk_time }}</div><div class="label">Avg Talk Time</div></div>
+    <div class="stat-card"><div class="stat-ico purple">👤</div><div class="value" data-k="contacts_count">{{ contacts_count }}</div><div class="label">Contacts Added</div></div>
+    <div class="stat-card"><div class="stat-ico red">▦</div><div class="value" data-k="followups">{{ followups }}</div><div class="label">Follow-ups Scheduled</div></div>
 </div>
 <div class="split-2">
     <section class="panel">
         <h2>Calls Over Time</h2>
         <div class="dial-chart" role="img" aria-label="Calls by time interval">
-          <div class="dial-chart-bars">
+          <div class="dial-chart-bars" id="dashChart">
             {% for item in chart_bars %}
             <div class="dial-chart-col" title="{{ item.label }}: {{ item.count }} calls">
               <div class="dial-chart-track">
@@ -94,26 +95,62 @@
     </section>
     <section class="panel">
         <h2>Call Outcomes</h2>
-        {% set total = total_calls or 1 %}
-        <div class="meter"><span class="dot green"></span> Outgoing <b>{{ answered_calls }} · {{ (answered_calls * 100 // total) if total_calls else 0 }}%</b></div>
-        <div class="track"><i class="green" style="width:{{ (answered_calls * 100 // total) if total_calls else 0 }}%"></i></div>
-        <div class="meter"><span class="dot red"></span> Failed <b>{{ failed_calls }} · {{ (failed_calls * 100 // total) if total_calls else 0 }}%</b></div>
-        <div class="track"><i class="red" style="width:{{ (failed_calls * 100 // total) if total_calls else 0 }}%"></i></div>
+        <div class="meter"><span class="dot green"></span> Answered <b><span data-k="answered_calls">{{ answered_calls }}</span> · <span data-k="answered_pct">{{ answered_pct }}</span>%</b></div>
+        <div class="track"><i class="green" data-w="answered_pct" style="width:{{ answered_pct }}%"></i></div>
+        <div class="meter"><span class="dot red"></span> Not answered / failed <b><span data-k="failed_calls">{{ failed_calls }}</span> · <span data-k="failed_pct">{{ failed_pct }}</span>%</b></div>
+        <div class="track"><i class="red" data-w="failed_pct" style="width:{{ failed_pct }}%"></i></div>
     </section>
 </div>
 <div class="split-2">
     <section class="panel">
-        <h2>Disposition Breakdown</h2>
-        <div class="meter"><span class="dot gray"></span> No Disposition <b>{{ total_calls }} · 100%</b></div>
-        <div class="track"><i class="gray" style="width:100%"></i></div>
+        <h2>Call Breakdown</h2>
+        <div class="meter"><span class="dot green"></span> Outgoing <b><span data-k="out_answered">{{ out_answered }}</span> answered of <span data-k="out_total">{{ out_total }}</span></b></div>
+        <div class="track"><i class="green" data-w="out_pct" style="width:{{ (out_answered * 100 // out_total) if out_total else 0 }}%"></i></div>
+        <div class="meter"><span class="dot gray"></span> Incoming <b><span data-k="in_answered">{{ in_answered }}</span> answered · <span data-k="in_missed">{{ in_missed }}</span> missed</b></div>
+        <div class="track"><i class="gray" data-w="in_pct" style="width:{{ (in_answered * 100 // in_total) if in_total else 0 }}%"></i></div>
     </section>
     <section class="panel">
         <h2>Ways to Improve</h2>
-        <div class="tip">
-            <strong>You're on track</strong>
-            <p>Nothing stands out for this period. Keep the calls consistent.</p>
+        <div id="dashTips">
+        {% for t in tips %}<div class="tip"><strong>{{ t.title }}</strong><p>{{ t.text }}</p></div>
+        {% else %}<div class="tip"><strong>You're on track</strong><p>Nothing stands out for this period. Keep the calls consistent.</p></div>{% endfor %}
         </div>
     </section>
 </div>
+<script>
+(function () {
+    const period = {{ period|tojson }};
+    const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    function paint(d) {
+        document.querySelectorAll('[data-k]').forEach((el) => { if (d[el.dataset.k] !== undefined) el.textContent = d[el.dataset.k]; });
+        const w = { answered_pct: d.answered_pct, failed_pct: d.failed_pct,
+            out_pct: d.out_total ? Math.floor(d.out_answered * 100 / d.out_total) : 0,
+            in_pct: d.in_total ? Math.floor(d.in_answered * 100 / d.in_total) : 0 };
+        document.querySelectorAll('[data-w]').forEach((el) => { el.style.width = (w[el.dataset.w] || 0) + '%'; });
+        const chart = document.getElementById('dashChart');
+        if (chart) chart.innerHTML = d.chart_bars.map((b) =>
+            '<div class="dial-chart-col" title="' + esc(b.label) + ': ' + b.count + ' calls"><div class="dial-chart-track">' +
+            '<div class="dial-chart-bar-group" style="height:' + b.height + '%">' + (b.count ? '<div class="dial-chart-value">' + b.count + '</div>' : '') +
+            '<div class="dial-chart-fill' + (b.count ? '' : ' is-zero') + '"></div></div></div><div class="dial-chart-label">' + esc(b.label) + '</div></div>').join('');
+        const tips = document.getElementById('dashTips');
+        if (tips) tips.innerHTML = (d.tips.length ? d.tips : [{ title: "You're on track", text: 'Nothing stands out for this period. Keep the calls consistent.' }])
+            .map((t) => '<div class="tip"><strong>' + esc(t.title) + '</strong><p>' + esc(t.text) + '</p></div>').join('');
+        const up = document.getElementById('dashUpdated');
+        if (up) up.textContent = 'Live · updated ' + d.updated + ' · ' + d.timezone;
+    }
+    let busy = false;
+    async function refresh() {
+        if (busy || document.hidden) return;
+        busy = true;
+        try {
+            const r = await fetch('/api/dashboard/stats?period=' + encodeURIComponent(period), { cache: 'no-store' });
+            if (r.ok) paint(await r.json());
+        } catch (e) {} finally { busy = false; }
+    }
+    setInterval(refresh, 20000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+    window.addEventListener('dn:call-ended', () => setTimeout(refresh, 1500));
+})();
+</script>
 {% endif %}
 {% endblock %}

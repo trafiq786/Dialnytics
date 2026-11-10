@@ -1,22 +1,18 @@
-Update AA - Twilio number: outgoing Telnyx se, incoming Twilio se
+Update BB - Dashboard sahi aur live
 
-Replace / add:
+Replace karein:
   Dialnytics/backend/main.py
-  Dialnytics/backend/ring_group.py
-  Dialnytics/frontend/static/js/dialer.js
-  Dialnytics/frontend/templates/dialer_rail.html
+  Dialnytics/frontend/templates/dashboard.html
   Dialnytics/frontend/templates/base.html
-  Dialnytics/frontend/templates/users.html
-  Dialnytics/frontend/templates/customer_detail.html
-  Dialnytics/SUPABASE_MIGRATION_30_TWILIO_IN.sql  (optional - app khud column bana leti ha)
-Is mein update Z (verified numbers list) aur X (companies delete) b shamil hain.
-Y (responsive) pehle laga ho tou behtar - base.html mein sab files ka version ha.
+  Dialnytics/frontend/static/js/dialer.js
+(Is mein AA, Z, X ke changes b shamil hain. Database change koi nahi.)
 
-Kaise use karein:
-1. Twilio number ko Telnyx > Verified Numbers mein verify karein (jis Telnyx account se calls karni hain).
-2. Admin > user > Change number: line = Telnyx 1/2, number = "+44... (verified · outgoing only)".
-3. Save. Dialnytics khud:
-   - outgoing calls Telnyx se karega (client ko Twilio wala number dikhega)
-   - Twilio number ka webhook set karega, incoming calls user ke dialer mein ring hongi
-4. Jo users is update se PEHLE assign kiye the, unka number aik dafa dobara save kar dein.
-Telnyx account badla: naye account pe number verify karein aur user ki line Telnyx 2 kar dein.
+Kya theek hua:
+- "Today / This Week / This Month" ab user ke apne time zone se (browser ka) - pehle Pakistan time fix tha,
+  is liye UK/US agents ka "Today" ghalat hota tha.
+- Dashboard har 20 second mein khud update hota ha, aur call khatam hote hi b.
+- Contacts Added: sirf us period mein add hue contacts (pehle sab time ke).
+- Follow-ups Scheduled: CRM leads ke follow-ups jo us period mein hain (pehle hamesha 0).
+- Call Outcomes: "Answered" aur "Not answered" (pehle "Outgoing" ghalat label tha).
+- Disposition (nakli 100%) ki jagah asli Call Breakdown: Outgoing aur Incoming (answered / missed).
+- Ways to Improve: asli data se tips (missed calls, kam pick-up, chhoti calls, follow-ups).

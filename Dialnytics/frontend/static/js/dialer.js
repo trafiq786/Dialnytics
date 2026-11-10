@@ -178,6 +178,7 @@ function markEnded(reason) {
     const sec = saveDuration(
         talkStart ? 'completed' : 'failed'
     );
+    try { window.dispatchEvent(new Event('dn:call-ended')); } catch (e) {}
 
     talkStart = 0;
 

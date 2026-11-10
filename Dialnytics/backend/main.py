@@ -2116,6 +2116,118 @@ def _count_contacts(user_id):
             cur.execute('SELECT COUNT(*) AS n FROM public.dialnytics_contacts WHERE user_id=%s',(user_id,))
             return cur.fetchone()['n']
 
+ANSWERED_STATUSES = ("answered", "completed", "active", "transferred")
+
+def _dash_tz(request):
+    """The viewer's own time zone (the browser sends it in the dn_tz cookie), so
+    "Today" means today where the agent is, not in Pakistan."""
+    from zoneinfo import ZoneInfo
+    name = (request.cookies.get("dn_tz") or "").strip()
+    if name and re.fullmatch(r"[A-Za-z_]+(/[A-Za-z0-9_+\-]+){0,2}", name):
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    return ZoneInfo(os.getenv("DASHBOARD_TIMEZONE", "Asia/Karachi"))
+
+def _dashboard_stats(user, period, tz):
+    now_local = datetime.now(tz)
+    local_today = now_local.date()
+    if period == "today":
+        start_day, end_day = local_today, local_today + timedelta(days=1)
+    elif period == "week":
+        start_day = local_today - timedelta(days=local_today.weekday())
+        end_day = start_day + timedelta(days=7)
+    else:
+        start_day = local_today.replace(day=1)
+        end_day = (start_day + timedelta(days=32)).replace(day=1)
+    beginning = datetime.combine(start_day, datetime.min.time(), tzinfo=tz)
+    ending = datetime.combine(end_day, datetime.min.time(), tzinfo=tz)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT c.status,c.direction,c.duration_seconds AS duration,c.created_at
+                FROM public.calls c WHERE c.user_id=%s AND c.created_at >= %s AND c.created_at < %s""",
+                (user["id"], beginning, ending))
+            user_calls = cur.fetchall()
+            cur.execute("""SELECT COUNT(*) AS n FROM public.dialnytics_contacts
+                WHERE user_id=%s AND created_at >= %s AND created_at < %s""", (user["id"], beginning, ending))
+            contacts = cur.fetchone()["n"]
+            try:
+                cur.execute("SAVEPOINT fu")
+                cur.execute("""SELECT COUNT(*) AS n FROM public.crm_leads
+                    WHERE user_id=%s AND followup_at >= %s AND followup_at < %s""", (user["id"], beginning, ending))
+                followups = cur.fetchone()["n"]
+            except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT fu")
+                followups = 0
+    if period == "today":
+        labels = [f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(0, 24, 3)]
+    elif period == "week":
+        labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    else:
+        days_in_month = calendar.monthrange(local_today.year, local_today.month)[1]
+        labels = [f"{st}–{min(st + 4, days_in_month)}" for st in range(1, days_in_month + 1, 5)]
+    counts = [0] * len(labels)
+    out_total = out_ans = in_total = in_ans = 0
+    talk = []
+    for call in user_calls:
+        ts = call.get("created_at")
+        if ts:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            lt = ts.astimezone(tz)
+            if period == "today":
+                counts[lt.hour // 3] += 1
+            elif period == "week":
+                counts[lt.date().weekday()] += 1
+            else:
+                counts[min((lt.day - 1) // 5, len(counts) - 1)] += 1
+        ok = call.get("status") in ANSWERED_STATUSES
+        if str(call.get("direction") or "").startswith("in"):
+            in_total += 1
+            in_ans += ok
+        else:
+            out_total += 1
+            out_ans += ok
+        sec = int(call.get("duration") or 0)
+        if sec > 0:
+            talk.append(sec)
+    total = len(user_calls)
+    answered = out_ans + in_ans
+    avg = round(sum(talk) / len(talk)) if talk else 0
+    top = max(max(counts, default=0), 1)
+    pct = lambda n: int(n * 100 / total) if total else 0
+    tips = []
+    if total and out_total >= 10 and out_ans * 100 < out_total * 25:
+        tips.append({"title": "Low pick-up rate", "text": f"Only {out_ans} of {out_total} outgoing calls were answered. Try calling at different hours."})
+    if in_total - in_ans > 0:
+        tips.append({"title": "Missed calls", "text": f"{in_total - in_ans} incoming call(s) were missed. Call them back from Call Logs."})
+    if talk and avg < 30 and len(talk) >= 5:
+        tips.append({"title": "Short calls", "text": "Most answered calls end in under 30 seconds. A stronger opening line can help."})
+    if followups:
+        tips.append({"title": "Follow-ups due", "text": f"{followups} follow-up(s) are scheduled in this period."})
+    return {
+        "period": period, "timezone": str(tz), "updated": now_local.strftime("%I:%M %p").lstrip("0"),
+        "total_calls": total, "answered_calls": answered, "failed_calls": total - answered,
+        "answer_rate": f"{pct(answered)}%", "avg_talk_time": f"{avg // 60}:{avg % 60:02d}",
+        "contacts_count": contacts, "followups": followups,
+        "out_total": out_total, "out_answered": out_ans, "in_total": in_total, "in_answered": in_ans,
+        "in_missed": in_total - in_ans, "answered_pct": pct(answered), "failed_pct": pct(total - answered),
+        "chart_bars": [{"label": l, "count": c, "height": round(c * 100 / top)} for l, c in zip(labels, counts)],
+        "tips": tips,
+    }
+
+@app.get("/api/dashboard/stats")
+async def dashboard_stats_api(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    period = request.query_params.get("period", "today")
+    if period not in ("today", "week", "month"):
+        period = "today"
+    data = await run_in_threadpool(_dashboard_stats, user, period, _dash_tz(request))
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request):
     user = get_current_user(request)
@@ -2125,62 +2237,9 @@ async def dashboard(request: Request):
         return RedirectResponse(url="/clients", status_code=302)
     period = request.query_params.get("period", "today")
     if period not in ("today", "week", "month"): period = "today"
-    from zoneinfo import ZoneInfo
-    chart_timezone = ZoneInfo(os.getenv("DASHBOARD_TIMEZONE", "Asia/Karachi"))
-    today = datetime.now(chart_timezone).date()
-    beginning_day = today if period == "today" else (today - timedelta(days=today.weekday()) if period == "week" else today.replace(day=1))
-    beginning = datetime.combine(beginning_day, datetime.min.time(), tzinfo=chart_timezone)
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""SELECT c.status,c.duration_seconds AS duration,c.created_at
-                FROM public.calls c WHERE c.user_id=%s AND c.created_at >= %s
-                ORDER BY c.created_at DESC""", (user["id"], beginning))
-            user_calls = cur.fetchall()
-    # Chart buckets are based on the same user and date-filtered calls as the stats.
-    # Display times in the configured business timezone (default Pakistan).
-    from zoneinfo import ZoneInfo
-    chart_tz = ZoneInfo(os.getenv("DASHBOARD_TIMEZONE", "Asia/Karachi"))
-    now_local = datetime.now(chart_tz)
-    local_today = now_local.date()
-    if period == "today":
-        chart_labels = [f"{(h % 12) or 12} {'AM' if h < 12 else 'PM'}" for h in range(0, 24, 3)]
-        chart_counts = [0] * 8
-    elif period == "week":
-        chart_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        chart_counts = [0] * 7
-    else:
-        days_in_month = calendar.monthrange(local_today.year, local_today.month)[1]
-        chart_starts = list(range(1, days_in_month + 1, 5))
-        chart_labels = [f"{start}–{min(start + 4, days_in_month)}" for start in chart_starts]
-        chart_counts = [0] * len(chart_labels)
-    for call in user_calls:
-        ts = call.get("created_at")
-        if not ts:
-            continue
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        local_ts = ts.astimezone(chart_tz)
-        d = local_ts.date()
-        if period == "today" and d == local_today:
-            chart_counts[local_ts.hour // 3] += 1
-        elif period == "week" and local_today - timedelta(days=local_today.weekday()) <= d <= local_today:
-            chart_counts[d.weekday()] += 1
-        elif period == "month" and d.year == local_today.year and d.month == local_today.month and d <= local_today:
-            chart_counts[(d.day - 1) // 5] += 1
-    chart_max = max(max(chart_counts, default=0), 1)
-    chart_bars = [{"label": label, "count": count, "height": round(count * 100 / chart_max)}
-                  for label, count in zip(chart_labels, chart_counts)]
-    total_calls = len(user_calls)
-    answered = len([c for c in user_calls if c.get("status") in ("answered", "completed", "active")])
-    failed = len([c for c in user_calls if c.get("status") not in ("answered", "completed", "active")])
-    answer_rate = f"{int((answered/total_calls)*100)}%" if total_calls else "0%"
-    talk = [
-        int(c.get("duration") or 0)
-        for c in user_calls
-        if int(c.get("duration") or 0) > 0
-    ]
-    avg = round(sum(talk) / len(talk)) if talk else 0
-    avg_talk = f"{avg // 60}:{avg % 60:02d}"
+    tz = _dash_tz(request)
+    today = datetime.now(tz).date()
+    stats = _dashboard_stats(user, period, tz) if user.get("role") != "admin" else {}
     revenue = 0
     revenue_life = 0
     renewals = []
@@ -2210,12 +2269,9 @@ async def dashboard(request: Request):
                         (user["id"],))
             recordings_count = cur.fetchone()["n"]
     return templates.TemplateResponse(request=request, name="dashboard.html", context={
-        "chart_bars": chart_bars,
+        **stats,
         "period": period, "revenue": revenue, "revenue_life": revenue_life, "renewals": renewals, "costs": costs,
-        "user": user, "total_calls": total_calls, "answer_rate": answer_rate,
-        "avg_talk_time": avg_talk, "contacts_count": _count_contacts(user["id"]),
-        "followups": 0, "failed_calls": failed, "answered_calls": answered,
-        "recordings_count": recordings_count,
+        "user": user, "recordings_count": recordings_count,
         "campaigns_count": len(campaigns_db.get(user["email"], []))
     })
 
