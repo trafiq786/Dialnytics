@@ -72,7 +72,7 @@
       select.replaceChildren(new Option('Select Caller ID', ''));
       callerIds.forEach(item => {
         const names = item.assigned_to.map(person => person.last_name).join(', ');
-        const label = item.number + (names ? ' — Assigned (' + names + ')' : ' — Available');
+        const label = item.number + (item.verified ? ' (verified · outgoing only)' : '') + (names ? ' — Assigned (' + names + ')' : ' — Available');
         select.add(new Option(label, item.number));
       });
       if (!callerIds.length) message.textContent = 'No phone numbers found in your ' + providerName + ' account.';

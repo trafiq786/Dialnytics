@@ -7,6 +7,9 @@ const input = document.getElementById('numberInput');
     const EXPIRED = cfg.dataset.expired === '1';
     const PROVIDER = cfg.dataset.provider === 'twilio' ? 'twilio' : 'telnyx';
     const IS_ADMIN = cfg.dataset.admin === '1';
+    // Twilio number verified on Telnyx: calls out go through Telnyx, calls in ring through Twilio.
+    const TWILIO_IN = PROVIDER === 'telnyx' && cfg.dataset.twin === '1';
+    let twInbound = null;
     // Customers never see provider names or raw provider error codes. Admins keep the full text.
     function friendlyError(m) {
         const raw = String(m == null ? '' : m);
@@ -474,6 +477,48 @@ function markEnded(reason) {
         return data.token;
     }
 
+    function onTwilioIncoming(tw) {
+        if (activeCall || incomingCall || heldCall || placing ||
+            localStorage.getItem('dialnytics-dnd') === 'true') {
+            try { tw.reject(); } catch (e) {}
+            return;
+        }
+        const from = (tw.parameters && tw.parameters.From) || 'Unknown caller';
+        const shim = twilioShim(tw, from, true);
+        ended = false;
+        incomingCall = shim;
+        hidePanels();
+        const view = document.getElementById('incomingView');
+        if (view) view.hidden = false;
+        const num = document.getElementById('incomingNumber');
+        if (num) num.textContent = from;
+        rtcStatus.textContent = 'Incoming';
+        rtcStatus.style.color = 'var(--success)';
+        setStatus('Incoming call');
+        startRing();
+    }
+
+    // Incoming-only Twilio line next to the Telnyx line (see TWILIO_IN).
+    async function bootTwilioInbound() {
+        const Device = window.Twilio && window.Twilio.Device;
+        if (!Device || twInbound) return;
+        try {
+            twInbound = new Device(await twilioToken(), { codecPreferences: ['opus', 'pcmu'], logLevel: 'warn' });
+            try { if (twInbound.audio) { twInbound.audio.incoming(false); twInbound.audio.disconnect(false); } } catch (e) {}
+            twInbound.on('incoming', onTwilioIncoming);
+            twInbound.on('tokenWillExpire', async () => { try { twInbound.updateToken(await twilioToken()); } catch (e) {} });
+            twInbound.on('error', async (err) => {
+                if (err && (err.code === 20101 || err.code === 20104) && !twInbound._dnRetried) {
+                    twInbound._dnRetried = true;
+                    try { twInbound.updateToken(await twilioToken()); await twInbound.register(); } catch (e) {}
+                }
+            });
+            await twInbound.register();
+        } catch (err) {
+            console.warn('Incoming line could not connect', err);
+        }
+    }
+
     async function bootTwilio() {
         const Device = window.Twilio && window.Twilio.Device;
         if (!Device) {
@@ -521,26 +566,7 @@ function markEnded(reason) {
             client.on('tokenWillExpire', async () => {
                 try { client.updateToken(await twilioToken()); } catch (e) {}
             });
-            client.on('incoming', (tw) => {
-                if (activeCall || incomingCall || heldCall || placing ||
-                    localStorage.getItem('dialnytics-dnd') === 'true') {
-                    try { tw.reject(); } catch (e) {}
-                    return;
-                }
-                const from = (tw.parameters && tw.parameters.From) || 'Unknown caller';
-                const shim = twilioShim(tw, from, true);
-                ended = false;
-                incomingCall = shim;
-                hidePanels();
-                const view = document.getElementById('incomingView');
-                if (view) view.hidden = false;
-                const num = document.getElementById('incomingNumber');
-                if (num) num.textContent = from;
-                rtcStatus.textContent = 'Incoming';
-                rtcStatus.style.color = 'var(--success)';
-                setStatus('Incoming call');
-                startRing();
-            });
+            client.on('incoming', onTwilioIncoming);
             rtcStatus.textContent = 'Connecting...';
             await client.register();
         } catch (err) {
@@ -551,6 +577,7 @@ function markEnded(reason) {
 
     async function boot() {
         if (PROVIDER === 'twilio') return bootTwilio();
+        if (TWILIO_IN) bootTwilioInbound();
         const Klass = RTC();
         if (!Klass) {
             rtcStatus.textContent = 'SDK missing';

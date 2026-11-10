@@ -99,8 +99,9 @@ def members(cur, number, provider):
             u.account_id,u.created_at,u.twilio_account,u.telnyx_account
         FROM public.caller_id_assignments a
         JOIN public.dialnytics_users u ON u.id=a.user_id
-        WHERE a.phone_number=%s AND u.is_active=TRUE AND COALESCE(u.provider,'telnyx')=%s
-        ORDER BY u.created_at""", (number, provider))
+        WHERE a.phone_number=%s AND u.is_active=TRUE
+          AND (COALESCE(u.provider,'telnyx')=%s OR (%s='twilio' AND COALESCE(u.twilio_in,FALSE)))
+        ORDER BY u.created_at""", (number, provider, provider))
     return cur.fetchall()
 
 

@@ -1,17 +1,22 @@
-Update Y - Poora interface responsive + dialer fit
+Update AA - Twilio number: outgoing Telnyx se, incoming Twilio se
 
-Nayi files (add karein):
-  Dialnytics/frontend/static/css/responsive.css
-  Dialnytics/frontend/static/js/responsive.js
-Replace karein:
-  Dialnytics/frontend/templates/base.html      (nayi files load + cache refresh)
-  Dialnytics/frontend/templates/dialer_rail.html
+Replace / add:
+  Dialnytics/backend/main.py
+  Dialnytics/backend/ring_group.py
   Dialnytics/frontend/static/js/dialer.js
-  Dialnytics/frontend/static/js/mobile-nav.js
+  Dialnytics/frontend/templates/dialer_rail.html
+  Dialnytics/frontend/templates/base.html
+  Dialnytics/frontend/templates/users.html
+  Dialnytics/frontend/templates/customer_detail.html
+  Dialnytics/SUPABASE_MIGRATION_30_TWILIO_IN.sql  (optional - app khud column bana leti ha)
+Is mein update Z (verified numbers list) aur X (companies delete) b shamil hain.
+Y (responsive) pehle laga ho tou behtar - base.html mein sab files ka version ha.
 
-Kya badla:
-- Mobile pe har table ki row card ban jati ha (label + value), koi column nahi katta.
-- Billing / Invoice ke side-by-side boxes phone aur tablet pe neeche neeche.
-- Dialer har screen pe fit, scroll nahi; call ke dauran "Calling..." aik dafa.
-- Laptop/bari screen pe kuch nahi badla.
-Database change koi nahi. Note: update W (glass.css v6) pehle laga hona chahiye.
+Kaise use karein:
+1. Twilio number ko Telnyx > Verified Numbers mein verify karein (jis Telnyx account se calls karni hain).
+2. Admin > user > Change number: line = Telnyx 1/2, number = "+44... (verified · outgoing only)".
+3. Save. Dialnytics khud:
+   - outgoing calls Telnyx se karega (client ko Twilio wala number dikhega)
+   - Twilio number ka webhook set karega, incoming calls user ke dialer mein ring hongi
+4. Jo users is update se PEHLE assign kiye the, unka number aik dafa dobara save kar dein.
+Telnyx account badla: naye account pe number verify karein aur user ki line Telnyx 2 kar dein.

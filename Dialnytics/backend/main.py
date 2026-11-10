@@ -301,6 +301,7 @@ def _db_user(row):
         "telnyx_account": tx_key(row.get("telnyx_account") or "t1"),
         "call_countries": row.get("call_countries") or "",
         "twilio_account": tw_key(row.get("twilio_account") or "w1"),
+        "twilio_in": bool(row.get("twilio_in", False)),
         "is_demo": bool(row.get("is_demo", False)),
         "signup_source": row.get("signup_source") or "",
         "signup_ref": row.get("signup_ref") or "",
@@ -466,6 +467,8 @@ ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS telnyx_account text
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS call_countries text NOT NULL DEFAULT '';
 -- 13: second Twilio account
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS twilio_account text NOT NULL DEFAULT 'w1';
+-- 30: Twilio number verified on Telnyx: outgoing via Telnyx, incoming rings through Twilio
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS twilio_in boolean NOT NULL DEFAULT false;
 -- 16: single-leader lease so background workers run on ONE instance only
 --     (lets the app scale to several Render instances without double-ringing)
 CREATE TABLE IF NOT EXISTS public.worker_leader (
@@ -877,12 +880,33 @@ async def signup_disabled():
     return RedirectResponse(url="/login", status_code=302)
 
 _tx_numbers_cache = {"at": 0, "map": {}}
+TX_VERIFIED = set()        # non-Telnyx numbers verified on Telnyx: outbound caller ID only
+
+def _telnyx_verified_one():
+    """Numbers from other carriers (e.g. Twilio) verified in Telnyx > Verified Numbers.
+    Telnyx lets them be the caller ID of outbound calls; calls TO them still go to the
+    original carrier."""
+    numbers = []
+    for page in range(1, 11):
+        try:
+            response = _telnyx_request("GET", f"/v2/verified_numbers?page[number]={page}&page[size]=100")
+        except HTTPException as exc:
+            log.warning("Could not list Telnyx verified numbers: %s", exc.detail)
+            break
+        batch = response.get("data") or []
+        for item in batch if isinstance(batch, list) else []:
+            if item.get("phone_number") and item.get("verified_at"):
+                numbers.append(item["phone_number"])
+        total = (response.get("meta") or {}).get("total_pages")
+        if (total is not None and page >= int(total)) or (total is None and len(batch) < 100):
+            break
+    return numbers
 
 def telnyx_number_accounts(fresh=False):
     """{number: account} for every configured Telnyx account (cached 60 s)."""
     if not fresh and time.time() - _tx_numbers_cache["at"] < 60 and _tx_numbers_cache["map"]:
         return dict(_tx_numbers_cache["map"])
-    mapping = {}
+    mapping, verified = {}, set()
     for acct in TELNYX_ACCOUNTS:
         if not TELNYX_ACCOUNTS[acct]["api_key"]:
             continue
@@ -894,6 +918,12 @@ def telnyx_number_accounts(fresh=False):
                 if acct == "t1":
                     raise
                 log.exception("Could not list numbers of %s", acct)
+            for n in _telnyx_verified_one():
+                if n not in mapping:
+                    mapping[n] = acct
+                    verified.add(n)
+    TX_VERIFIED.clear()
+    TX_VERIFIED.update(verified)
     _tx_numbers_cache.update(at=time.time(), map=mapping)
     return dict(mapping)
 
@@ -1002,6 +1032,24 @@ def _set_user_twilio_account(user_id, number):
         with conn.cursor() as cur:
             cur.execute("UPDATE public.dialnytics_users SET twilio_account=%s WHERE id=%s", (acct, user_id))
     return acct
+
+def _sync_twilio_inbound(user_id, provider, number):
+    """A Twilio number verified on Telnyx: calls go OUT through Telnyx, calls TO the
+    number still arrive at Twilio, so the user's dialer also listens on Twilio."""
+    on, acct = False, None
+    if provider == "telnyx" and number and number in TX_VERIFIED and twilio_enabled():
+        try:
+            acct = twilio_number_accounts().get(number)
+        except HTTPException:
+            acct = None
+        on = bool(acct)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE public.dialnytics_users SET twilio_in=%s,
+                twilio_account=COALESCE(%s,twilio_account) WHERE id=%s""", (on, acct, user_id))
+    if on:
+        _twilio_configure_number(number)
+    return on
 
 def _twilio_configure_number(number):
     """Point a Twilio number's Voice webhook at this app (best effort)."""
@@ -1122,7 +1170,8 @@ async def admin_caller_ids(request: Request):
     held = _wo["hold_info"](numbers)       # reserved for a website buyer: not offered here
     return JSONResponse({'numbers': [
         {'number': n, 'assigned_to': assigned.get(n, []),
-         'account': owners.get(n, ''), 'account_label': labels.get(owners.get(n, ''), '')}
+         'account': owners.get(n, ''), 'account_label': labels.get(owners.get(n, ''), ''),
+         'verified': provider == "telnyx" and n in TX_VERIFIED}
         for n in numbers if (not only or owners.get(n) == only) and n not in held
     ]}, headers={'Cache-Control': 'no-store'})
 
@@ -1303,6 +1352,7 @@ async def customer_change_number(request: Request, email: str, phone_number: str
         _set_user_telnyx_account(target['id'], telnyx_number_accounts().get(new_number, 't1'))
     else:
         _set_user_twilio_account(target['id'], new_number)
+    _sync_twilio_inbound(target['id'], provider, new_number)
     refresh_users()
     if provider == 'twilio':
         _twilio_configure_number(new_number)
@@ -1710,6 +1760,8 @@ async def create_user(
         _set_user_telnyx_account(new_id, acct)
     elif phone_number and provider == 'twilio':
         _set_user_twilio_account(new_id, phone_number)
+    if phone_number:
+        _sync_twilio_inbound(new_id, provider, phone_number)
     refresh_users()
     if phone_number:
         if provider == 'twilio':
@@ -3497,7 +3549,7 @@ async def twilio_token(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     if user.get("role") != "admin" and plan_status(user)["days_left"] < 0:
         raise HTTPException(status_code=402, detail="Subscription expired")
-    if user.get("provider") != "twilio":
+    if user.get("provider") != "twilio" and not user.get("twilio_in"):
         raise HTTPException(status_code=409, detail="This account does not use Twilio")
     acct = user.get("twilio_account") or "w1"
     if not twilio_enabled(acct):
@@ -3707,7 +3759,7 @@ async def twilio_incoming(request: Request):
         with conn.cursor() as cur:
             cur.execute("""SELECT u.* FROM public.caller_id_assignments a
                 JOIN public.dialnytics_users u ON u.id=a.user_id
-                WHERE a.phone_number=%s AND u.is_active=TRUE AND u.provider='twilio' LIMIT 1""", (to_number,))
+                WHERE a.phone_number=%s AND u.is_active=TRUE AND (u.provider='twilio' OR u.twilio_in) LIMIT 1""", (to_number,))
             row = cur.fetchone()
     user = _db_user(row) if row else None
     if not user or (user.get("role") != "admin" and plan_status(user)["days_left"] < 0):
@@ -3844,7 +3896,7 @@ async def twilio_transfer(request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    if user.get("provider") != "twilio":
+    if user.get("provider") != "twilio" and not user.get("twilio_in"):
         raise HTTPException(status_code=409, detail="This line is not a Twilio line")
     data = await request.json()
     call_sid = str(data.get("call_sid") or "")
