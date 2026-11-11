@@ -656,16 +656,33 @@ def register(app, d):
             out.append(n)
         return out[:30]
 
-    def search_numbers(country, area=""):
-        """New numbers that can be bought right now (USA and Canada)."""
+    import os as _os2
+    MAX_NUMBER_COST = Decimal(_os2.getenv("PARTNER_MAX_NUMBER_COST", "1"))
+
+    def cheap_enough(item):
+        """Only numbers costing at most $1 upfront and $1 a month may be bought."""
+        info = item.get("cost_information") or {}
+        try:
+            upfront = Decimal(str(info.get("upfront_cost")))
+            monthly = Decimal(str(info.get("monthly_cost")))
+        except Exception:
+            return False                      # no price shown: never buy blind
+        if (info.get("currency") or "USD").upper() != "USD":
+            return False
+        return upfront <= MAX_NUMBER_COST and monthly <= MAX_NUMBER_COST
+
+    def search_numbers(country, area="", contains=""):
+        """New numbers that can be bought right now (USA and Canada), $1 or less."""
         if country not in ("US", "CA") or not telnyx_request:
             return []
         import urllib.parse as up
         q = [("filter[country_code]", country), ("filter[features][]", "voice"),
-             ("filter[phone_number_type]", "local"), ("filter[limit]", "12")]
+             ("filter[phone_number_type]", "local"), ("filter[limit]", "12" if not contains else "5")]
         area = "".join(ch for ch in str(area or "") if ch.isdigit())[:3]
         if len(area) == 3:
             q.append(("filter[national_destination_code]", area))
+        if contains:
+            q.append(("filter[phone_number][contains]", contains))
         try:
             with tx_ctx(buy_account):
                 res = telnyx_request("GET", "/v2/available_phone_numbers?" + up.urlencode(q))
@@ -675,7 +692,7 @@ def register(app, d):
         out = []
         for item in res.get("data") or []:
             n = item.get("phone_number") or ""
-            if n and number_country(n) == country:
+            if n and number_country(n) == country and cheap_enough(item):
                 out.append(n)
         return out
 
@@ -858,6 +875,9 @@ def register(app, d):
         try:
             country = number_country(number)
             if source == "buy":
+                # check the price again right before buying
+                if number not in await run_in_threadpool(search_numbers, country, "", number[-10:]):
+                    return fail("That number costs more than $1 or is no longer available. Pick another one.")
                 await run_in_threadpool(buy_number, number)
             elif number not in await run_in_threadpool(pool_numbers, country, ""):
                 return fail("That number was just taken. Pick another one.")
