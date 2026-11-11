@@ -4621,6 +4621,31 @@ async def enable_user(request: Request, email: str = Form(...)):
     refresh_users()
     return RedirectResponse(url="/users?created=1", status_code=303)
 
+def _purge_user_rows(cur, uid):
+    """Delete a user's rows from every table that points at them (used by permanent delete)."""
+    # Every table with a user_id / *_user column, plus every foreign key into the users table.
+    cur.execute("""SELECT DISTINCT c.table_name, c.column_name FROM information_schema.columns c
+        JOIN information_schema.tables t ON t.table_schema=c.table_schema AND t.table_name=c.table_name
+        WHERE c.table_schema='public' AND t.table_type='BASE TABLE' AND c.table_name<>'dialnytics_users'
+          AND c.column_name IN ('user_id','from_user','to_user','agent_id','owner_id')
+          AND c.data_type='uuid'""")
+    targets = {(r["table_name"], r["column_name"]) for r in cur.fetchall()}
+    cur.execute("""SELECT cl.relname AS t, a.attname AS col FROM pg_constraint k
+        JOIN pg_class cl ON cl.oid=k.conrelid JOIN pg_namespace n ON n.oid=cl.relnamespace
+        JOIN pg_attribute a ON a.attrelid=k.conrelid AND a.attnum=ANY(k.conkey)
+        WHERE k.contype='f' AND k.confrelid='public.dialnytics_users'::regclass AND n.nspname='public'
+          AND cl.relname<>'dialnytics_users'""")
+    targets |= {(r["t"], r["col"]) for r in cur.fetchall()}
+    for table, col in sorted(targets):
+        cur.execute("SAVEPOINT pdel")
+        try:
+            cur.execute('DELETE FROM public."%s" WHERE "%s"=%%s' % (table.replace('"', ''), col.replace('"', '')), (uid,))
+            cur.execute("RELEASE SAVEPOINT pdel")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT pdel")
+            log.exception("Permanent delete: could not clear %s.%s", table, col)
+
+
 @app.post("/users/delete-permanent")
 async def delete_user_permanently(request: Request, email: str = Form(...), confirm: str = Form("")):
     """Admin: erase a user and ALL their data from the database. Cannot be undone."""
@@ -4639,27 +4664,7 @@ async def delete_user_permanently(request: Request, email: str = Form(...), conf
             if not target or target["role"] == "admin":
                 return RedirectResponse(url="/users?error=User+not+found+or+protected", status_code=303)
             uid, account_id = target["id"], target["account_id"]
-            # Every table with a user_id / *_user column, plus every foreign key into the users table.
-            cur.execute("""SELECT DISTINCT c.table_name, c.column_name FROM information_schema.columns c
-                JOIN information_schema.tables t ON t.table_schema=c.table_schema AND t.table_name=c.table_name
-                WHERE c.table_schema='public' AND t.table_type='BASE TABLE' AND c.table_name<>'dialnytics_users'
-                  AND c.column_name IN ('user_id','from_user','to_user','agent_id','owner_id')
-                  AND c.data_type='uuid'""")
-            targets = {(r["table_name"], r["column_name"]) for r in cur.fetchall()}
-            cur.execute("""SELECT cl.relname AS t, a.attname AS col FROM pg_constraint k
-                JOIN pg_class cl ON cl.oid=k.conrelid JOIN pg_namespace n ON n.oid=cl.relnamespace
-                JOIN pg_attribute a ON a.attrelid=k.conrelid AND a.attnum=ANY(k.conkey)
-                WHERE k.contype='f' AND k.confrelid='public.dialnytics_users'::regclass AND n.nspname='public'
-                  AND cl.relname<>'dialnytics_users'""")
-            targets |= {(r["t"], r["col"]) for r in cur.fetchall()}
-            for table, col in sorted(targets):
-                cur.execute("SAVEPOINT pdel")
-                try:
-                    cur.execute('DELETE FROM public."%s" WHERE "%s"=%%s' % (table.replace('"', ''), col.replace('"', '')), (uid,))
-                    cur.execute("RELEASE SAVEPOINT pdel")
-                except Exception:
-                    cur.execute("ROLLBACK TO SAVEPOINT pdel")
-                    log.exception("Permanent delete: could not clear %s.%s", table, col)
+            _purge_user_rows(cur, uid)
             for tbl, q in (("sms_messages", "DELETE FROM public.sms_messages WHERE user_id=%s"),
                            ("dialnytics_invoice_items", "DELETE FROM public.dialnytics_invoice_items WHERE invoice_id IN (SELECT id FROM public.dialnytics_invoices WHERE customer_id=%s)"),
                            ("dialnytics_invoices", "DELETE FROM public.dialnytics_invoices WHERE customer_id=%s")):
@@ -5287,15 +5292,16 @@ def _all_companies():
                 ORDER BY lower(a.name)""", (PRESENCE_TIMEOUT_SECONDS,))
             return cur.fetchall()
 
-def _all_resellers():
+def _all_resellers(include_inactive=False):
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT u.id,u.name,u.email,u.is_active,u.created_at,
+                    EXISTS (SELECT 1 FROM public.partners p WHERE p.user_id=u.id) AS is_partner,
                     (SELECT count(*) FROM public.dialnytics_accounts a WHERE a.reseller_id=u.id) AS companies,
                     (SELECT count(*) FROM public.dialnytics_users m JOIN public.dialnytics_accounts a ON a.id=m.account_id
                         WHERE a.reseller_id=u.id AND m.is_active) AS users
-                FROM public.dialnytics_users u WHERE u.user_type='reseller' AND u.is_active
-                ORDER BY lower(u.name)""")
+                FROM public.dialnytics_users u WHERE u.user_type='reseller' AND (u.is_active OR %s)
+                ORDER BY u.is_active DESC, lower(u.name)""", (include_inactive,))
             return cur.fetchall()
 
 def _team_members(account_id):
@@ -5657,20 +5663,93 @@ async def company_member(account_id: uuid.UUID, request: Request, user_id: str =
 async def resellers_page(request: Request):
     admin = require_admin(request)
     return templates.TemplateResponse(request=request, name="resellers.html", context={
-        "user": admin, "resellers": _all_resellers(), "msg": request.query_params.get("msg")})
+        "user": admin, "resellers": _all_resellers(include_inactive=True), "msg": request.query_params.get("msg")})
 
 @app.get("/resellers/{reseller_id}", response_class=HTMLResponse)
 async def reseller_detail(reseller_id: uuid.UUID, request: Request):
     admin = require_admin(request)
-    reseller = _db_user_by_id(str(reseller_id))
-    if not reseller or reseller.get("user_type") != "reseller":
-        raise HTTPException(status_code=404, detail="Reseller not found")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM public.dialnytics_users WHERE id=%s AND user_type='reseller'", (reseller_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Reseller not found")
+            # every user in the reseller's companies, with the paid plan / add-ons when it is a partner seat
+            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.is_active,u.plan_name,u.plan_renewal,u.partner_plan,
+                    u.account_role,a.name AS company,s.addons,s.active AS seat_active
+                FROM public.dialnytics_users u JOIN public.dialnytics_accounts a ON a.id=u.account_id
+                LEFT JOIN public.partner_seats s ON s.user_id=u.id
+                WHERE a.reseller_id=%s ORDER BY u.is_active DESC, lower(a.name), lower(u.name)""", (reseller_id,))
+            members = cur.fetchall()
+    reseller = _db_user(row)
+    reseller["is_active"] = bool(row["is_active"])
     companies = [c for c in _all_companies() if str(c["reseller_id"] or "") == reseller["id"]]
     unassigned = [c for c in _all_companies() if not c["reseller_id"]]
     return templates.TemplateResponse(request=request, name="reseller_detail.html", context={
         "user": admin, "reseller": reseller, "companies": companies, "unassigned": unassigned,
+        "members": members, "plans": pb.PLANS, "addon_names": pb.ADDONS,
         "pi": _pb["partner_info_for_admin"](reseller["id"]),
         "msg": request.query_params.get("msg")})
+
+
+def _switch_off_reseller_users(cur, reseller_id):
+    """Switch off every user in the reseller's companies (and stop their partner billing)."""
+    cur.execute("""SELECT u.id FROM public.dialnytics_users u JOIN public.dialnytics_accounts a ON a.id=u.account_id
+        WHERE a.reseller_id=%s AND u.is_active""", (reseller_id,))
+    ids = [r["id"] for r in cur.fetchall()]
+    if ids:
+        cur.execute("UPDATE public.dialnytics_users SET is_active=FALSE WHERE id=ANY(%s)", (ids,))
+        cur.execute("UPDATE public.user_sessions SET revoked_at=NOW() WHERE user_id=ANY(%s) AND revoked_at IS NULL", (ids,))
+        cur.execute("UPDATE public.partner_seats SET active=FALSE, cancelled_at=now() WHERE user_id=ANY(%s) AND active", (ids,))
+    return len(ids)
+
+
+@app.post("/resellers/{reseller_id}/status")
+async def reseller_status(reseller_id: uuid.UUID, request: Request, action: str = Form(...), users_too: str = Form("")):
+    """Admin: disable or enable a reseller / white-label partner."""
+    require_admin(request)
+    if action not in ("disable", "enable"):
+        raise HTTPException(status_code=422, detail="Unknown action")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM public.dialnytics_users WHERE id=%s AND user_type='reseller' FOR UPDATE", (reseller_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Reseller not found")
+            if action == "disable":
+                cur.execute("UPDATE public.dialnytics_users SET is_active=FALSE WHERE id=%s", (reseller_id,))
+                cur.execute("UPDATE public.user_sessions SET revoked_at=NOW() WHERE user_id=%s AND revoked_at IS NULL", (reseller_id,))
+                cur.execute("UPDATE public.partners SET status='suspended' WHERE user_id=%s", (reseller_id,))
+                if users_too == "1":
+                    _switch_off_reseller_users(cur, reseller_id)
+            else:
+                cur.execute("UPDATE public.dialnytics_users SET is_active=TRUE WHERE id=%s", (reseller_id,))
+                cur.execute("UPDATE public.partners SET status='active' WHERE user_id=%s", (reseller_id,))
+    refresh_users()
+    return RedirectResponse(f"/resellers/{reseller_id}?msg={action}d", status_code=303)
+
+
+@app.post("/resellers/{reseller_id}/delete")
+async def reseller_delete(reseller_id: uuid.UUID, request: Request, confirm: str = Form(""), users_too: str = Form("")):
+    """Admin: delete a reseller for good. Their companies stay as your direct customers
+    (or are switched off too when users_too=1). Wallet history of a partner is removed."""
+    admin = require_admin(request)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id,email FROM public.dialnytics_users WHERE id=%s AND user_type='reseller' FOR UPDATE", (reseller_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Reseller not found")
+            if confirm.strip().lower() != (row["email"] or "").lower():
+                return RedirectResponse(f"/resellers/{reseller_id}?msg=confirm#danger", status_code=303)
+            if users_too == "1":
+                _switch_off_reseller_users(cur, reseller_id)
+            # companies stay (they become your direct customers); never let the purge delete them
+            cur.execute("UPDATE public.dialnytics_accounts SET reseller_id=NULL WHERE reseller_id=%s", (reseller_id,))
+            _purge_user_rows(cur, reseller_id)
+            cur.execute("DELETE FROM public.dialnytics_users WHERE id=%s", (reseller_id,))
+    log.info("Admin %s deleted reseller %s", admin["email"], row["email"])
+    refresh_users()
+    return RedirectResponse("/resellers?msg=deleted", status_code=303)
 
 @app.post("/resellers/{reseller_id}/companies")
 async def reseller_assign(reseller_id: uuid.UUID, request: Request, account_id: str = Form(...), action: str = Form("assign")):

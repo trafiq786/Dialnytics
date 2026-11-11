@@ -51,6 +51,7 @@ ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS logo_type text NOT NULL DEF
 ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS logo_version integer NOT NULL DEFAULT 0;
 ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS domain text;
 ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS domain_status text NOT NULL DEFAULT '';
+ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS theme text NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS partners_domain_idx ON public.partners(lower(domain)) WHERE domain IS NOT NULL;
 ALTER TABLE public.partners ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.partner_ledger ENABLE ROW LEVEL SECURITY;

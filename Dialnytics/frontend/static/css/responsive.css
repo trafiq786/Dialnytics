@@ -83,3 +83,25 @@ html, body { max-width: 100%; overflow-x: hidden; }
 .brand.partner-brand .brand-logo { max-height: 38px; object-fit: contain; }
 .brand.partner-brand .brand-icon { object-fit: contain; }
 .stack-form [hidden], .stack-form label[hidden] { display: none !important; }
+
+/* ===== Partner colour schemes (body.theme-*) ===== */
+body.theme-ocean{--t1:#38bdf8;--t2:#0284c7;--tg:#0ea5e9;--tb1:#06121f;--tb2:#081a2b;--tb3:#040b14;--tl:#0369a1}
+body.theme-emerald{--t1:#34d399;--t2:#059669;--tg:#10b981;--tb1:#05140f;--tb2:#071d16;--tb3:#030c09;--tl:#047857}
+body.theme-sunset{--t1:#fb923c;--t2:#ea580c;--tg:#f97316;--tb1:#170c06;--tb2:#21110a;--tb3:#0d0704;--tl:#c2410c}
+body.theme-rose{--t1:#fb7185;--t2:#e11d48;--tg:#f43f5e;--tb1:#170710;--tb2:#220a16;--tb3:#0d0409;--tl:#be123c}
+body.theme-violet{--t1:#c084fc;--t2:#9333ea;--tg:#a855f7;--tb1:#110a1f;--tb2:#180e2c;--tb3:#0a0613;--tl:#7e22ce}
+body.theme-graphite{--t1:#cbd5e1;--t2:#64748b;--tg:#94a3b8;--tb1:#0b0c10;--tb2:#111318;--tb3:#060709;--tl:#334155}
+body.theme-custom{--t2:var(--t1);--tg:var(--t1);--tl:var(--t1)}
+body.glass-ui[class*="theme-"]{--accent:var(--t1);--accent-hover:var(--t1);--accent-glow:color-mix(in srgb,var(--t1) 25%,transparent);--g-glow:var(--tg)}
+body.glass-ui[class*="theme-"]:not(.theme-custom):not(.light-theme){background:linear-gradient(180deg,var(--tb1) 0%,var(--tb2) 55%,var(--tb3) 100%) fixed !important}
+body.glass-ui.light-theme[class*="theme-"]{--accent:var(--tl);--accent-hover:var(--tl)}
+body.glass-ui[class*="theme-"] :is(.btn-primary,.cm-btn,.btn-blue,.seg button.on,.chips span.on,.dn-btn.primary){
+  background:linear-gradient(180deg,var(--t1),var(--t2)) !important;border-color:color-mix(in srgb,var(--t1) 60%,#fff) !important;color:#fff !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.45),0 8px 22px color-mix(in srgb,var(--tg) 35%,transparent) !important}
+body[class*="theme-"] .seg a.on{background:var(--t2);color:#fff}
+body[class*="theme-"] .shell-main .modern-table a:not(.dn-btn):not(.btn){color:var(--accent)}
+body[class*="theme-"] .dial-chart-fill{background:linear-gradient(180deg,var(--t1),var(--t2))}
+body[class*="theme-"] :is(input,select,textarea):focus{outline-color:var(--t1)}
+body.glass-ui[class*="theme-"].light-theme :is(.btn-primary,.cm-btn,.btn-blue,.seg button.on,.chips span.on,.dn-btn.primary){background:linear-gradient(180deg,var(--t1),var(--tl)) !important}
+body.lg[class*="theme-"] .lg-btn{background:linear-gradient(180deg,var(--t1),var(--t2)) !important;border-color:var(--t1) !important}
+body.lg[class*="theme-"]:not(.theme-custom){background:linear-gradient(180deg,var(--tb1),var(--tb3)) !important}

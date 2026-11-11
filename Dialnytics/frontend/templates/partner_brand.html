@@ -1,5 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Brand{% endblock %}
+{% block title %}Brand<style>
+  .theme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+  .theme-opt{display:flex!important;flex-direction:row!important;align-items:center;gap:8px;border:1px solid var(--border);border-radius:12px;padding:8px 10px;cursor:pointer;font-size:13px;font-weight:600}
+  .theme-opt input{position:absolute;opacity:0;pointer-events:none}
+  .theme-opt:has(input:checked){border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-glow)}
+  .theme-opt:has(input:focus-visible){outline:2px solid var(--accent)}
+  .theme-opt .sw{width:22px;height:22px;border-radius:50%;flex:0 0 auto}
+  .sw-ocean{background:linear-gradient(135deg,#38bdf8,#0284c7)}.sw-emerald{background:linear-gradient(135deg,#34d399,#059669)}
+  .sw-sunset{background:linear-gradient(135deg,#fb923c,#ea580c)}.sw-rose{background:linear-gradient(135deg,#fb7185,#e11d48)}
+  .sw-violet{background:linear-gradient(135deg,#c084fc,#9333ea)}.sw-graphite{background:linear-gradient(135deg,#cbd5e1,#64748b)}
+</style>
+{% endblock %}
 {% block content %}
 <div class="page-head"><div><h1>Your brand</h1><p class="muted">Your clients see your name, logo and web address. Nothing else.</p></div></div>
 {% if msg == 'saved' %}<div class="success-msg">Saved.</div>{% elif msg == 'live' %}<div class="success-msg">Your domain is live.</div>{% elif msg == 'waiting' %}<div class="error-msg">The domain is not ready yet. Check the DNS record below and try again in a few minutes.</div>{% elif msg == 'manual' %}<div class="success-msg">Sent. Support will switch your domain on shortly.</div>{% endif %}
@@ -10,7 +21,16 @@
     <label>Brand name<input name="brand_name" maxlength="60" value="{{ partner.brand_name }}" placeholder="CallWave" required></label>
     <label>Logo (PNG, JPG or WEBP · wide logos look best)<input type="file" name="logo" accept="image/png,image/jpeg,image/webp"></label>
     {% if partner.logo_type %}<div style="display:flex;gap:12px;align-items:center"><img src="/brand/logo/{{ partner.id }}?v={{ partner.logo_version }}" alt="Current logo" style="max-height:44px;max-width:220px;background:#0b1020;padding:6px 10px;border-radius:10px"><label style="flex-direction:row;align-items:center;gap:6px;font-weight:500"><input type="checkbox" name="remove_logo" value="1"> Remove logo</label></div>{% endif %}
-    <label>Brand colour<input type="color" name="brand_color" value="{{ partner.brand_color or '#3565ec' }}" style="height:44px;padding:4px"></label>
+    <label>Brand colour<input type="color" name="brand_color" value="{{ partner.brand_color or '#6366f1' }}" style="height:44px;padding:4px"></label>
+    <div>
+      <div style="font-size:13px;font-weight:600;color:var(--text-secondary);margin-bottom:8px">Dialer colour scheme (for you and all your clients)</div>
+      <div class="theme-grid">
+        <label class="theme-opt"><input type="radio" name="theme" value="" {% if not partner.theme %}checked{% endif %}><span class="sw" style="background:linear-gradient(135deg,#7d8cff,#5b6cf0)"></span>Classic</label>
+        {% for key, label in themes.items() %}
+        <label class="theme-opt"><input type="radio" name="theme" value="{{ key }}" {% if partner.theme == key %}checked{% endif %}><span class="sw sw-{{ key }}"{% if key == 'custom' %} style="background:{{ partner.brand_color or '#6366f1' }}"{% endif %}></span>{{ label }}</label>
+        {% endfor %}
+      </div>
+    </div>
     <label>Support WhatsApp number (shown to your clients)<input name="support_whatsapp" inputmode="tel" value="{{ partner.support_whatsapp }}" placeholder="+1 512 555 0147"></label>
   </section>
   <section class="panel stack-form">
@@ -37,4 +57,15 @@
 {% if partner.domain and partner.domain_status != 'live' %}
 <form method="post" action="/partner/brand/check" style="margin-top:12px"><button class="dn-btn">I added the record · check now</button></form>
 {% endif %}
+<style>
+  .theme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+  .theme-opt{display:flex!important;flex-direction:row!important;align-items:center;gap:8px;border:1px solid var(--border);border-radius:12px;padding:8px 10px;cursor:pointer;font-size:13px;font-weight:600}
+  .theme-opt input{position:absolute;opacity:0;pointer-events:none}
+  .theme-opt:has(input:checked){border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-glow)}
+  .theme-opt:has(input:focus-visible){outline:2px solid var(--accent)}
+  .theme-opt .sw{width:22px;height:22px;border-radius:50%;flex:0 0 auto}
+  .sw-ocean{background:linear-gradient(135deg,#38bdf8,#0284c7)}.sw-emerald{background:linear-gradient(135deg,#34d399,#059669)}
+  .sw-sunset{background:linear-gradient(135deg,#fb923c,#ea580c)}.sw-rose{background:linear-gradient(135deg,#fb7185,#e11d48)}
+  .sw-violet{background:linear-gradient(135deg,#c084fc,#9333ea)}.sw-graphite{background:linear-gradient(135deg,#cbd5e1,#64748b)}
+</style>
 {% endblock %}

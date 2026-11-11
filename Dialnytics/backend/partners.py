@@ -79,6 +79,7 @@ ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS logo_type text NOT NULL DEF
 ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS logo_version integer NOT NULL DEFAULT 0;
 ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS domain text;
 ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS domain_status text NOT NULL DEFAULT '';
+ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS theme text NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX IF NOT EXISTS partners_domain_idx ON public.partners(lower(domain)) WHERE domain IS NOT NULL;
 ALTER TABLE public.partners ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.partner_ledger ENABLE ROW LEVEL SECURITY;
@@ -961,6 +962,8 @@ def register(app, d):
     MAX_LOGO = 600 * 1024
     DOMAIN_RE = _re3.compile(r"^(?=.{4,190}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$")
     COLOR_RE = _re3.compile(r"^#[0-9a-fA-F]{6}$")
+    THEMES = {"ocean": "Ocean", "emerald": "Emerald", "sunset": "Sunset", "rose": "Rose", "violet": "Violet",
+              "graphite": "Graphite", "custom": "My brand colour"}
     RENDER_KEY = _os.getenv("RENDER_API_KEY", "").strip()
     RENDER_SERVICE = _os.getenv("RENDER_SERVICE_ID", "").strip()
     CNAME_TARGET = _os.getenv("PARTNER_CNAME_TARGET", "").strip()
@@ -994,7 +997,7 @@ def register(app, d):
         def load():
             with db_connect() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("""SELECT id,brand_name,brand_color,support_whatsapp,domain,domain_status,
+                    cur.execute("""SELECT id,brand_name,brand_color,support_whatsapp,domain,domain_status,theme,
                         (logo IS NOT NULL) AS has_logo, logo_version FROM public.partners
                         WHERE lower(domain)=%s AND domain_status='live' AND status='active'""", (host,))
                     return cur.fetchone()
@@ -1004,7 +1007,7 @@ def register(app, d):
         def load():
             with db_connect() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("""SELECT p.id,p.brand_name,p.brand_color,p.support_whatsapp,p.domain,p.domain_status,
+                    cur.execute("""SELECT p.id,p.brand_name,p.brand_color,p.support_whatsapp,p.domain,p.domain_status,p.theme,
                             (p.logo IS NOT NULL) AS has_logo, p.logo_version
                         FROM public.partners p
                         WHERE p.user_id=%s OR p.user_id=(SELECT a.reseller_id FROM public.dialnytics_accounts a
@@ -1098,6 +1101,7 @@ def register(app, d):
     g["brand_active"] = Lazy(lambda: bool(current_brand()))
     g["brand_name"] = Lazy(lambda: (current_brand() or {}).get("brand_name") or "Dialnytics")
     g["brand_color"] = Lazy(lambda: (current_brand() or {}).get("brand_color") or "")
+    g["brand_theme"] = Lazy(lambda: (current_brand() or {}).get("theme") or "")
     g["brand_has_logo"] = Lazy(lambda: bool(logo_url(current_brand())))
     from jinja2 import pass_context
 
@@ -1156,10 +1160,12 @@ def register(app, d):
             return redirect
         return templates.TemplateResponse(request=request, name="partner_brand.html", context={
             "user": user, "partner": partner, "cname": CNAME_TARGET, "auto": bool(RENDER_KEY and RENDER_SERVICE),
+            "themes": THEMES,
             "msg": request.query_params.get("msg"), "err": request.query_params.get("err")})
 
     @app.post("/partner/brand")
     async def partner_brand_save(request: Request, brand_name: str = Form(""), brand_color: str = Form(""),
+                                 theme: str = Form(""),
                                  support_whatsapp: str = Form(""), domain: str = Form(""),
                                  logo: UploadFile = File(None), remove_logo: str = Form("")):
         user, partner = need_partner(request)
@@ -1186,10 +1192,13 @@ def register(app, d):
                     status_sql = ""
                     if domain != old_domain:
                         status_sql = ", domain_status=%s"
-                    params = [brand_name, color, wa, domain or None]
+                    theme = theme if theme in THEMES else ""
+                    params = [brand_name, color, wa, domain or None, theme]
                     if status_sql:
                         params.append("waiting" if domain else "")
-                    sql = "UPDATE public.partners SET brand_name=%s, brand_color=%s, support_whatsapp=%s, domain=%s" + status_sql
+                    # (status param comes after theme in the SQL above)
+                    sql = ("UPDATE public.partners SET brand_name=%s, brand_color=%s, support_whatsapp=%s, domain=%s, theme=%s"
+                           + status_sql)
                     if data is not None:
                         sql += ", logo=%s, logo_type=%s, logo_version=logo_version+1"
                         params += [data, ctype]

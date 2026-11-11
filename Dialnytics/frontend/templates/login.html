@@ -5,14 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="theme-color" content="#050a18">
     <title>Sign in — {{ brand_name }}</title>
-    {% if brand_color %}<style>.lg-btn{background:{{ brand_color }}!important;border-color:{{ brand_color }}!important}</style>{% endif %}
+    {% if brand_color %}<style>.lg-btn{background:{{ brand_color }}!important;border-color:{{ brand_color }}!important}body.theme-custom{--t1:{{ brand_color }}}</style>{% endif %}
+    {% if brand_theme %}<link rel="stylesheet" href="/static/css/responsive.css?v=7">{% endif %}
     <link rel="icon" href="{{ brand_icon }}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/login.css?v=1">
     <script src="/static/js/csrf.js"></script>
 </head>
-<body class="lg">
+<body class="lg{% if brand_theme %} theme-{{ brand_theme }}{% endif %}">
 <div class="lg-page">
     <div class="lg-bg" aria-hidden="true">
         <div class="lg-far"><div class="lg-blob a"></div><div class="lg-blob b"></div><div class="lg-blob c"></div></div>

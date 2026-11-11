@@ -5,10 +5,42 @@
   <div>
     <a class="team-back" href="/resellers">← Resellers</a>
     <h1>{{ reseller.name }}</h1>
-    <p class="muted">{{ reseller.email }} · {{ companies|length }} companies · {{ companies|sum(attribute='users') }} users</p>
+    <p class="muted">{{ reseller.email }} · {{ companies|length }} companies · {{ companies|sum(attribute='users') }} users
+      · {% if reseller.is_active %}<span class="dn-pill ok">Active</span>{% else %}<span class="dn-pill danger">Disabled</span>{% endif %}</p>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    {% if reseller.is_active %}
+    <form method="post" action="/resellers/{{ reseller.id }}/status" class="inline-form" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap" onsubmit="return confirm('Disable {{ reseller.name|e }}? They cannot log in or create users.')">
+      <input type="hidden" name="action" value="disable">
+      <label style="display:inline-flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" name="users_too" value="1"> Also switch off their users</label>
+      <button class="dn-btn danger">Disable reseller</button>
+    </form>
+    {% else %}
+    <form method="post" action="/resellers/{{ reseller.id }}/status" class="inline-form"><input type="hidden" name="action" value="enable"><button class="dn-btn primary">Enable reseller</button></form>
+    {% endif %}
   </div>
 </div>
-{% if msg %}<div class="success-msg">Saved.</div>{% endif %}
+{% if msg == 'disabled' %}<div class="success-msg">Reseller disabled.</div>{% elif msg == 'enabled' %}<div class="success-msg">Reseller enabled. Switch their users on again from the list below if needed.</div>{% elif msg == 'confirm' %}<div class="error-msg">Type the reseller's email exactly to delete.</div>{% elif msg %}<div class="success-msg">Saved.</div>{% endif %}
+
+<section class="panel">
+  <h2>Users of this reseller ({{ members|length }})</h2>
+  <div class="table-scroll"><table class="modern-table">
+    <thead><tr><th>User</th><th>Company</th><th>Number</th><th>Plan</th><th>Add-ons</th><th>Renews</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for m in members %}
+    <tr{% if not m.is_active %} style="opacity:.6"{% endif %}>
+      <td><strong>{{ m.name }}</strong><small>{{ m.email }}{% if m.account_role == 'owner' %} · owner{% endif %}</small></td>
+      <td>{{ m.company }}</td>
+      <td>{{ m.phone_number or '—' }}</td>
+      <td>{{ plans[m.partner_plan] if m.partner_plan in plans else (m.plan_name or '—') }}</td>
+      <td>{% for a in (m.addons or []) %}<span class="dn-pill">{{ addon_names[a] }}</span> {% else %}—{% endfor %}</td>
+      <td>{{ m.plan_renewal.strftime('%d %b %Y') if m.plan_renewal else '—' }}</td>
+      <td>{% if m.is_active %}<span class="dn-pill ok">Active</span>{% else %}<span class="dn-pill">Off</span>{% endif %}</td>
+    </tr>
+    {% else %}<tr><td colspan="7" class="empty-note">No users yet.</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</section>
 <section class="panel">
   <h2>Companies of this reseller</h2>
   <div class="table-scroll"><table class="modern-table">
@@ -92,5 +124,15 @@
     <tbody>{% for l in pi.ledger %}<tr><td>{{ l.created_at.strftime('%d %b %Y') }}</td><td>{{ l.description }}{% if l.reference %} · {{ l.reference }}{% endif %}</td><td>{{ l.status }}</td><td style="text-align:right">{{ pi.fmt(l.amount) }}</td></tr>{% else %}<tr><td colspan="4" class="empty-note">Nothing yet.</td></tr>{% endfor %}</tbody>
   </table></div>
   {% endif %}
+</section>
+
+<section class="panel" id="danger" style="border-color:rgba(239,68,68,.4)">
+  <h2 style="color:#ef4444">Delete reseller</h2>
+  <p class="muted">Deletes this reseller login for good{% if pi %}, with its wallet history and prices{% endif %}. Their companies stay and become your direct customers, unless you also switch off their users. This cannot be undone.</p>
+  <form method="post" action="/resellers/{{ reseller.id }}/delete" class="inline-form" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+    <label style="display:flex;flex-direction:column;gap:6px;font-size:13px">Type <strong>{{ reseller.email }}</strong> to confirm<input name="confirm" autocomplete="off" required></label>
+    <label style="display:inline-flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" name="users_too" value="1"> Also switch off their users</label>
+    <button class="dn-btn danger">Delete reseller</button>
+  </form>
 </section>
 {% endblock %}

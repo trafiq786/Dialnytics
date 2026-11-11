@@ -5,9 +5,10 @@
   <div><h1>Resellers</h1><p class="muted">Partners who bring customers. A reseller logs in and sees only their own companies (view only, no provider names or costs).</p></div>
   <a class="btn btn-primary" href="/users#reseller">+ New Reseller</a>
 </div>
+{% if msg == 'deleted' %}<div class="success-msg">Reseller deleted.</div>{% endif %}
 <section class="panel">
   <div class="table-scroll"><table class="modern-table">
-    <thead><tr><th>Reseller</th><th>Companies</th><th>Users</th><th>Since</th><th></th></tr></thead>
+    <thead><tr><th>Reseller</th><th>Companies</th><th>Users</th><th>Since</th><th>Status</th><th></th></tr></thead>
     <tbody>
     {% for r in resellers %}
     <tr>
@@ -15,9 +16,10 @@
       <td>{{ r.companies }}</td>
       <td>{{ r.users }}</td>
       <td>{{ r.created_at.strftime('%d %b %Y') if r.created_at else '—' }}</td>
+      <td>{% if not r.is_active %}<span class="dn-pill danger">Disabled</span>{% elif r.is_partner %}<span class="dn-pill ok">White-label</span>{% else %}<span class="dn-pill">Reseller</span>{% endif %}</td>
       <td><a class="dn-btn" href="/resellers/{{ r.id }}">Open →</a></td>
     </tr>
-    {% else %}<tr><td colspan="5" class="empty-note">No resellers yet. Create one from the Users page (User type: Reseller).</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="6" class="empty-note">No resellers yet. Create one from the Users page (User type: Reseller).</td></tr>{% endfor %}
     </tbody>
   </table></div>
 </section>
