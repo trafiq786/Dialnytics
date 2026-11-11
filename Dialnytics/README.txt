@@ -1,12 +1,27 @@
-Update CC - Call status sahi waqt pe
+Update DD - White-label Partner: Hissa 1 (wallet + billing)
 
-Replace karein:
+Nayi files:
+  Dialnytics/backend/partners.py
+  Dialnytics/frontend/templates/partner_wallet.html
+  Dialnytics/frontend/templates/partner_payments.html
+  Dialnytics/SUPABASE_MIGRATION_31_PARTNERS.sql   (optional, app khud tables bana leti ha)
+Replace:
+  Dialnytics/backend/main.py
+  Dialnytics/frontend/templates/reseller_detail.html
+  Dialnytics/frontend/templates/base.html
+  Dialnytics/frontend/templates/dialer_rail.html
+  Dialnytics/frontend/static/css/responsive.css
   Dialnytics/frontend/static/js/dialer.js
-  Dialnytics/frontend/templates/base.html   (dialer.js?v=20261113 - cache refresh)
-(BB ke baad lagayein - base.html mein BB wala version b ha.)
+(Y, AA, BB, CC ke baad lagayein - ye un sab ke upar bani ha.)
 
-- Call milte hi 1.5 sec baad "Ringing" (UK/US network aksar ringing ka signal nahi bhejte the,
-  is liye "Calling..." atka rehta tha).
-- Samne wala answer kare tou foran "Active" + timer. Advanced calling mein bilkul foran,
-  normal calling mein ~1 sec "Connecting" (awaz confirm hone tak).
-- Answer ke baad dobara "Ringing" nahi aata.
+Kaise chalayein:
+1. Admin > Resellers > reseller kholein > "Make partner".
+2. Wahan prices (default aap ke rates), credit limit aur apni bank details save karein.
+3. Partner login kare: menu mein "Wallet". Bank transfer kar ke amount + reference + screenshot bheje.
+4. Aap: menu "Partner payments" (waiting count dikhta ha) > amount check kar ke Confirm.
+Billing: naya user/add-on = mahine ke baqi din ka; har 1 tareekh ko poora mahina khud kat-ta ha.
+US/Canada discount har company ke users pe (1=$22, 2=$20, 3+=$18).
+Balance + credit khatam: purane users chalte rahein, naye users/add-ons nahi.
+Partner users: US plan sirf USA call, Canada plan sirf Canada, US+CAN dono, UK sirf UK.
+3-way/Leave add-on na ho tou "Add Call" band.
+Hissa 2 (partner khud user + number banaye) is ke baad.

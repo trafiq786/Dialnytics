@@ -1180,6 +1180,7 @@ function hangup() {
         return (activeCall ? 1 : 0) + heldCalls.length + confCalls.length;
     }
     function addCall() {
+        if (cfg.dataset.conf === '0') return setStatus('3-way calling is an add-on. Ask your provider to switch it on.', 'var(--danger)');
         if (!activeCall) return setStatus('No active call', 'var(--danger)');
         if (activeCall._twilio) return setStatus('Add Call is not available on this line yet', 'var(--danger)');
         if (xfer) return setStatus('Finish the transfer first', 'var(--danger)');
@@ -1527,7 +1528,7 @@ function hangup() {
             confCalls.length ? '' : '<button type="button" class="call-swap" onclick="swapTo(\'' + esc(c.id) + '\')">Talk</button>')));
         const actions = [];
         if (activeCall && heldCalls.length) actions.push('<button type="button" class="primary" onclick="mergeCalls()">Merge all into conference</button>');
-        if (activeCall && lineCount() < MAX_LINES && !activeCall._twilio) actions.push('<button type="button" onclick="addCall()">+ Add call</button>');
+        if (activeCall && lineCount() < MAX_LINES && !activeCall._twilio && cfg.dataset.conf !== '0') actions.push('<button type="button" onclick="addCall()">+ Add call</button>');
         const box = document.getElementById('callsList');
         box.innerHTML = rows.length
             ? rows.join('') + (actions.length ? '<div class="calls-actions">' + actions.join('') + '</div>' : '')

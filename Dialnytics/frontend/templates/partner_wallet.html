@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Wallet{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Wallet</h1>
+    <p class="muted">Your users and add-ons are paid from this balance. Renewal is on the 1st of every month.</p>
+  </div>
+</div>
+{% if msg == 'sent' %}<div class="success-msg">Payment sent for confirmation. Your credit limit keeps you running until it is confirmed.</div>{% endif %}
+{% if err == 'amount' %}<div class="error-msg">Enter the amount you transferred, for example 250.</div>{% endif %}
+{% if err == 'proof' %}<div class="error-msg">The screenshot must be a PNG, JPG, WEBP or PDF under 5 MB.</div>{% endif %}
+{% if partner.status != 'active' %}<div class="error-msg">Your partner account is paused. Contact support.</div>{% endif %}
+{% if s.available <= 0 %}<div class="error-msg">Your available balance is used up. Existing users keep working, but you cannot add new users or add-ons until a payment is confirmed.</div>{% endif %}
+
+<div class="stat-row">
+  <div class="stat-card"><div class="value">{{ fmt(s.balance) }}</div><div class="label">Balance</div></div>
+  <div class="stat-card"><div class="value">{{ fmt(s.credit) }}</div><div class="label">Credit limit</div></div>
+  <div class="stat-card"><div class="value">{{ fmt(s.available) }}</div><div class="label">Available to spend</div></div>
+  <div class="stat-card"><div class="value">{{ fmt(s.renewal) }}</div><div class="label">Next renewal (1st)</div></div>
+  <div class="stat-card"><div class="value">{{ fmt(s.pending) }}</div><div class="label">Waiting for confirmation</div></div>
+</div>
+
+<div class="split-2">
+  <section class="panel">
+    <h2>Add payment</h2>
+    <p class="muted">Send a bank transfer, then report it here with the reference and a screenshot.</p>
+    {% if partner.bank_details %}<pre class="bank-box" style="white-space:pre-wrap;background:var(--bg-input,rgba(255,255,255,.04));border:1px solid var(--border);border-radius:12px;padding:12px;font:inherit">{{ partner.bank_details }}</pre>{% endif %}
+    <form method="post" action="/partner/wallet/deposit" enctype="multipart/form-data" class="stack-form">
+      <label>Amount (USD)<input name="amount" inputmode="decimal" required placeholder="250"></label>
+      <label>Bank reference<input name="reference" maxlength="120" placeholder="FT-88231"></label>
+      <label>Transfer screenshot (PNG, JPG, PDF)<input type="file" name="proof" accept="image/png,image/jpeg,image/webp,application/pdf"></label>
+      <button class="dn-btn primary" {% if partner.status != 'active' %}disabled{% endif %}>Send for confirmation</button>
+    </form>
+  </section>
+  <section class="panel">
+    <h2>Your prices</h2>
+    <div class="table-scroll"><table class="modern-table">
+      <tbody>
+      {% for key, label in price_labels %}<tr><td>{{ label }}</td><td style="text-align:right">{{ fmt(prices[key]) }} / month</td></tr>{% endfor %}
+      </tbody>
+    </table></div>
+    <p class="muted" style="font-size:12px">USA, Canada and USA + Canada prices drop when a company has more users. New users and add-ons are charged for the days left in the month.</p>
+  </section>
+</div>
+
+<section class="panel">
+  <h2>Users you pay for ({{ seats|length }})</h2>
+  <div class="table-scroll"><table class="modern-table">
+    <thead><tr><th>User</th><th>Company</th><th>Plan</th><th>Add-ons</th><th>Paid until</th><th style="text-align:right">Per month</th></tr></thead>
+    <tbody>
+    {% for r in seats %}
+      <tr><td><strong>{{ r.name }}</strong><div class="muted" style="font-size:12px">{{ r.email }}</div></td>
+        <td>{{ r.company or '—' }}</td><td>{{ plans[r.plan] }}</td>
+        <td>{% for a in r.addons %}<span class="dn-pill">{{ addons[a] }}</span> {% else %}—{% endfor %}</td>
+        <td>{{ r.paid_until.strftime('%d %b %Y') }}</td><td style="text-align:right">{{ fmt(r.monthly) }}</td></tr>
+    {% else %}<tr><td colspan="6" class="empty-note">No users yet.</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</section>
+
+<section class="panel">
+  <h2>History</h2>
+  <div class="table-scroll"><table class="modern-table">
+    <thead><tr><th>Date</th><th>Item</th><th>Status</th><th style="text-align:right">Amount</th></tr></thead>
+    <tbody>
+    {% for l in ledger %}
+      <tr><td>{{ l.created_at.strftime('%d %b %Y') }}</td>
+        <td>{{ l.description }}{% if l.reference %} · {{ l.reference }}{% endif %}{% if l.proof_type %} · <a href="/partner/proof/{{ l.id }}" target="_blank" rel="noopener">screenshot</a>{% endif %}</td>
+        <td>{% if l.status == 'pending' %}<span class="dn-pill warn">Waiting</span>{% elif l.status == 'confirmed' %}<span class="dn-pill ok">Confirmed</span>{% elif l.status == 'rejected' %}<span class="dn-pill danger">Rejected</span>{% else %}<span class="dn-pill">Charged</span>{% endif %}</td>
+        <td style="text-align:right;{% if l.amount < 0 %}color:var(--danger){% elif l.status in ('confirmed','posted') %}color:var(--success){% endif %}">{{ fmt(l.amount) }}</td></tr>
+    {% else %}<tr><td colspan="4" class="empty-note">Nothing yet.</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endblock %}

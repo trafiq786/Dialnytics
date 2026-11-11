@@ -67,3 +67,13 @@ html, body { max-width: 100%; overflow-x: hidden; }
 
 /* wider screens: the wrapper is invisible */
 @media (min-width: 761px) { .rt-v { display: contents; } }
+
+/* partner wallet forms */
+.stack-form { display: flex; flex-direction: column; gap: 10px; }
+.stack-form label { display: flex; flex-direction: column; gap: 6px; }
+.dn-pill.danger { background: rgba(239, 68, 68, .14); color: #ef4444; }
+.stack-form label, #partner label { font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+:is(.stack-form, #partner, .inline-form) :is(input:not([type=file]):not([type=checkbox]):not([type=radio]), select, textarea) {
+  padding: 10px 12px; min-height: 40px; border-radius: 10px; font-size: 14px; font-weight: 500;
+  color: var(--text-primary); background: var(--bg-input, rgba(255, 255, 255, .05)); border: 1px solid var(--border); }
+.stack-form input[type=file] { font-size: 13px; }

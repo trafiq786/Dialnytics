@@ -40,6 +40,7 @@ from starlette.concurrency import run_in_threadpool  # noqa: E402
 import ring_group as rg  # noqa: E402  (shared numbers: ring every free member)
 import live_listen as ll  # noqa: E402  (supervisors listen / whisper / join live calls)
 import website_orders as wo  # noqa: E402  (orders from the marketing website)
+import partners as pb  # noqa: E402  (white-label partners: wallet + seats)
 
 app = FastAPI(title="Dialnytics", version="1.2.0")
 log = logging.getLogger("dialnytics")
@@ -302,6 +303,7 @@ def _db_user(row):
         "call_countries": row.get("call_countries") or "",
         "twilio_account": tw_key(row.get("twilio_account") or "w1"),
         "twilio_in": bool(row.get("twilio_in", False)),
+        "partner_plan": row.get("partner_plan") or "",
         "is_demo": bool(row.get("is_demo", False)),
         "signup_source": row.get("signup_source") or "",
         "signup_ref": row.get("signup_ref") or "",
@@ -503,7 +505,7 @@ CREATE INDEX IF NOT EXISTS monitor_recordings_user_idx ON public.monitor_recordi
 CREATE INDEX IF NOT EXISTS monitor_recordings_age_idx ON public.monitor_recordings(created_at);
 ALTER TABLE public.monitor_recordings ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.monitor_recordings FROM anon, authenticated;
-""" + ct.SCHEMA_SQL + rg.SCHEMA_SQL + wo.SCHEMA_SQL + ll.SCHEMA_SQL
+""" + ct.SCHEMA_SQL + rg.SCHEMA_SQL + wo.SCHEMA_SQL + ll.SCHEMA_SQL + pb.SCHEMA_SQL
 
 def ensure_schema():
     """Idempotent additive migration (same SQL as SUPABASE_MIGRATION_07)."""
@@ -2086,9 +2088,20 @@ def call_allowed(user, to_number):
     if is_emergency_number(to_number):
         return False
     zones = call_zones(user)
-    return not zones or number_zone(to_number) in zones
+    if zones and number_zone(to_number) not in zones:
+        return False
+    plan = (user or {}).get("partner_plan") or ""
+    if plan:
+        digits = re.sub(r"\D", "", str(to_number or ""))
+        if digits.startswith("00"):
+            digits = digits[2:]
+        return pb.plan_allows(plan, digits)
+    return True
 
 def call_zone_text(user):
+    plan = (user or {}).get("partner_plan") or ""
+    if plan in ("us", "ca"):
+        return "the USA" if plan == "us" else "Canada"
     zones = call_zones(user)
     return " and ".join(CALL_ZONES[z][1] for z in zones) if zones else "any country"
 
@@ -5656,6 +5669,7 @@ async def reseller_detail(reseller_id: uuid.UUID, request: Request):
     unassigned = [c for c in _all_companies() if not c["reseller_id"]]
     return templates.TemplateResponse(request=request, name="reseller_detail.html", context={
         "user": admin, "reseller": reseller, "companies": companies, "unassigned": unassigned,
+        "pi": _pb["partner_info_for_admin"](reseller["id"]),
         "msg": request.query_params.get("msg")})
 
 @app.post("/resellers/{reseller_id}/companies")
@@ -6037,3 +6051,8 @@ _wo = wo.register(app, dict(
     _set_user_twilio_account=_set_user_twilio_account, _twilio_configure_number=_twilio_configure_number,
     _set_user_telnyx_account=_set_user_telnyx_account, tx_ctx=tx_ctx, _ensure_credential=_ensure_credential,
     worker_should_run=worker_should_run))
+
+_pb = pb.register(app, dict(
+    db_connect=db_connect, templates=templates, get_current_user=get_current_user,
+    require_admin=require_admin, refresh_users=refresh_users, worker_should_run=worker_should_run,
+    no_worker=os.getenv("PARTNER_WORKER", "1") == "0"))

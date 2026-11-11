@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Partner payments — Dialnytics{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Partner payments</h1><p class="muted">Bank transfers reported by partners. Check your bank, then confirm.</p></div></div>
+<section class="panel">
+  <div class="table-scroll"><table class="modern-table">
+    <thead><tr><th>Date</th><th>Partner</th><th>Reference</th><th>Screenshot</th><th style="text-align:right">Amount</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.created_at.strftime('%d %b %Y %H:%M') }}</td>
+      <td><a href="/resellers/{{ r.reseller_id }}#partner">{{ r.partner_name }}</a></td>
+      <td>{{ r.reference or '—' }}</td>
+      <td>{% if r.proof_type %}<a href="/partner/proof/{{ r.id }}" target="_blank" rel="noopener">View</a>{% else %}—{% endif %}</td>
+      <td style="text-align:right">{{ fmt(r.amount) }}</td>
+      <td>
+        {% if r.status == 'pending' %}
+        <form method="post" action="/partners/payments/{{ r.id }}/confirm" class="inline-form">
+          <input type="hidden" name="back" value="/partners/payments">
+          <input name="amount" value="{{ '%.2f'|format(r.amount) }}" inputmode="decimal" style="width:96px" aria-label="Amount received">
+          <button class="dn-btn primary">Confirm</button>
+        </form>
+        <form method="post" action="/partners/payments/{{ r.id }}/reject" class="inline-form" onsubmit="return confirm('Reject this payment?')">
+          <input type="hidden" name="back" value="/partners/payments"><button class="dn-btn danger">Reject</button>
+        </form>
+        {% elif r.status == 'confirmed' %}<span class="dn-pill ok">Confirmed</span>{% else %}<span class="dn-pill danger">Rejected</span>{% endif %}
+      </td>
+    </tr>
+    {% else %}<tr><td colspan="6" class="empty-note">No payments yet.</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endblock %}

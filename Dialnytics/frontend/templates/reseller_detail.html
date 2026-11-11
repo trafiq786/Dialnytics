@@ -39,4 +39,47 @@
   </form>
   {% endif %}
 </section>
+
+<section class="panel" id="partner">
+  <h2>White-label partner</h2>
+  {% if not pi %}
+  <p class="muted">Turn this reseller into a partner: they get a wallet, pay you by bank transfer and create their own users.</p>
+  <form method="post" action="/resellers/{{ reseller.id }}/partner"><input type="hidden" name="action" value="enable"><button class="dn-btn primary">Make partner</button></form>
+  {% else %}
+  <div class="stat-row">
+    <div class="stat-card"><div class="value">{{ pi.fmt(pi.s.balance) }}</div><div class="label">Balance</div></div>
+    <div class="stat-card"><div class="value">{{ pi.fmt(pi.s.available) }}</div><div class="label">Available (with credit)</div></div>
+    <div class="stat-card"><div class="value">{{ pi.fmt(pi.s.renewal) }}</div><div class="label">Monthly renewal</div></div>
+    <div class="stat-card"><div class="value">{{ pi.seats|length }}</div><div class="label">Paid users</div></div>
+    <div class="stat-card"><div class="value">{{ pi.s.pending_count }}</div><div class="label">Payments waiting</div></div>
+  </div>
+  {% for l in pi.ledger if l.status == 'pending' %}
+  <div class="row-actions" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border)">
+    <span class="dn-pill warn">Waiting</span><strong>{{ pi.fmt(l.amount) }}</strong><span class="muted">{{ l.created_at.strftime('%d %b %H:%M') }} · {{ l.reference or 'no reference' }}</span>
+    {% if l.proof_type %}<a href="/partner/proof/{{ l.id }}" target="_blank" rel="noopener">Screenshot</a>{% endif %}
+    <form method="post" action="/partners/payments/{{ l.id }}/confirm" class="inline-form"><input name="amount" value="{{ '%.2f'|format(l.amount) }}" inputmode="decimal" style="width:96px" aria-label="Amount received"><button class="dn-btn primary">Confirm</button></form>
+    <form method="post" action="/partners/payments/{{ l.id }}/reject" class="inline-form" onsubmit="return confirm('Reject this payment?')"><button class="dn-btn danger">Reject</button></form>
+  </div>
+  {% endfor %}
+  <form method="post" action="/resellers/{{ reseller.id }}/partner" class="stack-form" style="margin-top:14px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px">
+      {% for key, label in pi.price_labels %}<label>{{ label }}<input name="price_{{ key }}" value="{{ '%.2f'|format(pi.prices[key]) }}" inputmode="decimal"></label>{% endfor %}
+      <label>Credit limit (USD)<input name="credit_limit" value="{{ '%.2f'|format(pi.partner.credit_limit) }}" inputmode="decimal"></label>
+      <label>Status<select name="status"><option value="active" {% if pi.partner.status == 'active' %}selected{% endif %}>Active</option><option value="suspended" {% if pi.partner.status == 'suspended' %}selected{% endif %}>Suspended (no new users)</option></select></label>
+    </div>
+    <label>Bank details shown to the partner<textarea name="bank_details" rows="3" placeholder="Prime MSM Limited · Bank · Account / IBAN · Reference: partner name">{{ pi.partner.bank_details }}</textarea></label>
+    <button class="dn-btn primary">Save partner settings</button>
+  </form>
+  <form method="post" action="/resellers/{{ reseller.id }}/partner/adjust" class="inline-form" style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end">
+    <label>Manual adjustment (USD, minus to charge)<input name="amount" placeholder="50 or -20" inputmode="decimal" required></label>
+    <label>Note<input name="note" maxlength="200" placeholder="Reason"></label>
+    <button class="dn-btn">Add</button>
+  </form>
+  <h3 style="margin-top:16px">History</h3>
+  <div class="table-scroll"><table class="modern-table">
+    <thead><tr><th>Date</th><th>Item</th><th>Status</th><th style="text-align:right">Amount</th></tr></thead>
+    <tbody>{% for l in pi.ledger %}<tr><td>{{ l.created_at.strftime('%d %b %Y') }}</td><td>{{ l.description }}{% if l.reference %} · {{ l.reference }}{% endif %}</td><td>{{ l.status }}</td><td style="text-align:right">{{ pi.fmt(l.amount) }}</td></tr>{% else %}<tr><td colspan="4" class="empty-note">Nothing yet.</td></tr>{% endfor %}</tbody>
+  </table></div>
+  {% endif %}
+</section>
 {% endblock %}
