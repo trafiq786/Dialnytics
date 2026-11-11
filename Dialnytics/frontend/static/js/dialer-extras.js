@@ -37,17 +37,24 @@
      *  "+44 7476 629105" / "0044..." -> kept as international
      *  UK line: "07476629105" or "7476629105" -> +447476629105
      *  US line: "2522514083" or "12522514083" -> +12522514083 */
+    // "+44 (0)7980 680192" -> +447980680192. Italy (+39) keeps its 0.
+    function dropTrunkZero(e164) {
+        const c = countryOf(e164);
+        if (!c || c[0] === '39' || c[0] === '1') return e164;
+        const rest = e164.slice(1 + c[0].length);
+        return rest.startsWith('0') && rest.length > 8 ? '+' + c[0] + rest.slice(1) : e164;
+    }
     function toE164(raw) {
         let v = String(raw || '').trim();
         if (!v) return '';
-        if (v.startsWith('+')) return '+' + v.replace(/\D/g, '');
+        if (v.startsWith('+')) return dropTrunkZero('+' + v.replace(/\D/g, ''));
         let d = v.replace(/\D/g, '');
-        if (d.startsWith('00')) return '+' + d.slice(2);
+        if (d.startsWith('00')) return dropTrunkZero('+' + d.slice(2));
         if (!HOME) return '+' + d;
         const code = HOME[0];
         if (code === '1') return d.length === 11 && d.startsWith('1') ? '+' + d : '+1' + d;
         // Already typed with the country code but without "+" (e.g. 447476629105).
-        if (d.startsWith(code) && d.length >= code.length + 9) return '+' + d;
+        if (d.startsWith(code) && d.length >= code.length + 9) return dropTrunkZero('+' + d);
         if (code !== '39') d = d.replace(/^0/, '');   // drop the national trunk 0 (Italy keeps it)
         return '+' + code + d;
     }

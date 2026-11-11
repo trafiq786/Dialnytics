@@ -4704,8 +4704,16 @@ async def toggle_power(request: Request, email: str = Form(...)):
 # CRM and power dialer: user-scoped, opt-in only, PostgreSQL persistence.
 CRM_STATUSES = {"new", "interested", "callback", "converted", "not_interested"}
 
+# Country codes where people often keep the national "0" after the code, e.g. +44 (0)7980 680192.
+_TRUNK_ZERO = re.compile(r"\+(44|61|64|353|33|49|31|32|27|92|91|971|966|880|90|46|47|45|41|34|60|65|852|43|48|351)0(\d+)")
+
+def _drop_trunk_zero(e164):
+    """+4407980680192 -> +447980680192 (Italy +39 keeps its 0, so it is not in the list)."""
+    m = _TRUNK_ZERO.fullmatch(e164 or "")
+    return "+" + m.group(1) + m.group(2) if m else e164
+
 def _crm_number(raw):
-    value = re.sub(r"[\s().-]", "", str(raw or ""))
+    value = _drop_trunk_zero(re.sub(r"[\s().-]", "", str(raw or "")))
     if not re.fullmatch(r"\+[1-9]\d{7,14}", value):
         raise HTTPException(status_code=422, detail="Phone must be E.164, e.g. +12025550123")
     return value
@@ -4716,6 +4724,7 @@ def _import_number(raw, default_cc="44"):
     country code (UK). Returns None when it cannot be made into a valid number."""
     v = re.sub(r"[^\d+]", "", str(raw or ""))
     if v.startswith("+"):
+        v = _drop_trunk_zero(v)
         return v if re.fullmatch(r"\+[1-9]\d{7,14}", v) else None
     d = re.sub(r"\D", "", v)
     if not d:
@@ -4724,7 +4733,7 @@ def _import_number(raw, default_cc="44"):
         d = d[2:]
         return "+" + d if re.fullmatch(r"[1-9]\d{7,14}", d) else None
     if d.startswith(default_cc) and len(d) >= 11:   # already carries the country code
-        return "+" + d
+        return _drop_trunk_zero("+" + d)
     if d.startswith("0"):                           # national trunk 0 -> country code
         rest = d[1:]
         return "+" + default_cc + rest if re.fullmatch(r"[1-9]\d{6,13}", rest) else None
@@ -5085,8 +5094,9 @@ async def power_queue_authorize(queue_id: uuid.UUID, request: Request):
                 (queue_id,user["id"],item_id))
             row=cur.fetchone()
     if not row: raise HTTPException(status_code=409, detail="Lead is not eligible for calling")
-    if not call_allowed(user, row["phone"]): raise HTTPException(status_code=409, detail=call_block_message(user, row["phone"]))
-    return {"authorized":True,"phone":row["phone"]}
+    phone = _drop_trunk_zero(row["phone"])
+    if not call_allowed(user, phone): raise HTTPException(status_code=409, detail=call_block_message(user, phone))
+    return {"authorized":True,"phone":phone}
 
 @app.post("/api/power/queue/{queue_id}/skip")
 async def power_queue_skip(queue_id: uuid.UUID, request: Request):
