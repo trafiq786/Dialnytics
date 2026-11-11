@@ -1169,7 +1169,7 @@ def register(app, d):
         domain = domain.strip().lower().removeprefix("https://").removeprefix("http://").split("/")[0]
         if domain and not DOMAIN_RE.match(domain):
             return RedirectResponse("/partner/brand?err=domain", status_code=303)
-        if domain and (domain == MAIN_HOST or domain.endswith("." + MAIN_HOST) or "dialnytics" in domain):
+        if domain and (domain == MAIN_HOST or domain.endswith("." + MAIN_HOST)):
             return RedirectResponse("/partner/brand?err=domain", status_code=303)
         data, ctype = None, ""
         if logo is not None and logo.filename:
