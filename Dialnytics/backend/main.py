@@ -5800,6 +5800,8 @@ async def billing_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
+    if user.get("partner_plan"):          # a partner's client: the partner handles billing
+        return RedirectResponse(url="/dashboard", status_code=302)
     return templates.TemplateResponse(request=request, name="billing.html", context={
         "user": user,
         "plan": plan_status(user),
@@ -6055,4 +6057,8 @@ _wo = wo.register(app, dict(
 _pb = pb.register(app, dict(
     db_connect=db_connect, templates=templates, get_current_user=get_current_user,
     require_admin=require_admin, refresh_users=refresh_users, worker_should_run=worker_should_run,
-    no_worker=os.getenv("PARTNER_WORKER", "1") == "0"))
+    no_worker=os.getenv("PARTNER_WORKER", "1") == "0",
+    telnyx_number_accounts=telnyx_number_accounts, tx_verified=TX_VERIFIED, telnyx_request=_telnyx_request,
+    tx_ctx=tx_ctx, set_user_telnyx_account=_set_user_telnyx_account, ensure_credential=_ensure_credential,
+    hash_password=hash_password, hold_info=_wo["hold_info"], public_url=PUBLIC_BASE_URL,
+    buy_account=os.getenv("PARTNER_TELNYX_ACCOUNT", "t1")))

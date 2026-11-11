@@ -4,7 +4,7 @@
 <div class="page-head">
   <div>
     <h1>Wallet</h1>
-    <p class="muted">Your users and add-ons are paid from this balance. Renewal is on the 1st of every month.</p>
+    <p class="muted">Your users and add-ons are paid from this balance. Each user renews one month after the day it was created.</p>
   </div>
 </div>
 {% if msg == 'sent' %}<div class="success-msg">Payment sent for confirmation. Your credit limit keeps you running until it is confirmed.</div>{% endif %}
@@ -17,7 +17,7 @@
   <div class="stat-card"><div class="value">{{ fmt(s.balance) }}</div><div class="label">Balance</div></div>
   <div class="stat-card"><div class="value">{{ fmt(s.credit) }}</div><div class="label">Credit limit</div></div>
   <div class="stat-card"><div class="value">{{ fmt(s.available) }}</div><div class="label">Available to spend</div></div>
-  <div class="stat-card"><div class="value">{{ fmt(s.renewal) }}</div><div class="label">Next renewal (1st)</div></div>
+  <div class="stat-card"><div class="value">{{ fmt(s.renewal) }}</div><div class="label">Monthly total</div></div>
   <div class="stat-card"><div class="value">{{ fmt(s.pending) }}</div><div class="label">Waiting for confirmation</div></div>
 </div>
 
@@ -40,20 +40,20 @@
       {% for key, label in price_labels %}<tr><td>{{ label }}</td><td style="text-align:right">{{ fmt(prices[key]) }} / month</td></tr>{% endfor %}
       </tbody>
     </table></div>
-    <p class="muted" style="font-size:12px">USA, Canada and USA + Canada prices drop when a company has more users. New users and add-ons are charged for the days left in the month.</p>
+    <p class="muted" style="font-size:12px">USA, Canada and USA + Canada prices drop when a company has more users. A new user pays one full month (for example 11 Dec to 10 Jan). An add-on added later pays only for the days left until that user's renewal date.</p>
   </section>
 </div>
 
 <section class="panel">
   <h2>Users you pay for ({{ seats|length }})</h2>
   <div class="table-scroll"><table class="modern-table">
-    <thead><tr><th>User</th><th>Company</th><th>Plan</th><th>Add-ons</th><th>Paid until</th><th style="text-align:right">Per month</th></tr></thead>
+    <thead><tr><th>User</th><th>Company</th><th>Plan</th><th>Add-ons</th><th>Renews</th><th style="text-align:right">Per month</th></tr></thead>
     <tbody>
     {% for r in seats %}
       <tr><td><strong>{{ r.name }}</strong><div class="muted" style="font-size:12px">{{ r.email }}</div></td>
         <td>{{ r.company or '—' }}</td><td>{{ plans[r.plan] }}</td>
         <td>{% for a in r.addons %}<span class="dn-pill">{{ addons[a] }}</span> {% else %}—{% endfor %}</td>
-        <td>{{ r.paid_until.strftime('%d %b %Y') }}</td><td style="text-align:right">{{ fmt(r.monthly) }}</td></tr>
+        <td>{{ (r.paid_until + day).strftime('%d %b %Y') }}</td><td style="text-align:right">{{ fmt(r.monthly) }}</td></tr>
     {% else %}<tr><td colspan="6" class="empty-note">No users yet.</td></tr>{% endfor %}
     </tbody>
   </table></div>

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Users</h1><p class="muted">Available to spend: <strong>{{ fmt(s.available) }}</strong></p></div>
+  <a class="dn-btn primary" href="/partner/users/new">+ New user</a>
+</div>
+{% if msg == 'saved' %}<div class="success-msg">Add-ons saved.</div>{% elif msg == 'disabled' %}<div class="success-msg">User switched off. No more charges for this user.</div>{% elif msg == 'enabled' %}<div class="success-msg">User switched on and charged for one month.</div>{% endif %}
+{% if err %}<div class="error-msg">{{ err }}</div>{% endif %}
+<section class="panel">
+  <div class="table-scroll"><table class="modern-table">
+    <thead><tr><th>User</th><th>Company</th><th>Number</th><th>Plan</th><th>Add-ons</th><th>Renews</th><th style="text-align:right">Per month</th><th></th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr{% if not r.active %} style="opacity:.6"{% endif %}>
+      <td><strong>{{ r.name }}</strong><div class="muted" style="font-size:12px">{{ r.email }}</div></td>
+      <td>{{ r.company or '—' }}</td>
+      <td>{{ r.phone_number or '—' }}</td>
+      <td>{{ plans[r.plan] }}</td>
+      <td>
+        {% if r.active %}
+        <form method="post" action="/partner/users/{{ r.user_id }}/addons" class="addon-form" style="display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center">
+          {% for key, label in addons.items() %}<label style="display:inline-flex;gap:6px;align-items:center;font-size:13px;font-weight:500"><input type="checkbox" name="addons" value="{{ key }}" {% if key in r.addons %}checked{% endif %}>{{ label }}</label>{% endfor %}
+          <button class="dn-btn" style="padding:4px 10px">Save</button>
+        </form>
+        {% else %}—{% endif %}
+      </td>
+      <td>{% if r.active %}{{ (r.paid_until + day).strftime('%d %b %Y') }}{% else %}<span class="dn-pill">Off</span>{% endif %}</td>
+      <td style="text-align:right">{{ fmt(r.monthly) if r.active else '—' }}</td>
+      <td>
+        {% if r.active %}
+        <form method="post" action="/partner/users/{{ r.user_id }}/disable" class="inline-form" onsubmit="return confirm('Switch off {{ r.name|e }}? They cannot log in and you stop paying for them. No refund for the current month.')"><button class="dn-btn danger">Switch off</button></form>
+        {% else %}
+        <form method="post" action="/partner/users/{{ r.user_id }}/enable" class="inline-form" onsubmit="return confirm('Switch on {{ r.name|e }}? One month is charged now.')"><button class="dn-btn">Switch on</button></form>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}<tr><td colspan="8" class="empty-note">No users yet. <a href="/partner/users/new">Create the first one</a>.</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+  <p class="muted" style="font-size:12px">Adding an add-on charges only the days left until that user's renewal date. Removing one stops it at once with no refund.</p>
+</section>
+{% endblock %}

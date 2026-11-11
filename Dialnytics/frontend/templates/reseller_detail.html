@@ -61,6 +61,17 @@
     <form method="post" action="/partners/payments/{{ l.id }}/reject" class="inline-form" onsubmit="return confirm('Reject this payment?')"><button class="dn-btn danger">Reject</button></form>
   </div>
   {% endfor %}
+  <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px">
+    <strong>Brand:</strong> {{ pi.partner.brand_name or 'not set' }}
+    {% if pi.partner.domain %}· <span>{{ pi.partner.domain }}</span>
+      {% if pi.partner.domain_status == 'live' %}<span class="dn-pill ok">Live</span>
+      <form method="post" action="/resellers/{{ reseller.id }}/partner/domain" class="inline-form"><input type="hidden" name="state" value="waiting"><button class="dn-btn">Take offline</button></form>
+      {% else %}<span class="dn-pill warn">Waiting</span>
+      <span class="muted" style="font-size:12px">Add it in Render (Settings → Custom Domains), then:</span>
+      <form method="post" action="/resellers/{{ reseller.id }}/partner/domain" class="inline-form"><input type="hidden" name="state" value="live"><button class="dn-btn primary">Mark live</button></form>
+      {% endif %}
+    {% endif %}
+  </div>
   <form method="post" action="/resellers/{{ reseller.id }}/partner" class="stack-form" style="margin-top:14px">
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px">
       {% for key, label in pi.price_labels %}<label>{{ label }}<input name="price_{{ key }}" value="{{ '%.2f'|format(pi.prices[key]) }}" inputmode="decimal"></label>{% endfor %}

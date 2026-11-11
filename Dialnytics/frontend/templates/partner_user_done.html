@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}User created{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>User created</h1><p class="muted">Send these login details to your client. The password is shown only once.</p></div></div>
+<section class="panel" style="max-width:640px">
+  <div style="display:grid;grid-template-columns:auto 1fr;gap:8px 16px">
+    <span class="muted">Name</span><strong>{{ name }}</strong>
+    <span class="muted">Login page</span><strong>{{ login_url }}</strong>
+    <span class="muted">Email</span><strong>{{ email }}</strong>
+    <span class="muted">Password</span><strong style="font-family:ui-monospace,Menlo,monospace">{{ password }}</strong>
+    <span class="muted">Number</span><strong>{{ number }}</strong>
+    <span class="muted">Plan</span><span>{{ plan }}{% if addons %} + {{ addons|join(', ') }}{% endif %}</span>
+    <span class="muted">Charged</span><span>{{ charged }} · paid until {{ until }}</span>
+  </div>
+  <textarea id="doneText" rows="5" readonly style="margin-top:14px;width:100%">Login: {{ login_url }}
+Email: {{ email }}
+Password: {{ password }}
+Your number: {{ number }}</textarea>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+    <button type="button" class="dn-btn primary" onclick="(function(b){const t=document.getElementById('doneText');(navigator.clipboard?navigator.clipboard.writeText(t.value):Promise.reject()).then(()=>{b.textContent='Copied'}).catch(()=>{t.select();b.textContent='Press Ctrl+C'})})(this)">Copy login details</button>
+    <a class="dn-btn" href="/partner/users/new">Create another</a>
+    <a class="dn-btn" href="/partner/users">All users</a>
+  </div>
+</section>
+{% endblock %}

@@ -42,6 +42,16 @@ CREATE TABLE IF NOT EXISTS public.partner_seats (
 CREATE INDEX IF NOT EXISTS partner_seats_partner_idx ON public.partner_seats(partner_id) WHERE active;
 -- Which calls a partner seat may make: us = US only, ca = Canada only, usca = both, uk = UK.
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS partner_plan text NOT NULL DEFAULT '';
+-- 32: partner brand + own domain
+ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS brand_name text NOT NULL DEFAULT '';
+ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS brand_color text NOT NULL DEFAULT '';
+ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS support_whatsapp text NOT NULL DEFAULT '';
+ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS logo bytea;
+ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS logo_type text NOT NULL DEFAULT '';
+ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS logo_version integer NOT NULL DEFAULT 0;
+ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS domain text;
+ALTER TABLE public.partners ADD COLUMN IF NOT EXISTS domain_status text NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS partners_domain_idx ON public.partners(lower(domain)) WHERE domain IS NOT NULL;
 ALTER TABLE public.partners ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.partner_ledger ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.partner_seats ENABLE ROW LEVEL SECURITY;

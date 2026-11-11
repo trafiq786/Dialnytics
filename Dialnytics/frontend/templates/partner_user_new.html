@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}New user{% endblock %}
+{% block content %}
+<div class="page-head"><div><a class="team-back" href="/partner/users">← Users</a><h1>New user</h1>
+  <p class="muted">Available to spend: <strong>{{ fmt(s.available) }}</strong></p></div></div>
+{% if error %}<div class="error-msg">{{ error }}</div>{% endif %}
+<form method="post" action="/partner/users" id="puForm" class="split-2">
+  <section class="panel stack-form">
+    <h2>User</h2>
+    <label>Full name<input name="name" required maxlength="120" autocomplete="off"></label>
+    <label>Email (used to log in)<input name="email" type="email" required maxlength="200" autocomplete="off"></label>
+    <label>Password<input name="password" type="text" minlength="12" maxlength="100" placeholder="Leave empty to create one" autocomplete="new-password"></label>
+    <label>Company
+      <select name="company_mode" id="puCoMode">
+        <option value="new">New company</option>
+        {% if companies %}<option value="existing">Existing company</option>{% endif %}
+      </select>
+    </label>
+    <label id="puCoNew">Company name<input name="company_name" maxlength="200"></label>
+    <label id="puCoOld" hidden>Choose company
+      <select name="account_id" id="puAccount">{% for c in companies %}<option value="{{ c.id }}">{{ c.name }} ({{ c.users }} users)</option>{% endfor %}</select>
+    </label>
+    <label id="puRole" hidden>Role<select name="account_role"><option value="agent">Agent</option><option value="owner">Company owner (sees the team)</option></select></label>
+
+    <h2 style="margin-top:8px">Plan</h2>
+    <div class="pu-plans" role="radiogroup" aria-label="Plan" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px">
+      {% for key, label in plans.items() %}
+      <label class="pu-opt"><input type="radio" name="plan" value="{{ key }}" {% if loop.first %}checked{% endif %}><span>{{ label }}</span></label>
+      {% endfor %}
+    </div>
+    <h2 style="margin-top:8px">Add-ons</h2>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      {% for key, label in addons.items() %}
+      <label class="pu-opt"><input type="checkbox" name="addons" value="{{ key }}"><span>{{ label }} <span class="muted">· ${{ '%.2f'|format(prices[key]) }}/month</span></span></label>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="panel stack-form">
+    <h2>Phone number</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <label>Country<select id="puCountry"></select></label>
+      <label>Area code<input id="puArea" inputmode="numeric" maxlength="5" placeholder="e.g. 512"></label>
+    </div>
+    <button type="button" class="dn-btn" id="puSearch">Show numbers</button>
+    <div id="puNums" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px"></div>
+    <p class="muted" id="puNumNote" style="font-size:12px"></p>
+    <input type="hidden" name="number" id="puNumber">
+    <input type="hidden" name="number_source" id="puSource" value="pool">
+
+    <h2 style="margin-top:8px">Charge</h2>
+    <div class="pu-sum" style="display:grid;grid-template-columns:1fr auto;gap:6px 12px">
+      <span>Per month</span><strong id="qMonthly">—</strong>
+      <span>Charged now</span><strong id="qToday">—</strong>
+      <span>Paid until</span><span id="qUntil">—</span>
+      <span>Available</span><span id="qAvail">{{ fmt(s.available) }}</span>
+    </div>
+    <p class="muted" id="qNote" style="font-size:12px"></p>
+    <button class="dn-btn primary" id="puSubmit" disabled>Create user</button>
+  </section>
+</form>
+<style>
+  .pu-opt{display:flex!important;flex-direction:row!important;align-items:center;gap:10px;border:1px solid var(--border);border-radius:12px;padding:10px 12px;cursor:pointer;font-weight:600}
+  .pu-opt:has(input:checked){border-color:var(--accent,#3b82f6);background:color-mix(in srgb,var(--accent,#3b82f6) 14%,transparent)}
+  .pu-num{border:1px solid var(--border);border-radius:12px;padding:10px 12px;background:transparent;color:inherit;font:600 14px ui-monospace,Menlo,monospace;cursor:pointer;text-align:left;display:flex;justify-content:space-between;gap:8px}
+  .pu-num[aria-pressed="true"]{border-color:var(--accent,#3b82f6);background:color-mix(in srgb,var(--accent,#3b82f6) 16%,transparent)}
+  .pu-num small{font:500 11px Inter,system-ui,sans-serif;color:var(--text-secondary)}
+</style>
+<script>
+(function(){
+  const form=document.getElementById('puForm');
+  const countries={us:[['US','USA']],ca:[['CA','Canada']],usca:[['US','USA'],['CA','Canada']],uk:[['GB','United Kingdom']]};
+  const sel=document.getElementById('puCountry'), area=document.getElementById('puArea'), list=document.getElementById('puNums');
+  const numIn=document.getElementById('puNumber'), srcIn=document.getElementById('puSource'), submit=document.getElementById('puSubmit');
+  const coMode=document.getElementById('puCoMode');
+  function plan(){const r=form.querySelector('input[name=plan]:checked');return r?r.value:'us';}
+  function addons(){return [...form.querySelectorAll('input[name=addons]:checked')].map(x=>x.value).join(',');}
+  function setCountries(){const cur=sel.value;sel.innerHTML='';countries[plan()].forEach(([v,l])=>sel.add(new Option(l,v)));if([...sel.options].some(o=>o.value===cur))sel.value=cur;}
+  function pick(n,src,btn){numIn.value=n;srcIn.value=src;list.querySelectorAll('.pu-num').forEach(b=>b.setAttribute('aria-pressed',b===btn));ready();}
+  function ready(){submit.disabled=!numIn.value||submit.dataset.enough==='0';}
+  async function search(){
+    list.innerHTML='<span class="muted">Searching…</span>';numIn.value='';ready();
+    try{
+      const r=await fetch('/partner/api/numbers?country='+encodeURIComponent(sel.value)+'&area='+encodeURIComponent(area.value.trim()),{cache:'no-store'});
+      const d=await r.json();list.innerHTML='';
+      const all=d.pool.map(n=>[n,'pool']).concat(d.buy.map(n=>[n,'buy']));
+      all.forEach(([n,src])=>{const b=document.createElement('button');b.type='button';b.className='pu-num';b.setAttribute('aria-pressed','false');
+        b.innerHTML='<span>'+n+'</span><small>'+(src==='pool'?'Ready':'New')+'</small>';b.addEventListener('click',()=>pick(n,src,b));list.appendChild(b);});
+      document.getElementById('puNumNote').textContent=all.length?'Included in the plan. Pick one.':(sel.value==='GB'?'No UK numbers free right now. Ask support to add more.':'No numbers for this area code. Try another or leave it empty.');
+    }catch(e){list.innerHTML='';document.getElementById('puNumNote').textContent='Could not load numbers. Try again.';}
+  }
+  async function quote(){
+    const acc=coMode.value==='existing'?document.getElementById('puAccount').value:'';
+    try{const r=await fetch('/partner/api/quote?plan='+plan()+'&addons='+addons()+'&account_id='+encodeURIComponent(acc),{cache:'no-store'});
+      const q=await r.json();document.getElementById('qMonthly').textContent=q.monthly;document.getElementById('qToday').textContent=q.today;
+      document.getElementById('qUntil').textContent=q.until;document.getElementById('qAvail').textContent=q.available;
+      submit.dataset.enough=q.enough?'1':'0';
+      document.getElementById('qNote').textContent=q.enough?(q.company_count>1?'This company will have '+q.company_count+' users on this plan.':''):'Not enough balance. Add a payment in Wallet first.';
+      ready();}catch(e){}
+  }
+  form.addEventListener('change',(e)=>{
+    if(e.target.name==='plan'){setCountries();list.innerHTML='';numIn.value='';search();}
+    if(e.target===coMode){const ex=coMode.value==='existing';document.getElementById('puCoNew').hidden=ex;document.getElementById('puCoOld').hidden=!ex;document.getElementById('puRole').hidden=!ex;}
+    if(e.target===sel){search();}
+    quote();
+  });
+  document.getElementById('puSearch').addEventListener('click',search);
+  area.addEventListener('keydown',(e)=>{if(e.key==='Enter'){e.preventDefault();search();}});
+  form.addEventListener('submit',()=>{submit.disabled=true;submit.textContent='Creating… (buying the number can take a few seconds)';});
+  setCountries();quote();search();
+})();
+</script>
+{% endblock %}

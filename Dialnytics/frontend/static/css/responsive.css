@@ -77,3 +77,9 @@ html, body { max-width: 100%; overflow-x: hidden; }
   padding: 10px 12px; min-height: 40px; border-radius: 10px; font-size: 14px; font-weight: 500;
   color: var(--text-primary); background: var(--bg-input, rgba(255, 255, 255, .05)); border: 1px solid var(--border); }
 .stack-form input[type=file] { font-size: 13px; }
+
+/* partner brand (white-label) */
+.brand .brand-text { font: 700 20px/1 "Space Grotesk", Inter, system-ui, sans-serif; letter-spacing: -.01em; color: var(--brand-accent, var(--text-primary)); white-space: nowrap; }
+.brand.partner-brand .brand-logo { max-height: 38px; object-fit: contain; }
+.brand.partner-brand .brand-icon { object-fit: contain; }
+.stack-form [hidden], .stack-form label[hidden] { display: none !important; }
