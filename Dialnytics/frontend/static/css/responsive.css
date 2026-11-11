@@ -105,3 +105,7 @@ body[class*="theme-"] :is(input,select,textarea):focus{outline-color:var(--t1)}
 body.glass-ui[class*="theme-"].light-theme :is(.btn-primary,.cm-btn,.btn-blue,.seg button.on,.chips span.on,.dn-btn.primary){background:linear-gradient(180deg,var(--t1),var(--tl)) !important}
 body.lg[class*="theme-"] .lg-btn{background:linear-gradient(180deg,var(--t1),var(--t2)) !important;border-color:var(--t1) !important}
 body.lg[class*="theme-"]:not(.theme-custom){background:linear-gradient(180deg,var(--tb1),var(--tb3)) !important}
+
+/* Bottom tab bar: one column per item, so "More" never wraps out of sight
+   (admin pages without the dialer had 4 items in a 2-column bar). */
+.mob-tabbar, .mob-tabbar.mob-tabbar-short { grid-template-columns: none !important; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
