@@ -445,6 +445,9 @@ def start(user, number, to_user=None, to_number=None):
                     raise TransferError("This call cannot be transferred. Try again in a few seconds.")
                 raise TransferError("Transfer works on incoming calls. For outgoing calls ask your admin "
                                     "to turn on Advanced calling for your account.")
+            if leg["kind"] == "out" and not user.get("adv_calling"):
+                raise TransferError("Transfer works on incoming calls. For outgoing calls ask your admin "
+                                    "to turn on Advanced calling for your account.")
             cur.execute("""SELECT 1 FROM public.call_transfers WHERE customer_leg=%s
                 AND status IN ('queued','ringing') LIMIT 1""", (leg["customer_leg"],))
             if cur.fetchone():
@@ -824,7 +827,7 @@ def on_parked_outbound(payload, find_user):
     user = find_user(uid) if uid else None
     number = e164(payload.get("to"))
     reason = ""
-    if not user or not user.get("adv_calling"):
+    if not user or not (user.get("adv_calling") or user.get("live_route")):
         reason = "Not allowed"
     elif not user.get("phone_number"):
         reason = "No caller ID"

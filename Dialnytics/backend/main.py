@@ -298,6 +298,7 @@ def _db_user(row):
         "sms_enabled": bool(row.get("sms_enabled", False)),
         "sms_credits": row.get("sms_credits"),
         "adv_calling": bool(row.get("adv_calling", False)),
+        "live_route": bool(row.get("live_route", False)),
         "conf_leave": bool(row.get("conf_leave", False)),
         "telnyx_account": tx_key(row.get("telnyx_account") or "t1"),
         "call_countries": row.get("call_countries") or "",
@@ -1836,10 +1837,11 @@ async def save_user_all(request: Request):
     zones = ",".join(z for z in CALL_ZONES if z in f.getlist("zones"))
     want_rec, want_power = bool(f.get("recording")), bool(f.get("power"))
     want_sms, want_adv = bool(f.get("sms")), bool(f.get("adv"))
+    want_live = bool(f.get("live"))
     want_leave = bool(f.get("leave"))
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT id,role,sms_enabled,adv_calling FROM public.dialnytics_users
+            cur.execute("""SELECT id,role,sms_enabled,adv_calling,live_route FROM public.dialnytics_users
                 WHERE email=%s AND is_active=TRUE FOR UPDATE""", (old_email,))
             target = cur.fetchone()
             if not target or target["role"] == "admin":
@@ -1863,6 +1865,7 @@ async def save_user_all(request: Request):
             problems.append(urllib.parse.unquote(loc.split("error=", 1)[1].split("&")[0]).replace("+", " "))
     await flip(toggle_sms, target["sms_enabled"], want_sms)
     await flip(toggle_advanced_calling, target["adv_calling"], want_adv)
+    await flip(toggle_live_listening, target["live_route"], want_live)
     if problems:
         return bounce("Saved, but: " + " | ".join(problems))
     return RedirectResponse("/users?updated=1", status_code=303)
@@ -2339,11 +2342,11 @@ def _set_user_telnyx_account(user_id, acct):
                     cur.execute("UPDATE public.dialnytics_users SET telnyx_account=%s WHERE id=%s", (acct, user_id))
                 return
             cur.execute("""UPDATE public.dialnytics_users SET telnyx_account=%s, credential_id=NULL,
-                sip_username=NULL, adv_calling=false WHERE id=%s""", (acct, user_id))
+                sip_username=NULL WHERE id=%s""", (acct, user_id))
     old_acct, old_cred = tx_key(row["telnyx_account"]), row["credential_id"]
     for u in users_db.values():
         if str(u.get("id")) == str(user_id):
-            u.update(telnyx_account=acct, credential_id="", sip_username="", adv_calling=False)
+            u.update(telnyx_account=acct, credential_id="", sip_username="")
     if old_cred:
         try:
             with tx_ctx(old_acct):
@@ -2351,14 +2354,71 @@ def _set_user_telnyx_account(user_id, acct):
         except Exception:
             log.info("Old calling login %s on %s was not deleted", old_cred, old_acct)
 
+def _wants_server(u):
+    """Outgoing calls go through the server (Advanced connection) when the user has
+    Advanced calling (transfer) or Live listening (supervisor can hear outgoing calls)."""
+    return bool(u and (u.get("adv_calling") or u.get("live_route")))
+
+def _sync_route(user_id):
+    """Put the user's calling login on the connection their switches need.
+    Returns '' when fine, otherwise a short error for the admin."""
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id,email,adv_calling,live_route,credential_id,provider,telnyx_account
+                FROM public.dialnytics_users WHERE id=%s""", (user_id,))
+            row = cur.fetchone()
+    if not row:
+        return "User not found"
+    if (row["provider"] or "telnyx") != "telnyx":
+        return ""
+    with tx_ctx(row["telnyx_account"]):
+        server = _wants_server(row)
+        if server and not ct.adv_conn():
+            return f"Add the Advanced connection id for {tx_conf()['label']} in Render first (see the update notes)."
+        want = ct.adv_conn() if server else tx_conf()["connection_id"]
+        old = row["credential_id"] or ""
+        if old:
+            try:
+                cur_conn = str(((_telnyx_request("GET", f"/v2/telephony_credentials/{old}") or {})
+                                .get("data") or {}).get("connection_id") or "")
+            except Exception:
+                cur_conn = ""
+            if cur_conn == str(want):
+                return ""
+        try:
+            created = _telnyx_request("POST", "/v2/telephony_credentials", {
+                "connection_id": want, "name": f"dialnytics-{row['email']}"[:60],
+                "tag": "dialnytics-adv" if server else "dialnytics"})
+        except HTTPException as exc:
+            log.warning("Calling login move failed for %s: %s", row["email"], exc.detail)
+            return "Telnyx did not create the calling login. Check the Advanced connection id."
+        data = created.get("data", {})
+        if not data.get("id"):
+            return "Telnyx did not create the calling login"
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE public.dialnytics_users SET credential_id=%s, sip_username=%s WHERE id=%s",
+                            (data["id"], data.get("sip_username", ""), row["id"]))
+        for u in users_db.values():
+            if str(u.get("id")) == str(row["id"]):
+                u.update(credential_id=data["id"], sip_username=data.get("sip_username", ""))
+        if old:
+            try:
+                _telnyx_request("DELETE", f"/v2/telephony_credentials/{old}")
+            except Exception:
+                log.info("Old calling login %s was not deleted", old)
+    log.info("Calling login of %s moved to the %s connection", row["email"], "Advanced" if server else "normal")
+    return ""
+
 def _ensure_credential(email: str, force: bool = False) -> str:
     user = users_db.get(email) or {}
     if not force and user.get("credential_id"):
         return user["credential_id"]
+    server = _wants_server(user) and bool(ct.adv_conn())
     created = _telnyx_request("POST", "/v2/telephony_credentials", {
-        "connection_id": tx_conf()["connection_id"],
+        "connection_id": ct.adv_conn() if server else tx_conf()["connection_id"],
         "name": f"dialnytics-{email}"[:60],
-        "tag": "dialnytics",
+        "tag": "dialnytics-adv" if server else "dialnytics",
     })
     data = created.get("data", {})
     cred_id = data.get("id")
@@ -3599,7 +3659,7 @@ def _user_by_id_fast(user_id):
     falls back to the database when the cached copy is missing or not allowed."""
     uid = str(user_id or "")
     for u in list(users_db.values()):
-        if str(u.get("id") or "") == uid and u.get("adv_calling") and u.get("is_active", True):
+        if str(u.get("id") or "") == uid and _wants_server(u) and u.get("is_active", True):
             return u
     return _db_user_by_id(user_id)
 
@@ -4474,11 +4534,8 @@ async def telnyx_sms_webhook(request: Request):
                         WHERE provider_id=%s AND direction='out'""", (status, error, error, p["id"]))
     return {"ok": True}
 
-@app.post("/users/advanced-calling")
-async def toggle_advanced_calling(request: Request, email: str = Form(...)):
-    """Advanced calling = outgoing calls go through the server (needed to
-    transfer OUTGOING calls). The user gets a new calling login on the
-    "Dialnytics Advanced" Telnyx connection; turning it off moves them back."""
+async def _toggle_switch(request, email, column, name):
+    """Admin: flip Advanced calling / Live listening and move the calling login if needed."""
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
         return RedirectResponse(url="/login", status_code=302)
@@ -4490,42 +4547,38 @@ async def toggle_advanced_calling(request: Request, email: str = Form(...)):
         return RedirectResponse(url=back + "?error=" + urllib.parse.quote(msg), status_code=302)
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT id,adv_calling,credential_id,provider,telnyx_account FROM public.dialnytics_users
-                WHERE email=%s""", (email,))
+            cur.execute(f"SELECT id,{column} AS cur,provider FROM public.dialnytics_users WHERE email=%s", (email,))
             row = cur.fetchone()
-    if row:
-        tx_use(row["telnyx_account"])        # work on the user's Telnyx account
-    if not ct.adv_conn():
-        return fail(f"Add the Advanced connection id for {tx_conf()['label']} in Render first (see the update notes).")
     if not row:
         return fail("User not found")
     if (row["provider"] or "telnyx") != "telnyx":
-        return fail("Advanced calling is only for Telnyx lines")
-    turn_on = not bool(row["adv_calling"])
-    connection = ct.adv_conn() if turn_on else tx_conf()["connection_id"]
-    try:
-        created = _telnyx_request("POST", "/v2/telephony_credentials", {
-            "connection_id": connection, "name": f"dialnytics-{email}"[:60],
-            "tag": "dialnytics-adv" if turn_on else "dialnytics"})
-    except HTTPException as exc:
-        log.warning("Advanced calling credential failed for %s: %s", email, exc.detail)
-        return fail("Telnyx did not create the calling login. Check the Advanced connection id.")
-    data = created.get("data", {})
-    if not data.get("id"):
-        return fail("Telnyx did not create the calling login")
+        return fail(f"{name} is only for Telnyx lines")
+    turn_on = not bool(row["cur"])
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""UPDATE public.dialnytics_users SET adv_calling=%s, credential_id=%s, sip_username=%s
-                WHERE id=%s""", (turn_on, data["id"], data.get("sip_username", ""), row["id"]))
+            cur.execute(f"UPDATE public.dialnytics_users SET {column}=%s WHERE id=%s", (turn_on, row["id"]))
     if email in users_db:
-        users_db[email].update(adv_calling=turn_on, credential_id=data["id"],
-                               sip_username=data.get("sip_username", ""))
-    if row["credential_id"]:
-        try:
-            _telnyx_request("DELETE", f"/v2/telephony_credentials/{row['credential_id']}")
-        except Exception:
-            log.info("Old calling login %s was not deleted", row["credential_id"])
+        users_db[email][column] = turn_on
+    problem = await run_in_threadpool(_sync_route, row["id"])
+    if problem:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE public.dialnytics_users SET {column}=%s WHERE id=%s", (not turn_on, row["id"]))
+        if email in users_db:
+            users_db[email][column] = not turn_on
+        return fail(problem)
     return RedirectResponse(url=back + "?created=1", status_code=302)
+
+@app.post("/users/advanced-calling")
+async def toggle_advanced_calling(request: Request, email: str = Form(...)):
+    """Advanced calling = outgoing calls go through the server and can be transferred."""
+    return await _toggle_switch(request, email, "adv_calling", "Advanced calling")
+
+@app.post("/users/live-listening")
+async def toggle_live_listening(request: Request, email: str = Form(...)):
+    """Live listening = outgoing calls go through the server so a supervisor can hear
+    them, without giving the agent transfer."""
+    return await _toggle_switch(request, email, "live_route", "Live listening")
 
 @app.post("/users/call-countries")
 async def set_call_countries(request: Request):
@@ -6149,5 +6202,6 @@ _pb = pb.register(app, dict(
     no_worker=os.getenv("PARTNER_WORKER", "1") == "0",
     telnyx_number_accounts=telnyx_number_accounts, tx_verified=TX_VERIFIED, telnyx_request=_telnyx_request,
     tx_ctx=tx_ctx, set_user_telnyx_account=_set_user_telnyx_account, ensure_credential=_ensure_credential,
+    sync_route=_sync_route,
     hash_password=hash_password, hold_info=_wo["hold_info"], public_url=PUBLIC_BASE_URL,
     buy_account=os.getenv("PARTNER_TELNYX_ACCOUNT", "t1")))

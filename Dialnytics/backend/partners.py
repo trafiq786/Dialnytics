@@ -615,6 +615,7 @@ def register(app, d):
     tx_ctx = d.get("tx_ctx")
     set_user_telnyx_account = d.get("set_user_telnyx_account")
     ensure_credential = d.get("ensure_credential")
+    sync_route = d.get("sync_route")
     hash_password = d.get("hash_password")
     hold_info = d.get("hold_info") or (lambda numbers: {})
     public_url = d.get("public_url") or ""
@@ -882,7 +883,12 @@ def register(app, d):
             elif number not in await run_in_threadpool(pool_numbers, country, ""):
                 return fail("That number was just taken. Pick another one.")
         except HTTPException as exc:
-            return fail(str(exc.detail))
+            # never show carrier errors (they name the provider) to a partner
+            log.warning("Partner number step failed for %s: %s", number, exc.detail)
+            detail = str(exc.detail)
+            if exc.status_code >= 500 or "telnyx" in detail.lower() or "twilio" in detail.lower():
+                detail = "We could not set up that number right now. Pick another one or try again in a minute."
+            return fail(detail)
         try:
             with db_connect() as conn:
                 with conn.cursor() as cur:
@@ -940,6 +946,15 @@ def register(app, d):
             from urllib.parse import quote
             return RedirectResponse("/partner/users?err=" + quote(str(exc.detail)), status_code=303)
         refresh_users()
+        if sync_route:
+            # 3-way / Leave call needs outgoing calls through the server: move the calling login.
+            from starlette.concurrency import run_in_threadpool
+            try:
+                problem = await run_in_threadpool(sync_route, user_id)
+                if problem:
+                    log.warning("Partner add-on: calling login not moved for %s: %s", user_id, problem)
+            except Exception:
+                log.exception("Partner add-on: calling login move failed")
         return RedirectResponse("/partner/users?msg=saved", status_code=303)
 
     @app.post("/partner/users/{user_id}/{action}")

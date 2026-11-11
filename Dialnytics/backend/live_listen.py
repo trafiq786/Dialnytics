@@ -27,6 +27,7 @@ log = logging.getLogger("dialnytics.live")
 SCHEMA_SQL = """
 ALTER TABLE public.dialnytics_accounts ADD COLUMN IF NOT EXISTS live_listen boolean NOT NULL DEFAULT false;
 ALTER TABLE public.live_legs ADD COLUMN IF NOT EXISTS conference_id text;
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS live_route boolean NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS public.live_monitors (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     listener_id uuid REFERENCES public.dialnytics_users(id) ON DELETE CASCADE,
@@ -108,8 +109,9 @@ def details(viewer, agent):
         out["reason"] = "Live listening works on Telnyx lines only"
         return out
     if not leg:
-        out["reason"] = ("This outgoing call cannot be heard. Turn on Advanced calling for this agent."
-                         if not agent.get("adv_calling") else "No live call right now")
+        out["reason"] = ("Outgoing calls of this agent cannot be heard yet. Turn on Live listening for this agent "
+                         "(Users → Edit), then the agent refreshes the dialer once."
+                         if not (agent.get("adv_calling") or agent.get("live_route")) else "No live call right now")
         return out
     out.update(number=leg["customer_number"] or "", seconds=int(leg["secs"] or 0),
                direction="outgoing" if leg["kind"] == "out" else "incoming", can_listen=True)

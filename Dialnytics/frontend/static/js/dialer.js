@@ -38,7 +38,8 @@ const input = document.getElementById('numberInput');
     let mixer = null;             // WebAudio mix used for the conference
     let xfer = null;              // transfer in progress {id, call, name, timer}
     const MAX_LINES = 4;
-    const ADV = cfg.dataset.adv === '1';
+    const ADV = cfg.dataset.adv === '1';   // outgoing calls go through the server (Advanced calling or Live listening)
+    const XFER_OUT = cfg.dataset.xfer === '1';   // Advanced calling: outgoing calls can be transferred
     const LEAVE_OK = cfg.dataset.leave === '1';     // admin allowed "Leave call" for this user
     const LEGTAG = cfg.dataset.legtag || '';
     // Countries this line may call (empty = no limit). US = +1, UK = +44.
@@ -825,7 +826,7 @@ function hangup() {
         const outgoing = activeCall && !String(activeCall.direction || '').toLowerCase().startsWith('in');
         const twilioLine = !!(activeCall && activeCall._twilio);
         if (twilioLine) pickerNote('Pick a teammate. The caller is moved to them right away and your side of the call ends. If they do not answer, the caller can leave them a voicemail.');
-        else if (outgoing && !ADV) pickerNote('Outgoing calls can be transferred after the admin turns on Advanced calling for your account. Incoming calls can be transferred now.', true);
+        else if (outgoing && !XFER_OUT) pickerNote('Outgoing calls can be transferred after the admin turns on Advanced calling for your account. Incoming calls can be transferred now.', true);
         else pickerNote('Pick a teammate. If they are on another call, the caller hears hold music and the call goes to them as soon as they are free (max 3 minutes).');
         try {
             const res = await fetch(twilioLine ? '/api/twilio/transfer/targets' : '/api/transfer/targets', { cache: 'no-store' });
