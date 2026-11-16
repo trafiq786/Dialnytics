@@ -602,7 +602,9 @@ function markEnded(reason) {
             const res = await fetch('/api/webrtc-token');
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || 'Token failed');
-            client = new Klass({ login_token: data.token });
+            // keepConnectionAliveOnSocketClose: a short drop of the signalling socket
+            // must not end the call (supported by newer SDK builds, ignored by older).
+            client = new Klass({ login_token: data.token, keepConnectionAliveOnSocketClose: true });
             client.on('telnyx.ready', () => {
                 rtcStatus.textContent = 'Ready';
                 rtcStatus.style.color = 'var(--success)';
@@ -713,6 +715,7 @@ function markEnded(reason) {
         rtpStall = 0;
         mediaGrew = 0;
         iceStall = 0;
+        netWeakShown = false;
         sawAlive = false;
         silentTicks = 0;
         heardAudio = false;
@@ -2077,6 +2080,7 @@ function hangup() {
         onHold = !onHold;
         rtpStall = 0;
         iceStall = 0;
+        netWeakShown = false;
         // During a transfer the server plays hold music, so send silence then.
         if (onHold) holdLine(activeCall, !xfer);
         else resumeLine(activeCall);
@@ -2105,6 +2109,27 @@ function hangup() {
     }
     let mediaGrew = 0;
     let iceStall = 0;
+    // Seconds of no connection / no audio before the dialer gives up on a call.
+    const NET_GIVE_UP_SEC = 25;
+    let netWeakShown = false;
+    function netGiveUp() {
+        // Hang up properly so the other person is not left in silence (and not billed on).
+        const call = activeCall;
+        try { if (call && call.hangup) call.hangup(); } catch (e) {}
+        markEnded('Call dropped (internet)');
+    }
+    function netWeak(on) {
+        if (on === netWeakShown || ended || !activeCall) { if (!on) netWeakShown = false; return; }
+        netWeakShown = on;
+        const st = document.getElementById('inCallState');
+        if (on) {
+            setStatus('Internet weak · reconnecting… (call is still on)', 'var(--warning, #f59e0b)');
+            if (st) st.textContent = 'Reconnecting…';
+        } else {
+            setStatus(talkStart ? 'Connected' : 'Calling');
+            if (st && talkStart) st.textContent = 'Active';
+        }
+    }
     function sampleLevel(call) {
         const el = document.getElementById('remoteAudio');
         const stream = (el && el.srcObject) || call.remoteStream;
@@ -2146,9 +2171,15 @@ function hangup() {
         let ice = 'no-pc';
         if (pc && pc.getStats) {
             ice = pc.iceConnectionState || pc.connectionState || 'pc';
-            if (!onHold && (['disconnected', 'failed', 'closed'].includes(pc.iceConnectionState) || ['failed', 'closed'].includes(pc.connectionState))) {
+            // Short internet drops: WebRTC usually recovers by itself within seconds.
+            // Show "Reconnecting" and keep the call; only give up after a long outage.
+            const iceBad = ['disconnected', 'failed'].includes(pc.iceConnectionState);
+            if (!onHold && (pc.iceConnectionState === 'closed' || pc.connectionState === 'closed')) {
+                if (!ended) markEnded('Call ended');
+            } else if (!onHold && iceBad) {
                 iceStall += 1;
-                if (iceStall >= 3 && !ended) markEnded('Call ended');
+                netWeak(true);
+                if (iceStall * 0.7 >= NET_GIVE_UP_SEC && !ended) netGiveUp();
             } else {
                 iceStall = 0;
             }
@@ -2162,9 +2193,11 @@ function hangup() {
                     mediaGrew += 1;
                     rtpPackets = bytes;
                     rtpStall = 0;
+                    if (iceStall === 0) netWeak(false);
                 } else if (!onHold && mediaGrew >= 2 && bytes > 0 && bytes === rtpPackets) {
                     rtpStall += 1;
-                    if (rtpStall >= 3 && !ended) markEnded('Call ended');
+                    if (rtpStall >= 3) netWeak(true);      // ~2 s without audio packets
+                    if (rtpStall * 0.7 >= NET_GIVE_UP_SEC && !ended) netGiveUp();
                 }
             } catch (err) {}
         }
