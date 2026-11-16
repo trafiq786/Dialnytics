@@ -459,11 +459,17 @@ class ConnectionPool:
     pool instead of closing it. Stale or broken connections are replaced.
     """
 
-    def __init__(self, factory, max_idle=8, max_idle_age=240.0, ping_after=20.0):
+    def __init__(self, factory, max_idle=8, max_idle_age=240.0, ping_after=20.0,
+                 max_open=0, wait_seconds=20.0):
         import threading
         self._factory = factory
         self._idle = []            # list of (connection, last_used)
         self._lock = threading.Lock()
+        # Cap on connections in use at the same time (0 = no cap). Supabase's pooler
+        # refuses new clients past its limit and the app would fail to start.
+        self._slots = threading.BoundedSemaphore(max_open) if max_open > 0 else None
+        self._held = threading.local()   # nested use in one thread does not take a 2nd slot
+        self.wait_seconds = wait_seconds
         self.max_idle = max_idle
         self.max_idle_age = max_idle_age
         self.ping_after = ping_after
@@ -526,20 +532,42 @@ class _PoolLease:
         self.conn = None
 
     def __enter__(self):
-        self.conn = self.pool._acquire()
+        pool = self.pool
+        self.slot = False
+        depth = getattr(pool._held, "depth", 0)
+        if pool._slots is not None and depth == 0:
+            if not pool._slots.acquire(timeout=pool.wait_seconds):
+                raise RuntimeError("Database busy: no free connection after %ss" % pool.wait_seconds)
+            self.slot = True
+        pool._held.depth = depth + 1
+        try:
+            self.conn = pool._acquire()
+        except BaseException:
+            self._free_slot()
+            raise
         return self.conn
+
+    def _free_slot(self):
+        pool = self.pool
+        pool._held.depth = max(0, getattr(pool._held, "depth", 1) - 1)
+        if self.slot:
+            self.slot = False
+            pool._slots.release()
 
     def __exit__(self, exc_type, exc, tb):
         conn, self.conn = self.conn, None
         try:
-            if exc_type is None:
-                conn.commit()
-            else:
-                conn.rollback()
-        except Exception:
-            self.pool._close(conn)
-            if exc_type is None:
-                raise
+            try:
+                if exc_type is None:
+                    conn.commit()
+                else:
+                    conn.rollback()
+            except Exception:
+                self.pool._close(conn)
+                if exc_type is None:
+                    raise
+                return False
+            self.pool._release(conn)
             return False
-        self.pool._release(conn)
-        return False
+        finally:
+            self._free_slot()

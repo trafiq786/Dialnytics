@@ -246,8 +246,13 @@ def _new_db_connection():
 
 # Opening a new TLS connection to Supabase costs ~300-500 ms, and one page used
 # up to 8 of them. Connections are now kept open and re-used.
+# DB_MAX_CONNECTIONS caps connections open at the same time. Requests run in
+# worker threads, so without a cap a busy moment opens dozens and Supabase's
+# session pooler (limit 15) refuses them. Keep it below the pooler limit.
+_DB_MAX = int(os.getenv("DB_MAX_CONNECTIONS", "10"))
 _db_pool = vh.ConnectionPool(_new_db_connection,
-                             max_idle=int(os.getenv("DB_POOL_SIZE", "20")))
+                             max_idle=min(int(os.getenv("DB_POOL_SIZE", "20")), _DB_MAX or 20),
+                             max_open=_DB_MAX)
 
 def db_connect():
     return _db_pool.connection()
