@@ -823,6 +823,7 @@ def on_parked_outbound(payload, find_user):
         return False
     if str(payload.get("connection_id") or "") != adv_conn():
         return False
+    t0 = time.monotonic()
     uid = _uid_from_tag(_header(payload, "X-DN-Leg"))
     user = find_user(uid) if uid else None
     number = e164(payload.get("to"))
@@ -853,6 +854,8 @@ def on_parked_outbound(payload, find_user):
             "link_to": agent_leg, "bridge_intent": True, "timeout_secs": OUTBOUND_RING_SECONDS,
             "command_id": "cc-" + cid, "client_state": D["cs_encode"]("cc:" + cid)})
         customer = ((resp or {}).get("data") or {}).get("call_control_id") or ""
+        log.info("Advanced outbound %s: customer dialled %d ms after the webhook arrived",
+                 cid, int((time.monotonic() - t0) * 1000))
     except Exception as exc:
         log.warning("Advanced outbound dial failed for %s: %s", cid, getattr(exc, "detail", exc))
         customer = ""

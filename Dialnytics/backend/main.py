@@ -324,15 +324,18 @@ def refresh_users():
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM public.dialnytics_users WHERE is_active = TRUE")
             data = {row["email"]: _db_user(row) for row in cur.fetchall()}
-    users_db.clear()
+    # Swap in place without a moment where users_db is empty: requests now run in
+    # worker threads and may read it at the same time.
     users_db.update(data)
+    for email in [e for e in list(users_db) if e not in data]:
+        users_db.pop(email, None)
 
 def save_users():
     # All existing routes that modify user data call this function.
     # Use upserts in a transaction; do not delete users absent from memory.
     with db_connect() as conn:
         with conn.cursor() as cur:
-            for email, u in users_db.items():
+            for email, u in list(users_db.items()):
                 cur.execute("""INSERT INTO public.dialnytics_users
                     (name,email,password_hash,role,phone_number,credential_id,sip_username,
                      plan_name,plan_start,plan_renewal,last_paid_amount,recording_premium,dnd_enabled,is_demo)
@@ -835,7 +838,7 @@ def get_current_user(request: Request):
 # Session heartbeat for browser-side immediate logout and WebRTC teardown.
 # Database remains authoritative across workers and devices.
 @app.get("/api/session/status")
-async def session_status(request: Request):
+def session_status(request: Request):
     user = get_current_user(request)
     if not user:
         return JSONResponse({"active": False}, status_code=401,
@@ -846,18 +849,18 @@ async def session_status(request: Request):
 # ==================== ROUTES ====================
 
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
+def home(request: Request):
     user = get_current_user(request)
     if user:
         return RedirectResponse(url="/dashboard", status_code=302)
     return templates.TemplateResponse(request=request, name="login.html")
 
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
+def login_page(request: Request):
     return templates.TemplateResponse(request=request, name="login.html")
 
 @app.post("/login")
-async def login(request: Request, email: str = Form(...), password: str = Form(...)):
+def login(request: Request, email: str = Form(...), password: str = Form(...)):
     refresh_users()
     user = users_db.get(email.strip().lower())
     if not user or not verify_password(password, user["password"]):
@@ -879,7 +882,7 @@ async def login(request: Request, email: str = Form(...), password: str = Form(.
 
 @app.get("/signup")
 @app.post("/signup")
-async def signup_disabled():
+def signup_disabled():
     return RedirectResponse(url="/login", status_code=302)
 
 _tx_numbers_cache = {"at": 0, "map": {}}
@@ -1139,7 +1142,7 @@ def number_assignments(number):
 
 
 @app.get("/api/admin/caller-ids")
-async def admin_caller_ids(request: Request):
+def admin_caller_ids(request: Request):
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
@@ -1180,7 +1183,7 @@ async def admin_caller_ids(request: Request):
 
 
 @app.get("/api/admin/lines")
-async def admin_lines(request: Request):
+def admin_lines(request: Request):
     """Every calling account (Telnyx 1/2, Twilio 1/2) and whether it is connected.
     Keys are never returned, only yes/no and the number count."""
     admin = get_current_user(request)
@@ -1249,7 +1252,7 @@ def _customer_data(email):
 
 
 @app.get('/customers', response_class=HTMLResponse)
-async def customers_page(request: Request):
+def customers_page(request: Request):
     admin=require_admin(request)
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -1266,7 +1269,7 @@ async def customers_page(request: Request):
 
 
 @app.get('/customers/{email}', response_class=HTMLResponse)
-async def customer_detail(request:Request,email:str):
+def customer_detail(request:Request,email:str):
     admin=require_admin(request)
     c=_customer_data(email)
     with db_connect() as conn:
@@ -1286,7 +1289,7 @@ async def customer_detail(request:Request,email:str):
 
 
 @app.post('/customers/{email}/update')
-async def customer_update(request:Request,email:str,name:str=Form(...),plan_name:str=Form(''),
+def customer_update(request:Request,email:str,name:str=Form(...),plan_name:str=Form(''),
     plan_renewal:str=Form(''),contact_name:str=Form(''),contact_phone:str=Form(''),
     contact_address:str=Form(''),customer_notes:str=Form(''),is_active:str=Form('true'),
     new_password:str=Form(''),monthly_amount:int=Form(0)):
@@ -1318,7 +1321,7 @@ async def customer_update(request:Request,email:str,name:str=Form(...),plan_name
 
 
 @app.post('/customers/{email}/change-number')
-async def customer_change_number(request: Request, email: str, phone_number: str = Form(...),
+def customer_change_number(request: Request, email: str, phone_number: str = Form(...),
                                  provider: str = Form("telnyx")):
     require_admin(request)
     from urllib.parse import quote
@@ -1363,7 +1366,7 @@ async def customer_change_number(request: Request, email: str, phone_number: str
 
 
 @app.post('/customers/{email}/payment')
-async def customer_payment(request:Request,email:str,amount:int=Form(0),amount_usd:float=Form(0),method:str=Form('Manual'),reference:str=Form('')):
+def customer_payment(request:Request,email:str,amount:int=Form(0),amount_usd:float=Form(0),method:str=Form('Manual'),reference:str=Form('')):
     require_admin(request)
     if amount<0 or amount_usd<0 or (amount<=0 and amount_usd<=0): raise HTTPException(422,'Enter an amount in PKR or USD')
     c=_customer_data(email)
@@ -1385,7 +1388,7 @@ def _sync_last_paid(cur,user_id):
     if r: cur.execute('UPDATE public.dialnytics_users SET last_paid_amount=%s WHERE id=%s',(r['a'],user_id))
 
 @app.post('/customers/{email}/payment/edit')
-async def customer_payment_edit(request:Request,email:str,pid:str=Form(...),old_pkr:float=Form(0),
+def customer_payment_edit(request:Request,email:str,pid:str=Form(...),old_pkr:float=Form(0),
     amount:int=Form(0),amount_usd:float=Form(0),method:str=Form(''),reference:str=Form('')):
     require_admin(request)
     if amount<0 or amount_usd<0 or (amount<=0 and amount_usd<=0):
@@ -1403,7 +1406,7 @@ async def customer_payment_edit(request:Request,email:str,pid:str=Form(...),old_
     return RedirectResponse('/customers/'+email+'?saved=1',status_code=303)
 
 @app.post('/customers/{email}/payment/delete')
-async def customer_payment_delete(request:Request,email:str,pid:str=Form(...),old_pkr:float=Form(0)):
+def customer_payment_delete(request:Request,email:str,pid:str=Form(...),old_pkr:float=Form(0)):
     require_admin(request)
     if not re.fullmatch(r'\(\d+,\d+\)',pid): raise HTTPException(422,'Invalid payment')
     c=_customer_data(email)
@@ -1428,7 +1431,7 @@ def _invoice_row(invoice_id):
 
 
 @app.get('/invoices',response_class=HTMLResponse)
-async def invoices_page(request:Request):
+def invoices_page(request:Request):
     admin=require_admin(request)
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -1438,14 +1441,14 @@ async def invoices_page(request:Request):
 
 
 @app.get('/invoices/new',response_class=HTMLResponse)
-async def invoice_new(request:Request,customer:str=''):
+def invoice_new(request:Request,customer:str=''):
     admin=require_admin(request)
     c=_customer_data(customer) if customer else None
     return templates.TemplateResponse(request=request,name='invoice_form.html',context={'user':admin,'customer':c,'invoice':None,'items':[]})
 
 
 @app.post('/invoices/new')
-async def invoice_create(request:Request,customer_email:str=Form(...),issue_date:str=Form(...),due_date:str=Form(...),
+def invoice_create(request:Request,customer_email:str=Form(...),issue_date:str=Form(...),due_date:str=Form(...),
     description:List[str]=Form(...),qty:List[int]=Form(...),unit_price:List[int]=Form(...),
     discount:int=Form(0),tax_percent:int=Form(0),notes:str=Form(''),terms:str=Form('Payment is due by the due date shown.'),
     action:str=Form('save'),payment_method:str=Form('bank'),card_name:str=Form(''),renewal_date:str=Form(''),paid_pkr:int=Form(0)):
@@ -1486,7 +1489,7 @@ async def invoice_create(request:Request,customer_email:str=Form(...),issue_date
 
 
 @app.get('/invoices/{invoice_id}',response_class=HTMLResponse)
-async def invoice_detail(request:Request,invoice_id:uuid.UUID):
+def invoice_detail(request:Request,invoice_id:uuid.UUID):
     admin=require_admin(request)
     invoice,items=_invoice_row(invoice_id)
     import invoice_pdf as ipdf
@@ -1494,7 +1497,7 @@ async def invoice_detail(request:Request,invoice_id:uuid.UUID):
 
 
 @app.post('/invoices/{invoice_id}/status')
-async def invoice_status(request:Request,invoice_id:uuid.UUID,status:str=Form(...)):
+def invoice_status(request:Request,invoice_id:uuid.UUID,status:str=Form(...)):
     require_admin(request)
     if status not in ('draft','sent','paid','void'): raise HTTPException(422,'Invalid invoice status')
     with db_connect() as conn:
@@ -1506,7 +1509,7 @@ async def invoice_status(request:Request,invoice_id:uuid.UUID,status:str=Form(..
 
 
 @app.post('/invoices/{invoice_id}/method')
-async def invoice_method(request:Request,invoice_id:uuid.UUID,payment_method:str=Form('bank'),card_name:str=Form(''),renewal_date:str=Form(''),paid_pkr:int=Form(0)):
+def invoice_method(request:Request,invoice_id:uuid.UUID,payment_method:str=Form('bank'),card_name:str=Form(''),renewal_date:str=Form(''),paid_pkr:int=Form(0)):
     require_admin(request)
     if payment_method not in ('bank','card','usdt','other'): raise HTTPException(422,'Invalid payment method')
     try: renewal=date.fromisoformat(renewal_date) if renewal_date else None
@@ -1520,7 +1523,7 @@ async def invoice_method(request:Request,invoice_id:uuid.UUID,payment_method:str
 
 
 @app.post('/invoices/{invoice_id}/delete')
-async def invoice_delete(request:Request,invoice_id:uuid.UUID):
+def invoice_delete(request:Request,invoice_id:uuid.UUID):
     require_admin(request)
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -1533,7 +1536,7 @@ async def invoice_delete(request:Request,invoice_id:uuid.UUID):
 
 
 @app.post('/invoices/{invoice_id}/duplicate')
-async def invoice_duplicate(request:Request,invoice_id:uuid.UUID):
+def invoice_duplicate(request:Request,invoice_id:uuid.UUID):
     require_admin(request)
     inv,items=_invoice_row(invoice_id)
     with db_connect() as conn:
@@ -1555,7 +1558,7 @@ async def invoice_duplicate(request:Request,invoice_id:uuid.UUID):
 
 
 @app.get('/invoices/{invoice_id}/pdf')
-async def invoice_pdf(request:Request,invoice_id:uuid.UUID):
+def invoice_pdf(request:Request,invoice_id:uuid.UUID):
     require_admin(request)
     inv,items=_invoice_row(invoice_id)
     import invoice_pdf as ipdf
@@ -1587,12 +1590,12 @@ def _users_page(request, mode):
     })
 
 @app.get("/users", response_class=HTMLResponse)
-async def users_page(request: Request):
+def users_page(request: Request):
     """User Accounts: the list of every login."""
     return _users_page(request, "list")
 
 @app.get("/users/new", response_class=HTMLResponse)
-async def users_new_page(request: Request):
+def users_new_page(request: Request):
     """Create User: the form only."""
     return _users_page(request, "create")
 
@@ -1779,7 +1782,7 @@ async def create_user(
 
 
 @app.post("/users/edit")
-async def edit_user_details(request: Request, email: str = Form(...), name: str = Form(...), new_email: str = Form(...), plan_name: str = Form(...), plan_renewal: str = Form(...), account_active: str = Form("no")):
+def edit_user_details(request: Request, email: str = Form(...), name: str = Form(...), new_email: str = Form(...), plan_name: str = Form(...), plan_renewal: str = Form(...), account_active: str = Form("no")):
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
@@ -1871,7 +1874,7 @@ async def save_user_all(request: Request):
     return RedirectResponse("/users?updated=1", status_code=303)
 
 @app.post("/users/delete")
-async def delete_user(request: Request, email: str = Form(...)):
+def delete_user(request: Request, email: str = Form(...)):
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
@@ -1896,7 +1899,7 @@ async def delete_user(request: Request, email: str = Form(...)):
     return RedirectResponse(url="/users?deleted=1", status_code=303)
 
 @app.post("/users/repayment")
-async def record_repayment(request: Request, email: str = Form(...), amount: int = Form(0), amount_usd: float = Form(0), renewal_date: str = Form("")):
+def record_repayment(request: Request, email: str = Form(...), amount: int = Form(0), amount_usd: float = Form(0), renewal_date: str = Form("")):
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
@@ -1923,7 +1926,7 @@ async def record_repayment(request: Request, email: str = Form(...), amount: int
     return RedirectResponse(url="/dashboard?period=month", status_code=303)
 
 @app.post("/users/plan")
-async def update_user_plan(
+def update_user_plan(
     request: Request,
     email: str = Form(...),
     plan_name: str = Form(...),
@@ -1943,7 +1946,7 @@ async def update_user_plan(
     return RedirectResponse(url="/users?created=1", status_code=302)
 
 @app.post("/users/extend")
-async def extend_user_plan(request: Request, email: str = Form(...), days: int = Form(30)):
+def extend_user_plan(request: Request, email: str = Form(...), days: int = Form(30)):
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
         return RedirectResponse(url="/login", status_code=302)
@@ -1966,7 +1969,7 @@ async def extend_user_plan(request: Request, email: str = Form(...), days: int =
     return RedirectResponse(url="/users?created=1", status_code=302)
 
 @app.post("/users/recording")
-async def toggle_recording(request: Request, email: str = Form(...)):
+def toggle_recording(request: Request, email: str = Form(...)):
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
         return RedirectResponse(url="/login", status_code=302)
@@ -2119,7 +2122,7 @@ templates.env.globals["has_sms"] = has_sms
 templates.env.globals["plan_status"] = plan_status
 
 @app.get("/logout")
-async def logout(request: Request):
+def logout(request: Request):
     token = request.cookies.get("session_token")
     revoke_session(token)
     response = RedirectResponse(url="/login", status_code=302)
@@ -2245,7 +2248,7 @@ async def dashboard_stats_api(request: Request):
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 @app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request):
+def dashboard(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -2261,7 +2264,7 @@ async def dashboard(request: Request):
     renewals = []
     refresh_users()
     if user.get("role") == "admin":
-        for account in users_db.values():
+        for account in list(users_db.values()):
             if account.get("role") == "admin": continue
             try:
                 remaining = (date.fromisoformat(account.get("plan_renewal", "")) - today).days
@@ -2292,7 +2295,7 @@ async def dashboard(request: Request):
     })
 
 @app.get("/dialer", response_class=HTMLResponse)
-async def dialer_page(request: Request):
+def dialer_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -2344,7 +2347,7 @@ def _set_user_telnyx_account(user_id, acct):
             cur.execute("""UPDATE public.dialnytics_users SET telnyx_account=%s, credential_id=NULL,
                 sip_username=NULL WHERE id=%s""", (acct, user_id))
     old_acct, old_cred = tx_key(row["telnyx_account"]), row["credential_id"]
-    for u in users_db.values():
+    for u in list(users_db.values()):
         if str(u.get("id")) == str(user_id):
             u.update(telnyx_account=acct, credential_id="", sip_username="")
     if old_cred:
@@ -2399,7 +2402,7 @@ def _sync_route(user_id):
             with conn.cursor() as cur:
                 cur.execute("UPDATE public.dialnytics_users SET credential_id=%s, sip_username=%s WHERE id=%s",
                             (data["id"], data.get("sip_username", ""), row["id"]))
-        for u in users_db.values():
+        for u in list(users_db.values()):
             if str(u.get("id")) == str(row["id"]):
                 u.update(credential_id=data["id"], sip_username=data.get("sip_username", ""))
         if old:
@@ -2492,7 +2495,7 @@ async def webrtc_token(request: Request):
     })
 
 @app.get("/api/call-state")
-async def call_state(request: Request, id: str = ""):
+def call_state(request: Request, id: str = ""):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -2563,7 +2566,7 @@ async def update_call_log(call_id: str, request: Request):
     return JSONResponse({"success":True})
 
 @app.delete("/api/call-log/{call_id}")
-async def delete_call_log(call_id: uuid.UUID, request: Request):
+def delete_call_log(call_id: uuid.UUID, request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -2616,7 +2619,7 @@ def _like(q):
     return "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 @app.get("/api/search")
-async def global_search(request: Request, q: str = "", scope: str = ""):
+def global_search(request: Request, q: str = "", scope: str = ""):
     """Header search. Admin: users/customers (name, email, phone, plan, assigned numbers), contacts of all users
     and call logs of all users. Normal users: only their own contacts and call logs.
     scope=customers returns just the matching customer emails (used to filter the Users / Customers tables)."""
@@ -2696,7 +2699,7 @@ async def global_search(request: Request, q: str = "", scope: str = ""):
 
 
 @app.get("/call-logs", response_class=HTMLResponse)
-async def call_logs_page(request: Request):
+def call_logs_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -2756,7 +2759,7 @@ async def call_logs_page(request: Request):
 
 # ==================== CONTACTS ====================
 @app.get("/contacts", response_class=HTMLResponse)
-async def contacts_page(request: Request):
+def contacts_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -2797,7 +2800,7 @@ async def add_contact(request: Request):
     return JSONResponse({"success":True,"contact":contact,"updated":bool(existing)})
 
 @app.delete("/api/contacts/{contact_id}")
-async def delete_contact(contact_id: uuid.UUID, request: Request):
+def delete_contact(contact_id: uuid.UUID, request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -2871,7 +2874,7 @@ def _recording_rows(user_id, kind):
     return items
 
 @app.get("/recordings", response_class=HTMLResponse)
-async def recordings_page(request: Request):
+def recordings_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -2945,7 +2948,7 @@ def _range_response(data, content_type, range_header, extra_headers):
     return Response(data, media_type=content_type, headers=headers)
 
 @app.get("/recordings/{rec_id}/audio")
-async def recording_audio(rec_id: uuid.UUID, request: Request):
+def recording_audio(rec_id: uuid.UUID, request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Login required")
@@ -3059,7 +3062,7 @@ async def save_monitor_recording(request: Request, file: UploadFile = File(...),
     return {"ok": True}
 
 @app.get("/customers/{email}/recordings", response_class=HTMLResponse)
-async def customer_monitor_recordings(request: Request, email: str):
+def customer_monitor_recordings(request: Request, email: str):
     admin = require_admin(request)
     _purge_monitor_recordings()
     q = request.query_params
@@ -3103,7 +3106,7 @@ async def customer_monitor_recordings(request: Request, email: str):
         "f_direction": direction, "f_number": q.get("number", ""), "f_date": day})
 
 @app.get("/admin/monitor-recordings/{rec_id}/audio")
-async def monitor_recording_audio(rec_id: uuid.UUID, request: Request):
+def monitor_recording_audio(rec_id: uuid.UUID, request: Request):
     require_admin(request)
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -3127,7 +3130,7 @@ async def monitor_recording_audio(rec_id: uuid.UUID, request: Request):
     return _range_response(data, row["content_type"], request.headers.get("range"), headers)
 
 @app.delete("/api/recordings/{rec_id}")
-async def delete_recording(rec_id: uuid.UUID, request: Request):
+def delete_recording(rec_id: uuid.UUID, request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -3146,7 +3149,7 @@ async def delete_recording(rec_id: uuid.UUID, request: Request):
     return {"deleted": True}
 
 @app.get("/voicemails", response_class=HTMLResponse)
-async def voicemails_page(request: Request):
+def voicemails_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -3436,6 +3439,13 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks):
     payload = data.get("payload") or {}
     event = data.get("event_type") or ""
     client_state = _cs_decode(payload.get("client_state"))
+    # The handling below talks to the database and the Telnyx API (blocking calls).
+    # Run it in a worker thread so one slow webhook never holds up the whole app,
+    # e.g. an Advanced outgoing call waiting behind dashboards and other webhooks.
+    return await run_in_threadpool(_telnyx_event, event, payload, client_state, background)
+
+
+def _telnyx_event(event, payload, client_state, background):
     try:
         if ct.handle_webhook(event, payload, client_state, _user_by_id_fast):
             return JSONResponse({"ok": True})
@@ -3999,7 +4009,7 @@ def _twilio_targets(user):
     return out
 
 @app.get("/api/twilio/transfer/targets")
-async def twilio_transfer_targets(request: Request):
+def twilio_transfer_targets(request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -4076,7 +4086,7 @@ async def twilio_transfer(request: Request):
 
 
 @app.get("/campaigns", response_class=HTMLResponse)
-async def campaigns_page(request: Request):
+def campaigns_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -4145,7 +4155,7 @@ def _save_scripts(data):
                         uuid.UUID(item["id"]),uid,item["title"],item["category"],item["content"],bool(item.get("default"))))
 
 @app.get("/scripts", response_class=HTMLResponse)
-async def scripts_page(request: Request, edit: str = ""):
+def scripts_page(request: Request, edit: str = ""):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -4154,7 +4164,7 @@ async def scripts_page(request: Request, edit: str = ""):
     return templates.TemplateResponse(request=request, name="scripts.html", context={"user": user, "saved_scripts": all_scripts, "current_script": current})
 
 @app.post("/scripts/save")
-async def save_script(request: Request, title: str = Form(...), category: str = Form(""), content: str = Form(""), script_id: str = Form(""), is_default: Optional[str] = Form(None)):
+def save_script(request: Request, title: str = Form(...), category: str = Form(""), content: str = Form(""), script_id: str = Form(""), is_default: Optional[str] = Form(None)):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Login required")
@@ -4177,7 +4187,7 @@ async def save_script(request: Request, title: str = Form(...), category: str = 
     return RedirectResponse(url="/scripts?edit=" + script_id, status_code=303)
 
 @app.post("/scripts/delete")
-async def delete_script(request: Request, script_id: str = Form(...)):
+def delete_script(request: Request, script_id: str = Form(...)):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Login required")
@@ -4275,7 +4285,7 @@ def _link_number_to_sms_profile(number):
     return ""
 
 @app.get("/messages", response_class=HTMLResponse)
-async def messages_page(request: Request):
+def messages_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -4311,7 +4321,7 @@ def _sms_scope(user):
     return "user_id=%s", [str(user["id"])]
 
 @app.get("/api/sms/unread")
-async def sms_unread(request: Request):
+def sms_unread(request: Request):
     user = get_current_user(request)
     if not user or not has_sms(user):
         return {"unread": 0}
@@ -4323,7 +4333,7 @@ async def sms_unread(request: Request):
             return {"unread": int(cur.fetchone()["n"])}
 
 @app.get("/api/sms/threads")
-async def sms_threads(request: Request):
+def sms_threads(request: Request):
     user = _sms_require(request)
     scope, sp = _sms_scope(user)
     with db_connect() as conn:
@@ -4349,7 +4359,7 @@ async def sms_threads(request: Request):
     return {"threads": out, "from": user.get("phone_number", "")}
 
 @app.get("/api/sms/thread")
-async def sms_thread(request: Request, number: str = ""):
+def sms_thread(request: Request, number: str = ""):
     user = _sms_require(request)
     contact = _sms_number(number)
     if not contact:
@@ -4432,7 +4442,7 @@ async def sms_send(request: Request):
     return {"ok": True, "message": _sms_row(row), "segments": _sms_segments(text)}
 
 @app.delete("/api/sms/thread")
-async def sms_delete_thread(request: Request, number: str = ""):
+def sms_delete_thread(request: Request, number: str = ""):
     user = _sms_require(request)
     contact = _sms_number(number)
     if not contact:
@@ -4604,7 +4614,7 @@ async def set_call_countries(request: Request):
     return RedirectResponse(url=back + "?created=1", status_code=302)
 
 @app.post("/users/sms")
-async def toggle_sms(request: Request, email: str = Form(...)):
+def toggle_sms(request: Request, email: str = Form(...)):
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
         return RedirectResponse(url="/login", status_code=302)
@@ -4636,7 +4646,7 @@ async def toggle_sms(request: Request, email: str = Form(...)):
     return RedirectResponse(url=back + sep + "created=1", status_code=302)
 
 @app.post("/users/sms-credits")
-async def set_sms_credits(request: Request, email: str = Form(...), credits: str = Form("")):
+def set_sms_credits(request: Request, email: str = Form(...), credits: str = Form("")):
     """Admin: SMS allowance in multiples of 100 (100, 200, 300 ...). Blank = unlimited."""
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
@@ -4660,7 +4670,7 @@ async def set_sms_credits(request: Request, email: str = Form(...), credits: str
     return RedirectResponse(url=back + "?created=1", status_code=303)
 
 @app.post("/users/enable")
-async def enable_user(request: Request, email: str = Form(...)):
+def enable_user(request: Request, email: str = Form(...)):
     """Admin: switch a disabled user back on (keeps their data)."""
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
@@ -4700,7 +4710,7 @@ def _purge_user_rows(cur, uid):
 
 
 @app.post("/users/delete-permanent")
-async def delete_user_permanently(request: Request, email: str = Form(...), confirm: str = Form("")):
+def delete_user_permanently(request: Request, email: str = Form(...), confirm: str = Form("")):
     """Admin: erase a user and ALL their data from the database. Cannot be undone."""
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
@@ -4734,7 +4744,7 @@ async def delete_user_permanently(request: Request, email: str = Form(...), conf
     return RedirectResponse(url="/users?purged=1", status_code=303)
 
 @app.post("/users/power")
-async def toggle_power(request: Request, email: str = Form(...)):
+def toggle_power(request: Request, email: str = Form(...)):
     """Admin: switch Power Dialer, Campaigns, CRM and Follow-ups on/off for one user."""
     admin = get_current_user(request)
     if not admin or admin.get("role") != "admin":
@@ -4801,7 +4811,7 @@ def _crm_row(row):
             for k, v in dict(row).items()}
 
 @app.get("/crm", response_class=HTMLResponse)
-async def crm_page(request: Request):
+def crm_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -4870,7 +4880,7 @@ def _delete_leads(user_id, ids):
             return len(own)
 
 @app.delete("/api/crm/leads/{lead_id}")
-async def crm_delete_lead(lead_id: uuid.UUID, request: Request):
+def crm_delete_lead(lead_id: uuid.UUID, request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Login required")
@@ -5032,7 +5042,7 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
     return {"added": added, "skipped": skipped}
 
 @app.get("/power-dialer", response_class=HTMLResponse)
-async def power_dialer_page(request: Request):
+def power_dialer_page(request: Request):
     user=get_current_user(request)
     if not user: return RedirectResponse(url="/login",status_code=302)
     if not has_power(user): return locked_page(request, user, "Power Dialer")
@@ -5079,7 +5089,7 @@ async def power_queue_create(request: Request):
     return {"queue_id":str(qid),"count":len(ids)}
 
 @app.get("/api/power/queue/{queue_id}")
-async def power_queue_get(queue_id: uuid.UUID,request: Request):
+def power_queue_get(queue_id: uuid.UUID,request: Request):
     user=get_current_user(request)
     if not user: raise HTTPException(status_code=401,detail="Login required")
     with db_connect() as conn:
@@ -5198,7 +5208,7 @@ async def power_queue_result(queue_id: uuid.UUID,request: Request):
 
 
 @app.get("/follow-ups", response_class=HTMLResponse)
-async def followups_page(request: Request):
+def followups_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -5207,7 +5217,7 @@ async def followups_page(request: Request):
     return templates.TemplateResponse(request=request, name="followups.html", context={"user": user, "items": []})
 
 @app.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request):
+def settings_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -5229,7 +5239,7 @@ def _settings_back(msg="", error=""):
     return RedirectResponse(url="/settings?" + query + "#profile", status_code=303)
 
 @app.post("/settings/profile")
-async def settings_profile(request: Request, name: str = Form(...)):
+def settings_profile(request: Request, name: str = Form(...)):
     """The user changes their own display name."""
     user = get_current_user(request)
     if not user:
@@ -5245,7 +5255,7 @@ async def settings_profile(request: Request, name: str = Form(...)):
     return _settings_back(msg="Name updated")
 
 @app.post("/settings/password")
-async def settings_password(request: Request, current_password: str = Form(...),
+def settings_password(request: Request, current_password: str = Form(...),
                             new_password: str = Form(...), confirm_password: str = Form(...)):
     """The user changes their own password (current password required)."""
     user = get_current_user(request)
@@ -5444,17 +5454,21 @@ async def presence_update(request: Request):
             started = datetime.fromtimestamp(min(ms / 1000, time.time()), tz=timezone.utc)
     except (TypeError, ValueError, OverflowError):
         started = None
+    await run_in_threadpool(_save_presence, user["id"], status, number, direction, started)
+    return {"ok": True}
+
+def _save_presence(user_id, status, number, direction, started):
+    # Runs in a worker thread: every open dialer sends this, it must not block calls.
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO public.user_presence(user_id,status,call_number,call_direction,call_started_at,updated_at)
                 VALUES (%s,%s,%s,%s,%s,now())
                 ON CONFLICT (user_id) DO UPDATE SET status=EXCLUDED.status, call_number=EXCLUDED.call_number,
                     call_direction=EXCLUDED.call_direction, call_started_at=EXCLUDED.call_started_at, updated_at=now()""",
-                (user["id"], status, number, direction, started))
-    return {"ok": True}
+                (user_id, status, number, direction, started))
 
 @app.get("/team", response_class=HTMLResponse)
-async def team_page(request: Request):
+def team_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -5474,7 +5488,7 @@ async def team_page(request: Request):
     })
 
 @app.get("/api/team")
-async def team_api(request: Request):
+def team_api(request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -5499,7 +5513,7 @@ def _live_call(fn, *args):
         raise HTTPException(status_code=exc.status, detail=str(exc))
 
 @app.get("/api/live/{agent_id}")
-async def live_details(agent_id: uuid.UUID, request: Request):
+def live_details(agent_id: uuid.UUID, request: Request):
     viewer, agent = _live_viewer_agent(request, agent_id)
     tx_use(agent.get("telnyx_account"))
     return JSONResponse(_live_call(ll.details, viewer, agent), headers={"Cache-Control": "no-store"})
@@ -5519,7 +5533,7 @@ async def live_listen_start(agent_id: uuid.UUID, request: Request):
     return await run_in_threadpool(run)
 
 @app.get("/api/live/monitor/{mid}")
-async def live_monitor_status(mid: uuid.UUID, request: Request):
+def live_monitor_status(mid: uuid.UUID, request: Request):
     viewer = get_current_user(request)
     if not viewer:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -5537,7 +5551,7 @@ async def live_monitor_mode(mid: uuid.UUID, request: Request):
     return _live_call(ll.set_mode, viewer, str(mid), str(data.get("mode") or ""))
 
 @app.post("/api/live/monitor/{mid}/stop")
-async def live_monitor_stop(mid: uuid.UUID, request: Request):
+def live_monitor_stop(mid: uuid.UUID, request: Request):
     viewer = get_current_user(request)
     if not viewer:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -5557,7 +5571,7 @@ async def company_live_listen(account_id: uuid.UUID, request: Request):
     return RedirectResponse(f"/companies/{account_id}?msg=saved", status_code=303)
 
 @app.get("/team/member/{member_id}", response_class=HTMLResponse)
-async def team_member_page(member_id: uuid.UUID, request: Request):
+def team_member_page(member_id: uuid.UUID, request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -5596,7 +5610,7 @@ async def team_member_page(member_id: uuid.UUID, request: Request):
 
 # ---- Admin: companies ----
 @app.get("/companies", response_class=HTMLResponse)
-async def companies_page(request: Request):
+def companies_page(request: Request):
     admin = require_admin(request)
     _purge_empty_companies()
     return templates.TemplateResponse(request=request, name="companies.html", context={
@@ -5604,7 +5618,7 @@ async def companies_page(request: Request):
         "msg": request.query_params.get("msg")})
 
 @app.post("/companies")
-async def company_create(request: Request, name: str = Form(...), reseller_id: str = Form("")):
+def company_create(request: Request, name: str = Form(...), reseller_id: str = Form("")):
     require_admin(request)
     name = name.strip()[:200]
     if not name:
@@ -5626,7 +5640,7 @@ async def company_create(request: Request, name: str = Form(...), reseller_id: s
     return RedirectResponse(f"/companies/{new_id}?msg=created", status_code=303)
 
 @app.get("/companies/{account_id}", response_class=HTMLResponse)
-async def company_detail(account_id: uuid.UUID, request: Request):
+def company_detail(account_id: uuid.UUID, request: Request):
     admin = require_admin(request)
     account = _account_row(account_id)
     if not account:
@@ -5653,7 +5667,7 @@ async def company_detail(account_id: uuid.UUID, request: Request):
         "msg": request.query_params.get("msg")})
 
 @app.post("/companies/{account_id}/update")
-async def company_update(account_id: uuid.UUID, request: Request, name: str = Form(...),
+def company_update(account_id: uuid.UUID, request: Request, name: str = Form(...),
                          reseller_id: str = Form(""), notes: str = Form("")):
     require_admin(request)
     reseller = None
@@ -5675,7 +5689,7 @@ async def company_update(account_id: uuid.UUID, request: Request, name: str = Fo
     return RedirectResponse(f"/companies/{account_id}?msg=saved", status_code=303)
 
 @app.post("/companies/{account_id}/delete")
-async def company_delete(account_id: uuid.UUID, request: Request):
+def company_delete(account_id: uuid.UUID, request: Request):
     require_admin(request)
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -5688,7 +5702,7 @@ async def company_delete(account_id: uuid.UUID, request: Request):
     return RedirectResponse("/companies?msg=deleted", status_code=303)
 
 @app.post("/companies/{account_id}/members")
-async def company_member(account_id: uuid.UUID, request: Request, user_id: str = Form(...),
+def company_member(account_id: uuid.UUID, request: Request, user_id: str = Form(...),
                          action: str = Form(...), account_role: str = Form("agent"), target_account: str = Form("")):
     """add (move a user into this company) / role (owner or agent) / move (to another company)."""
     require_admin(request)
@@ -5723,13 +5737,13 @@ async def company_member(account_id: uuid.UUID, request: Request, user_id: str =
 
 # ---- Admin: resellers ----
 @app.get("/resellers", response_class=HTMLResponse)
-async def resellers_page(request: Request):
+def resellers_page(request: Request):
     admin = require_admin(request)
     return templates.TemplateResponse(request=request, name="resellers.html", context={
         "user": admin, "resellers": _all_resellers(include_inactive=True), "msg": request.query_params.get("msg")})
 
 @app.get("/resellers/{reseller_id}", response_class=HTMLResponse)
-async def reseller_detail(reseller_id: uuid.UUID, request: Request):
+def reseller_detail(reseller_id: uuid.UUID, request: Request):
     admin = require_admin(request)
     with db_connect() as conn:
         with conn.cursor() as cur:
@@ -5768,7 +5782,7 @@ def _switch_off_reseller_users(cur, reseller_id):
 
 
 @app.post("/resellers/{reseller_id}/status")
-async def reseller_status(reseller_id: uuid.UUID, request: Request, action: str = Form(...), users_too: str = Form("")):
+def reseller_status(reseller_id: uuid.UUID, request: Request, action: str = Form(...), users_too: str = Form("")):
     """Admin: disable or enable a reseller / white-label partner."""
     require_admin(request)
     if action not in ("disable", "enable"):
@@ -5792,7 +5806,7 @@ async def reseller_status(reseller_id: uuid.UUID, request: Request, action: str 
 
 
 @app.post("/resellers/{reseller_id}/delete")
-async def reseller_delete(reseller_id: uuid.UUID, request: Request, confirm: str = Form(""), users_too: str = Form("")):
+def reseller_delete(reseller_id: uuid.UUID, request: Request, confirm: str = Form(""), users_too: str = Form("")):
     """Admin: delete a reseller for good. Their companies stay as your direct customers
     (or are switched off too when users_too=1). Wallet history of a partner is removed."""
     admin = require_admin(request)
@@ -5815,7 +5829,7 @@ async def reseller_delete(reseller_id: uuid.UUID, request: Request, confirm: str
     return RedirectResponse("/resellers?msg=deleted", status_code=303)
 
 @app.post("/resellers/{reseller_id}/companies")
-async def reseller_assign(reseller_id: uuid.UUID, request: Request, account_id: str = Form(...), action: str = Form("assign")):
+def reseller_assign(reseller_id: uuid.UUID, request: Request, account_id: str = Form(...), action: str = Form("assign")):
     require_admin(request)
     try:
         aid = uuid.UUID(account_id)
@@ -5834,7 +5848,7 @@ async def reseller_assign(reseller_id: uuid.UUID, request: Request, account_id: 
 
 # ---- Reseller portal (view only, no provider names or costs) ----
 @app.get("/clients", response_class=HTMLResponse)
-async def reseller_clients(request: Request):
+def reseller_clients(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -5888,7 +5902,7 @@ def get_user_prefs(user_id):
 templates.env.globals["user_prefs"] = lambda user: get_user_prefs(user.get("id")) if user and user.get("id") else dict(DEFAULT_PREFS)
 
 @app.get("/settings/calling", response_class=HTMLResponse)
-async def calling_prefs_page(request: Request):
+def calling_prefs_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -5938,7 +5952,7 @@ async def save_rates(request: Request):
     return RedirectResponse("/settings?saved=1", status_code=303)
 
 @app.get("/billing", response_class=HTMLResponse)
-async def billing_page(request: Request):
+def billing_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse(url="/login", status_code=302)
@@ -5953,7 +5967,7 @@ async def billing_page(request: Request):
 # Atomic group-call coordination; the telephony leg orchestration must be
 # configured separately through Telnyx Voice API before enabling live routing.
 @app.post("/api/incoming-groups/{group_id}/answer")
-async def claim_incoming_group(group_id: uuid.UUID, request: Request):
+def claim_incoming_group(group_id: uuid.UUID, request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -5980,7 +5994,7 @@ async def claim_incoming_group(group_id: uuid.UUID, request: Request):
             return {"claimed":False,"status":current["status"] if current else "missing"}
 
 @app.post("/api/incoming-groups/{group_id}/decline")
-async def decline_incoming_group(group_id: uuid.UUID, request: Request):
+def decline_incoming_group(group_id: uuid.UUID, request: Request):
     """Decline the ORIGINAL PSTN Call Control leg, not just the browser SIP leg.
 
     Do not mark a call declined before Telnyx accepts the hangup request:
@@ -6047,7 +6061,7 @@ async def decline_incoming_group(group_id: uuid.UUID, request: Request):
             "status": "declined", "note": "Await call.hangup webhook to confirm carrier termination"}
 
 @app.get("/api/incoming/pending")
-async def pending_incoming_for_user(request: Request):
+def pending_incoming_for_user(request: Request):
     """Read-only diagnostic: pending inbound Voice API events for this user.
 
     This does NOT create a SIP/WebRTC call leg or permit answering the carrier.
@@ -6076,7 +6090,7 @@ async def pending_incoming_for_user(request: Request):
 
 
 @app.get("/api/incoming-groups/{group_id}/status")
-async def incoming_group_status(group_id: uuid.UUID, request: Request):
+def incoming_group_status(group_id: uuid.UUID, request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(status_code=401,detail="Unauthorized")
@@ -6099,7 +6113,7 @@ def _xfer_user(request):
     return user
 
 @app.get("/api/transfer/targets")
-async def transfer_targets(request: Request):
+def transfer_targets(request: Request):
     user = _xfer_user(request)
     return {"agents": ct.targets(user), "adv_calling": bool(user.get("adv_calling"))}
 
@@ -6119,7 +6133,7 @@ async def transfer_start(request: Request):
     return result
 
 @app.get("/api/transfer/{tid}")
-async def transfer_status(tid: uuid.UUID, request: Request):
+def transfer_status(tid: uuid.UUID, request: Request):
     user = _xfer_user(request)
     result = ct.status_of(str(tid), user)
     if not result:
@@ -6127,12 +6141,12 @@ async def transfer_status(tid: uuid.UUID, request: Request):
     return result
 
 @app.post("/api/transfer/{tid}/cancel")
-async def transfer_cancel(tid: uuid.UUID, request: Request):
+def transfer_cancel(tid: uuid.UUID, request: Request):
     user = _xfer_user(request)
     return {"cancelled": ct.cancel(str(tid), user)}
 
 @app.post("/api/transfer/{tid}/decline")
-async def transfer_decline(tid: uuid.UUID, request: Request):
+def transfer_decline(tid: uuid.UUID, request: Request):
     user = _xfer_user(request)
     return {"declined": ct.decline(str(tid), user)}
 
@@ -6151,24 +6165,24 @@ async def conference_leave(request: Request):
         raise HTTPException(status_code=exc.status, detail=str(exc))
 
 @app.get("/api/conference/left")
-async def conference_left(request: Request):
+def conference_left(request: Request):
     user = _xfer_user(request)
     return {"calls": ct.left_calls(user) if user.get("conf_leave") else []}
 
 @app.post("/api/conference/left/{lid}/end")
-async def conference_left_end(lid: uuid.UUID, request: Request):
+def conference_left_end(lid: uuid.UUID, request: Request):
     user = _xfer_user(request)
     if not ct.end_left(str(lid), user):
         raise HTTPException(status_code=404, detail="This call has already ended")
     return {"ended": True}
 
 @app.get("/api/advanced-call/result")
-async def advanced_call_result(request: Request):
+def advanced_call_result(request: Request):
     user = _xfer_user(request)
     return ct.last_result(user)
 
 @app.post("/api/admin/users/{user_id}/force-logout")
-async def admin_force_logout(user_id: uuid.UUID, request: Request):
+def admin_force_logout(user_id: uuid.UUID, request: Request):
     admin=get_current_user(request)
     if not admin or admin.get("role")!="admin":
         raise HTTPException(status_code=403,detail="Admin only")

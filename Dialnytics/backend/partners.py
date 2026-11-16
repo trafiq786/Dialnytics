@@ -396,7 +396,7 @@ def register(app, d):
         return user, partner
 
     @app.get("/partner/wallet", response_class=HTMLResponse)
-    async def partner_wallet(request: Request):
+    def partner_wallet(request: Request):
         user = get_current_user(request)
         if not user:
             return RedirectResponse("/login", status_code=302)
@@ -443,7 +443,7 @@ def register(app, d):
         return RedirectResponse("/partner/wallet?msg=sent", status_code=303)
 
     @app.get("/partner/proof/{entry_id}")
-    async def partner_proof(entry_id: uuid.UUID, request: Request):
+    def partner_proof(entry_id: uuid.UUID, request: Request):
         user = get_current_user(request)
         if not user:
             raise HTTPException(status_code=401, detail="Sign in")
@@ -515,7 +515,7 @@ def register(app, d):
         return RedirectResponse(f"/resellers/{reseller_id}?msg=saved#partner", status_code=303)
 
     @app.post("/resellers/{reseller_id}/partner/adjust")
-    async def admin_partner_adjust(reseller_id: uuid.UUID, request: Request, amount: str = Form(...), note: str = Form("")):
+    def admin_partner_adjust(reseller_id: uuid.UUID, request: Request, amount: str = Form(...), note: str = Form("")):
         admin = require_admin(request)
         try:
             amt = money(amount.replace("$", "").replace(",", ""))
@@ -564,7 +564,7 @@ def register(app, d):
         return RedirectResponse(back, status_code=303)
 
     @app.get("/partners/payments", response_class=HTMLResponse)
-    async def admin_payments(request: Request):
+    def admin_payments(request: Request):
         admin = require_admin(request)
         with db_connect() as conn:
             with conn.cursor() as cur:
@@ -757,7 +757,7 @@ def register(app, d):
         return user, partner, None
 
     @app.get("/partner/users", response_class=HTMLResponse)
-    async def partner_users(request: Request):
+    def partner_users(request: Request):
         user, partner, redirect = page_guard(request)
         if redirect:
             return redirect
@@ -773,7 +773,7 @@ def register(app, d):
             "msg": request.query_params.get("msg"), "err": request.query_params.get("err")})
 
     @app.get("/partner/users/new", response_class=HTMLResponse)
-    async def partner_user_new(request: Request):
+    def partner_user_new(request: Request):
         user, partner, redirect = page_guard(request)
         if redirect:
             return redirect
@@ -798,7 +798,7 @@ def register(app, d):
         return {"pool": pool, "buy": [n for n in fresh if n not in pool]}
 
     @app.get("/partner/api/quote")
-    async def partner_api_quote(request: Request, plan: str = "us", addons: str = "", account_id: str = ""):
+    def partner_api_quote(request: Request, plan: str = "us", addons: str = "", account_id: str = ""):
         _user, partner = need_partner(request)
         if plan not in PLANS:
             raise HTTPException(status_code=422, detail="Choose a plan")
@@ -958,7 +958,7 @@ def register(app, d):
         return RedirectResponse("/partner/users?msg=saved", status_code=303)
 
     @app.post("/partner/users/{user_id}/{action}")
-    async def partner_user_toggle(user_id: uuid.UUID, action: str, request: Request):
+    def partner_user_toggle(user_id: uuid.UUID, action: str, request: Request):
         _user, partner = need_partner(request)
         if action not in ("disable", "enable"):
             raise HTTPException(status_code=404, detail="Not found")
@@ -1150,7 +1150,7 @@ def register(app, d):
         _brand_cache.clear()
 
     @app.get("/brand/logo/{partner_id}")
-    async def brand_logo(partner_id: uuid.UUID):
+    def brand_logo(partner_id: uuid.UUID):
         with db_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT logo, logo_type FROM public.partners WHERE id=%s", (partner_id,))
@@ -1189,7 +1189,7 @@ def register(app, d):
         return "live" if status == "verified" else "waiting"
 
     @app.get("/partner/brand", response_class=HTMLResponse)
-    async def partner_brand_page(request: Request):
+    def partner_brand_page(request: Request):
         user, partner, redirect = page_guard(request)
         if redirect:
             return redirect
@@ -1268,7 +1268,7 @@ def register(app, d):
         return RedirectResponse("/partner/brand?msg=" + ("live" if state == "live" else state), status_code=303)
 
     @app.post("/resellers/{reseller_id}/partner/domain")
-    async def admin_partner_domain(reseller_id: uuid.UUID, request: Request, state: str = Form("live")):
+    def admin_partner_domain(reseller_id: uuid.UUID, request: Request, state: str = Form("live")):
         require_admin(request)
         with db_connect() as conn:
             with conn.cursor() as cur:
