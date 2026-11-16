@@ -1399,6 +1399,17 @@ function hangup() {
         return pc.getSenders().find((s) => s.track ? s.track.kind === 'audio' : false) ||
                pc.getSenders().find((s) => !s.track) || null;
     }
+    // Conference: keep each caller's incoming audio buffer as small as the network allows.
+    // Without this the browser may hold 1-2 s of audio per line before mixing it.
+    function lowLatency(call) {
+        const pc = findPc(call);
+        if (!pc || !pc.getReceivers) return;
+        pc.getReceivers().forEach((r) => {
+            if (!r.track || r.track.kind !== 'audio') return;
+            try { if ('jitterBufferTarget' in r) r.jitterBufferTarget = 0; } catch (e) {}
+            try { if ('playoutDelayHint' in r) r.playoutDelayHint = 0; } catch (e) {}
+        });
+    }
     function attachLegAudio(call) {
         if (!call || !call.remoteStream || call._audioEl) return;
         const el = document.createElement('audio');
@@ -1442,7 +1453,11 @@ function hangup() {
         const mic = activeCall._origTrack;
         if (!mic) return setStatus('Microphone not ready for the conference', 'var(--danger)');
         try {
-            const ctx = new Ctx();
+            // 48 kHz = the rate WebRTC calls run at: no resampling, lowest delay.
+            let ctx;
+            try { ctx = new Ctx({ latencyHint: 'interactive', sampleRate: 48000 }); }
+            catch (e) { ctx = new Ctx(); }
+            legs.forEach(lowLatency);
             const micSrc = ctx.createMediaStreamSource(new MediaStream([mic]));
             const remotes = legs.map((leg) => {
                 if (leg !== activeCall) attachLegAudio(leg);     // you hear every caller
