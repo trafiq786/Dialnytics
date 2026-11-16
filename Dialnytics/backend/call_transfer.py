@@ -335,6 +335,8 @@ def on_plain_hangup(call_id):
     or an advanced outgoing (parked) agent leg."""
     if not call_id:
         return
+    with _cc_lock:
+        _agent_hungup[call_id] = time.time()
     customer = None
     with _db() as conn:
         with conn.cursor() as cur:
@@ -815,6 +817,27 @@ def end_left(lid, user):
 
 
 # ---------------------------------------------------------------- advanced outgoing
+# ---- Advanced outgoing calls: in-memory fast path (one app instance).
+# The customer is dialled before the database row is written, and the answer is
+# connected before the database is updated. The database stays the record; these
+# maps only stop double work while the row is being written.
+_cc_lock = threading.Lock()
+_cc_seen = {}        # agent_leg -> time: parked webhook already handled (Telnyx retries)
+_cc_mem = {}         # cid -> {agent_leg, customer_leg, user_id, number}
+_cc_bridged = set()  # cid: bridge sent (fast path or webhook path)
+_agent_hungup = {}   # agent_leg -> time: browser leg ended (maybe before its row existed)
+
+
+def _cc_prune(now):
+    for d in (_cc_seen, _agent_hungup):
+        for k in [k for k, t in list(d.items()) if now - t > 900]:
+            d.pop(k, None)
+    if len(_cc_mem) > 2000:
+        for k in list(_cc_mem)[:500]:
+            _cc_mem.pop(k, None)
+            _cc_bridged.discard(k)
+
+
 def on_parked_outbound(payload, find_user):
     """Browser call on the Advanced connection, parked by Telnyx. Dial the
     customer; bridge when they answer. Returns True if this event was ours."""
@@ -840,14 +863,14 @@ def on_parked_outbound(payload, find_user):
         log.warning("Advanced outbound refused (%s) for leg %s", reason, agent_leg)
         _hangup(agent_leg)
         return True
-    with _db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""INSERT INTO public.cc_calls(user_id,agent_leg,number) VALUES (%s,%s,%s)
-                ON CONFLICT (agent_leg) DO NOTHING RETURNING id""", (user["id"], agent_leg, number))
-            row = cur.fetchone()
-    if not row:
-        return True        # webhook retry
-    cid = str(row["id"])
+    now = time.time()
+    with _cc_lock:
+        if agent_leg in _cc_seen:
+            return True          # webhook retry
+        _cc_seen[agent_leg] = now
+        _cc_prune(now)
+    cid = str(uuid.uuid4())
+    # Dial first: the customer's phone starts ringing without waiting for the database.
     try:
         resp = _tx("POST", "/v2/calls", {
             "connection_id": pstn_connection(), "to": number, "from": user["phone_number"],
@@ -859,26 +882,103 @@ def on_parked_outbound(payload, find_user):
     except Exception as exc:
         log.warning("Advanced outbound dial failed for %s: %s", cid, getattr(exc, "detail", exc))
         customer = ""
+    with _cc_lock:
+        _cc_mem[cid] = {"agent_leg": agent_leg, "customer_leg": customer,
+                        "user_id": str(user["id"]), "number": number}
     with _db() as conn:
         with conn.cursor() as cur:
-            cur.execute("""UPDATE public.cc_calls SET customer_leg=%s,
-                status=CASE WHEN %s='' THEN 'failed' ELSE status END,
-                reason=CASE WHEN %s='' THEN 'Call failed' ELSE reason END WHERE id=%s RETURNING status""",
-                (customer, customer, customer, cid))
-            st = cur.fetchone()
-    if not customer or (st and st["status"] != "dialing"):
-        _hangup(customer)
+            cur.execute("""INSERT INTO public.cc_calls(id,user_id,agent_leg,number,customer_leg,status,reason)
+                VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (agent_leg) DO NOTHING""",
+                (cid, user["id"], agent_leg, number, customer,
+                 "dialing" if customer else "failed", "" if customer else "Call failed"))
+    if not customer:
         _hangup(agent_leg)
-    else:
-        log.info("Advanced outbound %s dialing %s for user %s", cid, number, user["id"])
+        return True
+    if agent_leg in _agent_hungup:
+        # The agent hung up while we were dialling: stop the customer's phone.
+        with _db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE public.cc_calls SET status='cancelled', reason='Cancelled', ended_at=now()
+                    WHERE id=%s AND status='dialing'""", (cid,))
+        _hangup(customer)
+        return True
+    log.info("Advanced outbound %s dialing %s for user %s", cid, number, user["id"])
     return True
 
 
-def on_cc_event(event, cid, payload):
+def _cc_answered_fast(cid, customer):
+    """Customer picked up: answer the parked browser leg and bridge right away,
+    then write the database. Returns False when the slow path must run."""
+    with _cc_lock:
+        m = _cc_mem.get(cid)
+        if not m or cid in _cc_bridged:
+            return bool(m)       # already bridged -> nothing to do
+        _cc_bridged.add(cid)
+    agent_leg = m["agent_leg"]
+    customer = customer or m["customer_leg"]
+    m["customer_leg"] = customer
+    m["answered"] = True
+    t0 = time.monotonic()
+    try:
+        _tx("POST", f"/v2/calls/{agent_leg}/actions/answer", {
+            "client_state": D["cs_encode"]("cca:" + cid), "command_id": "cca-" + cid})
+    except Exception as exc:
+        log.warning("Advanced outbound answer failed for %s: %s", cid, getattr(exc, "detail", exc))
+        _hangup(customer)
+        _hangup(agent_leg)
+        _cc_db_answered(cid, customer, ended=True)
+        customer_gone(customer)
+        return True
+    bridged = False
+    try:
+        _tx("POST", f"/v2/calls/{agent_leg}/actions/bridge",
+            {"call_control_id": customer, "park_after_unbridge": "self"})
+        bridged = True
+        log.info("Advanced outbound %s connected %d ms after the customer answered",
+                 cid, int((time.monotonic() - t0) * 1000))
+    except Exception as exc:
+        # Usually "leg not answered yet": the browser leg's call.answered webhook bridges it.
+        log.info("Advanced outbound %s: bridge waits for the answer event (%s)",
+                 cid, str(getattr(exc, "detail", exc)).replace("\n", " ")[:200])
+        with _cc_lock:
+            _cc_bridged.discard(cid)
+            retry = bool(m.get("agent_answered"))
+        if retry:
+            # The answer event arrived while we were trying: connect now.
+            _cc_db_answered(cid, customer)
+            _bridge_cc(cid)
+            return True
+    _cc_db_answered(cid, customer, bridged=bridged)
+    return True
+
+
+def _cc_db_answered(cid, customer, bridged=False, ended=False):
     with _db() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM public.cc_calls WHERE id=%s", (cid,))
-            c = cur.fetchone()
+            cur.execute("""UPDATE public.cc_calls SET status=%s, answered_at=COALESCE(answered_at,now()),
+                    customer_leg=COALESCE(NULLIF(customer_leg,''),%s),
+                    bridged_at=CASE WHEN %s THEN now() ELSE bridged_at END,
+                    ended_at=CASE WHEN %s THEN now() ELSE ended_at END
+                WHERE id=%s AND status='dialing' RETURNING *""",
+                ("ended" if ended else "answered", customer, bridged, ended, cid))
+            c2 = cur.fetchone()
+            if c2 and not ended:
+                add_live_leg(cur, c2["agent_leg"], c2["user_id"], c2["customer_leg"], c2["number"], "out", c2["id"])
+
+
+def on_cc_event(event, cid, payload):
+    if event == "call.answered" and cid in _cc_mem:
+        if _cc_answered_fast(cid, payload.get("call_control_id") or ""):
+            return
+    c = None
+    for _ in range(20):       # the row is written right after the dial request returns
+        with _db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM public.cc_calls WHERE id=%s", (cid,))
+                c = cur.fetchone()
+        if c or cid not in _cc_mem:
+            break
+        time.sleep(0.1)
     if not c:
         return
     customer = payload.get("call_control_id") or c["customer_leg"]
@@ -936,6 +1036,39 @@ def _bridge_cc(cid, fast=False):
     """Connect the answered browser leg to the customer, exactly once.
     fast=True: tried right after our answer command, before Telnyx confirms it;
     if Telnyx says the leg is not answered yet, the call.answered webhook retries."""
+    with _cc_lock:
+        m = _cc_mem.get(cid)
+        if m is not None:
+            m["agent_answered"] = True     # the browser leg's answer event is here
+        if cid in _cc_bridged:
+            return True          # connected, or the fast path is connecting right now
+        if m and m.get("answered"):
+            _cc_bridged.add(cid)
+    if m and m.get("answered"):
+        # Same app instance placed this call: connect from memory (the database
+        # row may still be catching up), then record it.
+        try:
+            _tx("POST", f"/v2/calls/{m['agent_leg']}/actions/bridge",
+                {"call_control_id": m["customer_leg"], "park_after_unbridge": "self"})
+            log.info("Advanced outbound %s connected (answer event)", cid)
+        except Exception as exc:
+            with _cc_lock:
+                _cc_bridged.discard(cid)
+            if fast:
+                return False
+            log.warning("Advanced outbound bridge failed for %s: %s", cid, getattr(exc, "detail", exc))
+            _hangup(m["customer_leg"])
+            _hangup(m["agent_leg"])
+            customer_gone(m["customer_leg"])
+            return False
+        with _db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE public.cc_calls SET bridged_at=now() WHERE id=%s AND bridged_at IS NULL", (cid,))
+        return True
+    return _bridge_cc_db(cid, fast)
+
+
+def _bridge_cc_db(cid, fast=False):
     with _db() as conn:
         with conn.cursor() as cur:
             cur.execute("""UPDATE public.cc_calls SET bridged_at=now()
