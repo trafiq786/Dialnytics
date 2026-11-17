@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EchoDial SIP Test</title>
+<style>
+  :root{--bg:#0b0f19;--card:#141f32;--line:#2b3851;--fg:#eef3ff;--fg2:#aab6cf;--muted:#7f8db0;--accent:#6366f1;--ok:#22c55e;--bad:#ef4444;--warn:#f59e0b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 Inter,system-ui,sans-serif;padding:20px}
+  .wrap{max-width:560px;margin:0 auto;display:grid;gap:14px}
+  h1{font-size:19px;margin:0}
+  .muted{color:var(--muted);font-size:12.5px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;display:grid;gap:11px}
+  label{display:grid;gap:5px;font-size:12.5px;color:var(--fg2)}
+  input{background:#0e1726;border:1px solid var(--line);color:var(--fg);border-radius:9px;padding:9px 11px;font:inherit;width:100%}
+  .row{display:flex;gap:9px;flex-wrap:wrap}.row>*{flex:1;min-width:150px}
+  .btns{display:flex;gap:8px;flex-wrap:wrap}
+  button{border:1px solid var(--line);background:#1b2740;color:var(--fg);border-radius:9px;padding:10px 15px;font:inherit;font-weight:600;cursor:pointer}
+  button.pri{background:var(--accent);border-color:var(--accent)}
+  button.call{background:var(--ok);border-color:var(--ok)}
+  button.end{background:var(--bad);border-color:var(--bad)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  #state{font-weight:700}
+  .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;border:1px solid var(--line)}
+  .pill.ok{color:var(--ok);border-color:var(--ok)}.pill.bad{color:var(--bad);border-color:var(--bad)}.pill.warn{color:var(--warn);border-color:var(--warn)}
+  #log{background:#0a1120;border:1px solid var(--line);border-radius:10px;padding:10px;font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto;color:var(--fg2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h1>EchoDial SIP connection test</h1>
+    <p class="muted">Ye page sirf test ke liye hai. Password sirf aap ke browser mein rehta hai, kahin send nahi hota. Mic ki ijazat dena zaroori hai.</p>
+  </div>
+
+  <div class="card">
+    <label>WebSocket (WSS) server
+      <input id="wss" value="wss://sip.echodial.ai:5060">
+    </label>
+    <div class="row">
+      <label>SIP username<input id="user" value="dialnytics"></label>
+      <label>SIP domain<input id="domain" value="sip.echodial.ai"></label>
+    </div>
+    <label>Password (yahan likhein — kahin send nahi hoga)
+      <input id="pass" type="password" placeholder="echodial password" autocomplete="off">
+    </label>
+    <label class="muted"><input type="checkbox" id="doReg" style="width:auto;display:inline;margin-right:6px">Pehle REGISTER karein (agar sirf call se na chale to ye tick karein)</label>
+    <div class="btns">
+      <button class="pri" id="btnConn">Connect</button>
+      <button id="btnDisc" disabled>Disconnect</button>
+      <span style="margin-left:auto">Status: <span id="state" class="pill warn">idle</span></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <label>Number to call (country code 1 ke saath, bina + ke — jaise 17045978991)
+      <input id="dest" value="17045978991" inputmode="numeric">
+    </label>
+    <div class="btns">
+      <button class="call" id="btnCall" disabled>Call</button>
+      <button class="end" id="btnHang" disabled>Hang up</button>
+    </div>
+  </div>
+
+  <div id="log">Ready. "Connect" dabayein.</div>
+  <audio id="remote" autoplay></audio>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/sip.js@0.21.2/dist/sip.min.js"></script>
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const logBox=$('log'); let su=null;
+  function log(m){ const t=new Date().toLocaleTimeString(); logBox.textContent+="\n["+t+"] "+m; logBox.scrollTop=logBox.scrollHeight; }
+  function setState(txt,cls){ const e=$('state'); e.textContent=txt; e.className='pill '+(cls||'warn'); }
+  function uiConnected(on){ $('btnConn').disabled=on; $('btnDisc').disabled=!on; $('btnCall').disabled=!on; }
+  function uiInCall(on){ $('btnCall').disabled=on; $('btnHang').disabled=!on; }
+
+  $('btnConn').onclick=async()=>{
+    const wss=$('wss').value.trim(), user=$('user').value.trim(), domain=$('domain').value.trim(), pass=$('pass').value;
+    if(!pass){ log('Password likhein pehle.'); return; }
+    try{
+      log('Mic ki ijazat maang rahe hain…');
+      setState('connecting','warn');
+      const options={
+        aor:'sip:'+user+'@'+domain,
+        media:{ remote:{ audio:$('remote') }, constraints:{ audio:true, video:false } },
+        userAgentOptions:{
+          authorizationUsername:user,
+          authorizationPassword:pass,
+          logLevel:'warn',
+          transportOptions:{ server:wss }
+        },
+        delegate:{
+          onServerConnect(){ log('WebSocket connected ✓'); setState('connected','ok'); uiConnected(true); },
+          onServerDisconnect(err){ log('WebSocket disconnected'+(err?': '+err:'')); setState('disconnected','bad'); uiConnected(false); uiInCall(false); },
+          onCallReceived(){ log('Incoming call (ignored in test).'); },
+          onCallAnswered(){ log('Call answered — awaz honi chahiye ✓'); setState('on call','ok'); uiInCall(true); },
+          onCallHangup(){ log('Call ended.'); setState('connected','ok'); uiInCall(false); },
+          onRegistered(){ log('REGISTER ok ✓'); },
+          onUnregistered(){ log('Unregistered.'); }
+        }
+      };
+      su=new SIP.Web.SimpleUser(wss, options);
+      await su.connect();
+      if($('doReg').checked){ log('Registering…'); try{ await su.register(); }catch(e){ log('Register failed: '+(e&&e.message||e)); } }
+    }catch(e){ log('Connect error: '+(e&&e.message||e)); setState('error','bad'); uiConnected(false); }
+  };
+
+  $('btnDisc').onclick=async()=>{ try{ await su.disconnect(); }catch(e){} log('Disconnected by you.'); setState('idle','warn'); uiConnected(false); uiInCall(false); };
+
+  $('btnCall').onclick=async()=>{
+    const dest=$('dest').value.replace(/[^\d]/g,''), domain=$('domain').value.trim();
+    if(!dest){ log('Number likhein.'); return; }
+    const target='sip:'+dest+'@'+domain;
+    try{ log('Calling '+target+' …'); setState('calling','warn'); uiInCall(true); await su.call(target,{ inviteWithoutSdp:false }); }
+    catch(e){ log('Call error: '+(e&&e.message||e)); setState('connected','ok'); uiInCall(false); }
+  };
+
+  $('btnHang').onclick=async()=>{ try{ await su.hangup(); }catch(e){ log('Hangup error: '+(e&&e.message||e)); } };
+
+  if(!window.SIP||!SIP.Web||!SIP.Web.SimpleUser){ log('SIP.js load nahi hui — internet/CDN check karein.'); }
+  else log('SIP.js loaded ✓');
+})();
+</script>
+</body>
+</html>

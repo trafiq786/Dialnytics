@@ -281,7 +281,7 @@ def build_csp():
         "font-src 'self' https://fonts.gstatic.com data:",
         "img-src 'self' data: blob:",
         "media-src 'self' blob: https://sdk.twilio.com https://media.twiliocdn.com",
-        "connect-src 'self' wss://*.telnyx.com https://*.telnyx.com wss://*.twilio.com https://*.twilio.com",
+        "connect-src 'self' wss://*.telnyx.com https://*.telnyx.com wss://*.twilio.com https://*.twilio.com wss://*.echodial.ai https://*.echodial.ai",
         "worker-src 'self' blob:",
         "frame-ancestors 'none'",
         "base-uri 'self'",
