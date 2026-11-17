@@ -41,6 +41,7 @@ import ring_group as rg  # noqa: E402  (shared numbers: ring every free member)
 import live_listen as ll  # noqa: E402  (supervisors listen / whisper / join live calls)
 import website_orders as wo  # noqa: E402  (orders from the marketing website)
 import partners as pb  # noqa: E402  (white-label partners: wallet + seats)
+import announcements as an  # noqa: E402  (admin announcements: popup, banner, bell)
 
 app = FastAPI(title="Dialnytics", version="1.2.0")
 log = logging.getLogger("dialnytics")
@@ -514,7 +515,7 @@ CREATE INDEX IF NOT EXISTS monitor_recordings_user_idx ON public.monitor_recordi
 CREATE INDEX IF NOT EXISTS monitor_recordings_age_idx ON public.monitor_recordings(created_at);
 ALTER TABLE public.monitor_recordings ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.monitor_recordings FROM anon, authenticated;
-""" + ct.SCHEMA_SQL + rg.SCHEMA_SQL + wo.SCHEMA_SQL + ll.SCHEMA_SQL + pb.SCHEMA_SQL
+""" + ct.SCHEMA_SQL + rg.SCHEMA_SQL + wo.SCHEMA_SQL + ll.SCHEMA_SQL + pb.SCHEMA_SQL + an.SCHEMA_SQL
 
 def ensure_schema():
     """Idempotent additive migration (same SQL as SUPABASE_MIGRATION_07)."""
@@ -1004,13 +1005,27 @@ def _twilio_number_records():
         path = "https://api.twilio.com" + next_uri
     return records
 
+def _twilio_verified_records():
+    """Verified Caller IDs: numbers owned elsewhere (e.g. Telnyx) that this Twilio
+    account may show as caller ID on outgoing calls."""
+    records, path = [], "/OutgoingCallerIds.json?PageSize=1000"
+    for _ in range(20):
+        data = _twilio_request("GET", path)
+        records.extend(data.get("outgoing_caller_ids") or [])
+        next_uri = data.get("next_page_uri")
+        if not next_uri:
+            break
+        path = "https://api.twilio.com" + next_uri
+    return records
+
+TW_VERIFIED = set()        # numbers verified on Twilio (not bought there): outgoing caller ID only
 _tw_numbers_cache = {"at": 0.0, "map": {}}
 
 def twilio_number_accounts(fresh=False):
     """{number: account} for every configured Twilio account (cached 60 s)."""
     if not fresh and time.time() - _tw_numbers_cache["at"] < 60 and _tw_numbers_cache["map"]:
         return dict(_tw_numbers_cache["map"])
-    mapping, errors = {}, []
+    mapping, errors, verified = {}, [], set()
     for acct in TWILIO_ACCOUNTS:
         if not twilio_enabled(acct):
             continue
@@ -1022,9 +1037,19 @@ def twilio_number_accounts(fresh=False):
             except HTTPException as exc:
                 errors.append(exc)
                 log.warning("Could not list numbers of %s: %s", acct, exc.detail)
+            try:
+                for r in _twilio_verified_records():
+                    n = r.get("phone_number")
+                    if n and n not in mapping:
+                        mapping[n] = acct
+                        verified.add(n)
+            except HTTPException as exc:
+                log.warning("Could not list verified caller IDs of %s: %s", acct, exc.detail)
     if errors and not mapping:
         raise errors[0]
     _tw_numbers_cache.update(at=time.time(), map=mapping)
+    TW_VERIFIED.clear()
+    TW_VERIFIED.update(verified)
     return dict(mapping)
 
 def get_twilio_numbers():
@@ -1182,7 +1207,7 @@ def admin_caller_ids(request: Request):
     return JSONResponse({'numbers': [
         {'number': n, 'assigned_to': assigned.get(n, []),
          'account': owners.get(n, ''), 'account_label': labels.get(owners.get(n, ''), ''),
-         'verified': provider == "telnyx" and n in TX_VERIFIED}
+         'verified': (provider == "telnyx" and n in TX_VERIFIED) or (provider == "twilio" and n in TW_VERIFIED)}
         for n in numbers if (not only or owners.get(n) == only) and n not in held
     ]}, headers={'Cache-Control': 'no-store'})
 
@@ -6224,3 +6249,7 @@ _pb = pb.register(app, dict(
     sync_route=_sync_route,
     hash_password=hash_password, hold_info=_wo["hold_info"], public_url=PUBLIC_BASE_URL,
     buy_account=os.getenv("PARTNER_TELNYX_ACCOUNT", "t1")))
+
+_an = an.register(app, dict(
+    db_connect=db_connect, templates=templates, get_current_user=get_current_user, require_admin=require_admin,
+    brand_name=lambda: str(templates.env.globals.get("brand_name") or "Dialnytics")))

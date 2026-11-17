@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}Announcements — Dialnytics{% endblock %}
+{% block content %}
+<style>
+.an-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:980px){.an-grid{grid-template-columns:1fr}}
+.an-form{display:grid;gap:12px}
+.an-form label{display:grid;gap:6px;font-size:13px;font-weight:600;color:var(--text-secondary)}
+.an-form input,.an-form textarea,.an-form select{width:100%}
+.an-form textarea{min-height:96px;resize:vertical}
+.an-row{display:flex;gap:10px;flex-wrap:wrap}.an-row>*{flex:1;min-width:160px}
+.an-chips{display:flex;flex-wrap:wrap;gap:6px}
+.an-chip{position:relative}
+.an-chip input{position:absolute;opacity:0;pointer-events:none}
+.an-chip span{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:999px;padding:6px 12px;font-size:12.5px;font-weight:600;cursor:pointer;color:var(--text-secondary)}
+.an-chip input:checked+span{border-color:var(--accent);background:rgba(99,102,241,.16);color:var(--text-primary)}
+.an-chip input:focus-visible+span{outline:2px solid var(--accent);outline-offset:2px}
+.an-dot{width:8px;height:8px;border-radius:50%}
+.an-check{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--text-secondary)}
+.an-check input{width:auto}
+.an-label{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted)}
+.an-actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+.an-meta{font-size:12px;color:var(--text-muted)}
+.an-bar{height:5px;background:var(--border);border-radius:3px;overflow:hidden;margin-top:5px;max-width:90px}.an-bar i{display:block;height:100%;background:var(--success)}
+.an-tag{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;border:1px solid var(--border);border-radius:999px;padding:1px 8px;white-space:nowrap}
+.an-row-actions{display:flex;gap:6px;flex-wrap:wrap}
+.an-row-actions form{margin:0}
+.an-seen-list{font-size:12.5px;color:var(--text-secondary);margin-top:6px}
+</style>
+
+<div class="page-head"><div><h1>Announcements</h1><p class="muted">Share dialer updates, new features and maintenance notices with your users.</p></div></div>
+
+{% if msg %}<div class="alert {% if msg in ('notitle','nocompany') %}alert-error{% else %}alert-success{% endif %}" role="status" style="margin-bottom:12px">
+{{ {'published':'Announcement published.','draft':'Draft saved.','end':'Announcement ended.','repost':'Announcement posted again.','delete':'Announcement deleted.','notitle':'Please add a title.','nocompany':'Please choose a company.'}.get(msg, 'Saved.') }}</div>{% endif %}
+
+<div class="an-grid">
+  <section class="panel">
+    <h2 style="margin:0 0 12px;font-size:16px">{{ 'Edit announcement' if edit else 'New announcement' }}</h2>
+    <form method="post" action="/announcements" class="an-form" id="anForm">
+      {% if edit %}<input type="hidden" name="edit_id" value="{{ edit.id }}">{% endif %}
+      <label>Title<input name="title" id="anTitle" maxlength="140" required value="{{ edit.title if edit else '' }}" placeholder="e.g. Scheduled maintenance tonight"></label>
+      <label>Message<textarea name="message" id="anMsg" maxlength="2000" placeholder="What should your users know?">{{ edit.message if edit else '' }}</textarea></label>
+      <div><div class="an-label" style="margin-bottom:6px">Type</div>
+        <div class="an-chips">
+          {% set cur_kind = edit.kind if edit else 'update' %}
+          {% for k, label in kinds.items() %}
+          <label class="an-chip"><input type="radio" name="kind" value="{{ k }}" {% if k == cur_kind %}checked{% endif %}><span><i class="an-dot" style="background:{{ {'update':'#6366f1','feature':'#a78bfa','maint':'#f59e0b','urgent':'#ef4444'}[k] }}"></i>{{ label }}</span></label>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="an-row">
+        <label>Audience
+          <select name="audience" id="anAudience">
+            {% for k, label in audiences.items() %}<option value="{{ k }}" {% if edit and edit.audience == k %}selected{% endif %}>{{ label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label id="anCompanyWrap" {% if not (edit and edit.audience == 'company') %}hidden{% endif %}>Company
+          <select name="account_id">
+            <option value="">Choose…</option>
+            {% for c in companies %}<option value="{{ c.id }}" {% if edit and edit.account_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+          </select>
+        </label>
+      </div>
+      <div><div class="an-label" style="margin-bottom:6px">Show as</div>
+        <div class="an-chips">
+          <label class="an-chip"><input type="checkbox" name="show_popup" value="1" {% if not edit or edit.show_popup %}checked{% endif %}><span>Popup</span></label>
+          <label class="an-chip"><input type="checkbox" name="show_banner" value="1" {% if not edit or edit.show_banner %}checked{% endif %}><span>Top banner</span></label>
+          <label class="an-chip"><input type="checkbox" checked disabled><span>Notification bell (always)</span></label>
+        </div>
+      </div>
+      <div class="an-row">
+        <label>Popup shows
+          <select name="popup_mode">
+            {% for k, label in popup_modes.items() %}<option value="{{ k }}" {% if edit and edit.popup_mode == k %}selected{% endif %}>{{ label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Show until <input type="date" name="ends_on" min="{{ today }}" value="{{ edit.ends_on.isoformat() if edit and edit.ends_on else '' }}"></label>
+      </div>
+      <label>Link (optional)<input name="link" type="url" placeholder="https://… (e.g. a guide)" value="{{ edit.link if edit else '' }}"></label>
+      <label class="an-check"><input type="checkbox" name="include_partners" value="1" {% if not edit or edit.include_partners %}checked{% endif %}> Also show to partners' users (they see their own brand name, not Dialnytics)</label>
+      <div class="an-label">Preview</div>
+      <div class="dn-ann-banner" id="anPreview" data-kind="{{ cur_kind }}"><span class="dn-ann-ico"></span><div class="dn-ann-text"><b></b><span></span></div></div>
+      <div class="an-actions">
+        {% if edit %}<a class="dn-btn" href="/announcements">Cancel</a>{% endif %}
+        <button class="dn-btn" name="action" value="draft">Save draft</button>
+        <button class="dn-btn primary" name="action" value="publish">{{ 'Save and publish' if edit else 'Publish' }}</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2 style="margin:0 0 12px;font-size:16px">Sent announcements</h2>
+    <div class="table-scroll"><table class="modern-table">
+      <thead><tr><th>Announcement</th><th>Audience</th><th>Seen</th><th></th></tr></thead>
+      <tbody>
+      {% for a in rows %}
+      <tr>
+        <td><b>{{ a.title }}</b>
+          <div style="margin-top:3px"><span class="an-tag" style="color:{{ {'update':'#818cf8','feature':'#a78bfa','maint':'#f59e0b','urgent':'#ef4444'}[a.kind] }}">● {{ kinds[a.kind] }}</span>
+          {% if a.status == 'live' %}<span class="an-tag" style="color:var(--success)">● Live</span>{% elif a.status == 'draft' %}<span class="an-tag">● Draft</span>{% else %}<span class="an-tag" style="color:var(--text-muted)">● Ended</span>{% endif %}</div>
+          <div class="an-meta">{{ (a.published_at or a.created_at).strftime('%d %b %Y') }}{% if a.ends_on %} · until {{ a.ends_on.strftime('%d %b') }}{% endif %}</div>
+        </td>
+        <td>{{ audiences[a.audience] }}{% if a.audience in ('all','owners') and not a.include_partners %}<div class="an-meta">no partners</div>{% endif %}</td>
+        <td>{% if a.status != 'draft' %}<a href="#" class="an-seen" data-id="{{ a.id }}">{{ a.seen }} / {{ a.total }}</a>
+          <div class="an-bar"><i style="width:{{ (100 * a.seen / a.total)|round|int if a.total else 0 }}%"></i></div>
+          <div class="an-seen-list" hidden></div>{% else %}—{% endif %}</td>
+        <td><div class="an-row-actions">
+          <a class="dn-btn" href="/announcements?edit={{ a.id }}">Edit</a>
+          {% if a.status == 'live' %}<form method="post" action="/announcements/{{ a.id }}/end"><button class="dn-btn">End</button></form>
+          {% else %}<form method="post" action="/announcements/{{ a.id }}/repost"><button class="dn-btn">{{ 'Publish' if a.status == 'draft' else 'Repost' }}</button></form>{% endif %}
+          <form method="post" action="/announcements/{{ a.id }}/delete" onsubmit="return confirm('Delete this announcement?')"><button class="dn-btn danger">Delete</button></form>
+        </div></td>
+      </tr>
+      {% else %}<tr><td colspan="4" class="empty-note">No announcements yet.</td></tr>{% endfor %}
+      </tbody>
+    </table></div>
+    <p class="muted" style="font-size:12.5px;margin:10px 0 0">Seen = users who opened the popup, closed the banner or read it in the bell. Click the number to see their names.</p>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  const f=document.getElementById('anForm'); if(!f) return;
+  const pv=document.getElementById('anPreview');
+  function draw(){
+    const kind=(f.querySelector('input[name=kind]:checked')||{}).value||'update';
+    pv.dataset.kind=kind;
+    pv.querySelector('b').textContent=document.getElementById('anTitle').value||'Title';
+    pv.querySelector('.dn-ann-text span').textContent=document.getElementById('anMsg').value||'Message';
+    document.getElementById('anCompanyWrap').hidden=document.getElementById('anAudience').value!=='company';
+  }
+  f.addEventListener('input',draw); f.addEventListener('change',draw); draw();
+  document.querySelectorAll('.an-seen').forEach(a=>a.addEventListener('click',async e=>{
+    e.preventDefault();
+    const box=a.parentElement.querySelector('.an-seen-list');
+    if(!box.hidden){box.hidden=true;return}
+    try{const r=await fetch('/announcements/'+a.dataset.id+'/seen');const d=await r.json();
+      box.textContent=(d.seen||[]).map(x=>x.name).join(', ')||'Nobody yet';}catch(_){box.textContent='Could not load'}
+    box.hidden=false;
+  }));
+})();
+</script>
+{% endblock %}

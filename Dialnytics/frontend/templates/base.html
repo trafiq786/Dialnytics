@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="/static/css/buttons.css?v=1">
     <link rel="stylesheet" href="/static/css/glass.css?v=6">
     <link rel="stylesheet" href="/static/css/responsive.css?v=8">
+    <link rel="stylesheet" href="/static/css/announcements.css?v=1">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="/static/js/csrf.js"></script>
     <script src="/static/js/page-nav.js"></script>
@@ -34,6 +35,8 @@
             </label>
             <div class="shell-tools">
                 {% if not is_admin_view and not brand_active %}<a href="/billing" class="refer-btn">Refer & Earn</a>{% endif %}
+                {% if not is_admin_view %}<span class="dn-ann-bell" id="dnAnnBell"><button type="button" class="header-icon" id="dnAnnBtn" title="Notifications" aria-label="Notifications" aria-haspopup="true">🔔<span class="dn-ann-count" hidden></span></button>
+                  <div class="dn-ann-drop" id="dnAnnDrop" hidden><header><b>Notifications</b><button type="button" id="dnAnnReadAll">Mark all read</button></header><div id="dnAnnList"></div></div></span>{% endif %}
                 <button type="button" class="header-icon" id="themeToggle" title="Switch theme" aria-label="Switch theme">☾</button>
                 <a class="header-icon" href="https://api.whatsapp.com/send?phone={{ support_whatsapp }}" target="_blank" rel="noopener noreferrer" title="WhatsApp Support">?</a>
                 <button type="button" class="avatar-pill profile-button" id="profileToggle" aria-expanded="false" aria-label="Profile menu">{{ user.name[0]|upper }}</button>
@@ -65,6 +68,7 @@
                     {% elif is_admin_view %}
                     <div class="nav-group">Overview</div>
                     <a href="/dashboard" class="{% if request.url.path == '/dashboard' %}active{% endif %}"><span class="ni ni-svg"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span><span>Dashboard</span></a>
+                    <a href="/announcements" class="{% if request.url.path.startswith('/announcements') %}active{% endif %}"><span class="ni">📣</span><span>Announcements</span></a>
                     <div class="nav-group">Customers</div>
                     <a href="/customers" class="{% if request.url.path.startswith('/customers') %}active{% endif %}"><span class="ni ni-svg"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span><span>Customers</span></a>
                     <a href="/companies" class="{% if request.url.path.startswith('/companies') or request.url.path.startswith('/team') %}active{% endif %}"><span class="ni ni-svg"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 22v-4h6v4"/><path d="M8 6h.01M16 6h.01M12 6h.01M8 10h.01M16 10h.01M12 10h.01M8 14h.01M16 14h.01M12 14h.01"/></svg></span><span>Companies</span></a>
@@ -96,6 +100,7 @@
                 <a href="/settings" class="nav-settings {% if request.url.path == '/settings' %}active{% endif %}"><span class="ni">⚙</span><span>Settings</span></a>
             </aside>
             <main class="shell-main" id="pageMain">
+                {% if not is_admin_view %}<div id="dnAnnBanners"></div>{% endif %}
                 <script data-nav-marker>window.DialnyticsNav&&DialnyticsNav.capture(true)</script>
                 {% if user and user.signup_source == 'website' and not user.phone_number and user.role != 'admin' and user.user_type != 'reseller' %}
                 <div class="alert alert-error" role="alert" style="margin:12px 0">Your account is ready, but we could not assign your number yet. Please contact us on WhatsApp to get your number: <a href="https://wa.me/{{ support_whatsapp }}" target="_blank" rel="noopener">message us</a>.</div>
@@ -134,7 +139,7 @@
     <script src="https://unpkg.com/@telnyx/webrtc@2.22.15/lib/bundle.js"></script>
     {% endif %}
     <script src="/static/js/call-alert.js"></script>
-    <script src="/static/js/dialer.js?v=20261117"></script>
+    <script src="/static/js/dialer.js?v=20261118"></script>
     <script src="/static/js/dialer-extras.js?v=2"></script>
     <script src="/static/js/floating-phone.js?v=1"></script>
     <script src="/static/js/tour.js"></script>
@@ -144,6 +149,7 @@
     <script src="/static/js/mobile-nav.js?v=2"></script>
     <script src="/static/js/buttons-fx.js?v=1"></script>
     <script src="/static/js/confirm-modal.js?v=1"></script>
+    {% if not is_admin_view %}<script src="/static/js/announcements.js?v=1"></script>{% endif %}
     <script src="/static/js/glass-fx.js?v=2"></script>
     {% if has_sms(user) %}<script>
     (function(){async function smsBadge(){try{const r=await fetch('/api/sms/unread');if(!r.ok)return;const d=await r.json();

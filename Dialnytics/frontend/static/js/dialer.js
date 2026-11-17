@@ -42,6 +42,8 @@ const input = document.getElementById('numberInput');
     const XFER_OUT = cfg.dataset.xfer === '1';   // Advanced calling: outgoing calls can be transferred
     const LEAVE_OK = cfg.dataset.leave === '1';     // admin allowed "Leave call" for this user
     const LEGTAG = cfg.dataset.legtag || '';
+    // Other scripts (announcement popups) wait while a call is live.
+    try { Object.defineProperty(window, 'dnOnCall', { configurable: true, get: () => !!(activeCall && !ended) }); } catch (e) {}
     // Countries this line may call (empty = no limit). US = +1, UK = +44.
     const ZONES = (cfg.dataset.zones || '').split(',').filter(Boolean);
     const ZONE_TEXT = cfg.dataset.zonetext || '';
