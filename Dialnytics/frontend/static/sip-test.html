@@ -62,10 +62,42 @@
     </div>
   </div>
 
+  <div class="card">
+    <div class="btns"><b style="font-size:13px">SIP trace (provider ko ye bhejein)</b>
+      <button id="btnCopy" style="margin-left:auto">Copy</button>
+      <button id="btnClear">Clear</button></div>
+    <pre id="trace" style="background:#0a1120;border:1px solid var(--line);border-radius:10px;padding:10px;font:11px/1.45 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;color:#bcd;margin:0">— Call karne ke baad yahan INVITE aur server ka jawab (405) aayega —</pre>
+  </div>
   <div id="log">Loading…</div>
   <audio id="remote" autoplay></audio>
 </div>
 
+<script>
+// Raw SIP frames tap: JsSIP ke WebSocket ko lapet kar sent/received SIP messages dikhata hai.
+(function(){
+  var NativeWS = window.WebSocket;
+  function stamp(){ return new Date().toLocaleTimeString(); }
+  function firstLine(d){ try{ return String(d).split("\r\n")[0].split("\n")[0]; }catch(e){ return ""; } }
+  function looksSIP(d){ d=String(d||""); return d.indexOf("SIP/2.0")>=0 || /^(INVITE|REGISTER|ACK|BYE|CANCEL|OPTIONS|INFO|MESSAGE|SUBSCRIBE|NOTIFY) /.test(d); }
+  function addTrace(dir,data){
+    if(!looksSIP(data)) return;
+    var box=document.getElementById('trace'); if(!box) return;
+    if(box.dataset.started!=="1"){ box.textContent=""; box.dataset.started="1"; }
+    box.textContent += "\n===== "+dir+"  "+stamp()+" =====\n"+String(data).trim()+"\n";
+    box.scrollTop=box.scrollHeight;
+  }
+  function Wrapped(url, protocols){
+    var ws = protocols!==undefined ? new NativeWS(url, protocols) : new NativeWS(url);
+    var origSend = ws.send.bind(ws);
+    ws.send = function(data){ try{ addTrace("SENT (us \u2192 server)", data); }catch(e){} return origSend(data); };
+    ws.addEventListener("message", function(ev){ try{ addTrace("RECEIVED (server \u2192 us)", ev.data); }catch(e){} });
+    return ws;
+  }
+  Wrapped.prototype = NativeWS.prototype;
+  Wrapped.CONNECTING=NativeWS.CONNECTING; Wrapped.OPEN=NativeWS.OPEN; Wrapped.CLOSING=NativeWS.CLOSING; Wrapped.CLOSED=NativeWS.CLOSED;
+  window.WebSocket = Wrapped;
+})();
+</script>
 <script src="jssip.min.js"></script>
 <script>
 (function(){
@@ -125,6 +157,8 @@
   };
 
   $('btnHang').onclick=()=>{ try{ session&&session.terminate(); }catch(e){ log('Hangup error: '+(e&&e.message||e)); } };
+  $('btnCopy').onclick=async()=>{ try{ await navigator.clipboard.writeText($('trace').textContent); $('btnCopy').textContent='Copied!'; setTimeout(()=>$('btnCopy').textContent='Copy',1500);}catch(e){ const r=document.createRange(); r.selectNode($('trace')); getSelection().removeAllRanges(); getSelection().addRange(r); } };
+  $('btnClear').onclick=()=>{ const b=$('trace'); b.textContent='— cleared —'; b.dataset.started=''; };
 })();
 </script>
 </body>
