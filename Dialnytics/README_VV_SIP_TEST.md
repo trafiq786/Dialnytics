@@ -1,29 +1,28 @@
 # Update VV: EchoDial SIP test page (sirf test, live dialer ko haath nahi lagta)
 
-Ye sirf ye dekhne ke liye hai ke echodial ka WSS (wss://sip.echodial.ai:5060) browser se judta hai aur call lagti hai ya nahi. Agar chal gaya, phir poora integration karenge.
+Ye sirf ye dekhne ke liye hai ke echodial ka WSS (wss://sip.echodial.ai:5060) browser se judta hai aur call lagti hai ya nahi.
 
 ## Files
-- frontend/static/sip-test.html (naya test page)
-- backend/voice_helpers.py (CSP mein echodial allow kiya — iske baghair browser nahi judega)
+- frontend/static/sip-test.html (test page)
+- frontend/static/jssip.min.js (SIP library — isi ke saath page chalta hai)
+- backend/voice_helpers.py (CSP mein echodial allow — iske baghair browser block karta hai)
 
 ## Deploy
-Dono files GitHub pe upload karein, phir Render → Manual Deploy.
+Teeno files GitHub pe upload karein, phir Render → Manual Deploy.
+Render mein koi variable add NAHI karna. Password aap page pe khud likhenge.
 
-## Test kaise karein
-1. Browser (laptop Chrome behtar) mein kholein:
-   **https://dialnytics.co.uk/static/sip-test.html**
-2. Password wale khaane mein echodial ka password likhein (ye sirf aap ke browser mein rahega, kahin send nahi hoga).
-3. **Connect** dabayein. Mic ki ijazat "Allow" karein.
-   - "WebSocket connected" aur status **connected** (hara) aa jaye → WSS chal raha hai ✓
-   - "WebSocket disconnected" ya error → WSS nahi chal raha (neeche dekhein).
-4. Number mein koi chalu US number likhein (country code 1 ke saath, bina +, jaise 17045978991).
-5. **Call** dabayein.
-   - Ring ja kar baat ho jaye → poora raasta kaam kar raha hai ✓
-   - Error aaye → neeche wala log (kaali screen) ka screenshot bhejein.
+## Test
+1. Laptop Chrome mein kholein: **https://dialnytics.co.uk/static/sip-test.html**
+   (Upar "JsSIP loaded ✓" aana chahiye.)
+2. Password likhein, **Connect** dabayein, mic "Allow" karein.
+   - "WebSocket connected ✓" + status hara → WSS chal raha hai.
+   - "disconnected" / error (code) → WSS nahi chal raha.
+3. Number likhein (jaise 17045978991), **Call** dabayein.
+   - Ring + baat → poora raasta theek ✓
+   - "Call FAILED" + koi number (jaise 403/404/488) → us ka matlab main bata doon ga.
 
-## Agar connect hi na ho
-- Pehli dafa fail ho to "Pehle REGISTER karein" wala box tick kar ke dobara Connect karein.
-- Phir bhi na ho → kaali screen (log) ka screenshot bhej dein. Us se pata chalega ke WSS port 5060 pe waqai hai ya nahi.
+## Mujhe batayein
+- Status hara hua ya laal?
+- Kaali screen (log) ka screenshot — us mein saari details hoti hain.
 
-## Test ke baad
-Ye page baad mein hata denge. Isy kisi aur ko na dein, kyun ke is se aap ka SIP account istemal hota hai.
+Pehli dafa call se na chale to "Pehle REGISTER karein" tick kar ke dobara Connect karein.
