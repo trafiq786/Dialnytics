@@ -53,6 +53,9 @@
   </div>
 
   <div class="card">
+    <label>Caller ID / CLI (jo number saamne dikhe — provider se jo allowed ho)
+      <input id="cli" placeholder="jaise 17045978991 (provider ka authorized number)" inputmode="numeric">
+    </label>
     <label>Number to call (country code 1 ke saath, bina + ke — jaise 17045978991)
       <input id="dest" value="17045978991" inputmode="numeric">
     </label>
@@ -149,7 +152,10 @@
     };
     try{
       log('Calling '+target+' …'); setState('calling','warn'); uiInCall(true);
-      session=ua.call(target,{ eventHandlers:handlers, mediaConstraints:{audio:true,video:false}, pcConfig:{iceServers:[]} });
+      const cli=($('cli').value||'').replace(/[^\d]/g,'');
+      const opts={ eventHandlers:handlers, mediaConstraints:{audio:true,video:false}, pcConfig:{iceServers:[]} };
+      if(cli){ opts.fromUserName=cli; log('Caller ID (From): '+cli); }
+      session=ua.call(target, opts);
       session.on('peerconnection', e=>{
         e.peerconnection.ontrack = ev=>{ try{ $('remote').srcObject = ev.streams[0]; }catch(_){ } };
       });
