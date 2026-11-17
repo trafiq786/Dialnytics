@@ -180,7 +180,15 @@ VOICEMAIL_GREETING = os.getenv(
     "VOICEMAIL_GREETING",
     "Sorry, we cannot take your call right now. Please leave a message after the beep.")
 VOICEMAIL_MAX_SECONDS = int(os.getenv("VOICEMAIL_MAX_SECONDS", "120"))
-PROVIDERS = ("telnyx", "twilio")
+PROVIDERS = ("telnyx", "twilio", "echodial")
+ECHODIAL = {
+    "wss": os.getenv("ECHODIAL_WSS", "wss://sip.echodial.ai:443/ws").strip(),
+    "domain": os.getenv("ECHODIAL_DOMAIN", "sip.echodial.ai").strip(),
+    "username": os.getenv("ECHODIAL_USER", "").strip(),
+    "password": os.getenv("ECHODIAL_PASS", ""),
+}
+def echodial_enabled():
+    return bool(ECHODIAL["wss"] and ECHODIAL["domain"] and ECHODIAL["username"] and ECHODIAL["password"])
 
 # Private recording storage: Supabase Storage when configured, else the database.
 storage = vh.SupabaseStorage(os.getenv("SUPABASE_URL", ""),
@@ -1073,12 +1081,14 @@ def _sync_twilio_inbound(user_id, provider, number):
     """A Twilio number verified on Telnyx: calls go OUT through Telnyx, calls TO the
     number still arrive at Twilio, so the user's dialer also listens on Twilio."""
     on, acct = False, None
-    if provider == "telnyx" and number and number in TX_VERIFIED and twilio_enabled():
+    if number and twilio_enabled() and provider in ("telnyx", "echodial"):
         try:
             acct = twilio_number_accounts().get(number)
         except HTTPException:
             acct = None
-        on = bool(acct)
+        # Telnyx hybrid needs the number verified on Telnyx; EchoDial hybrid just
+        # needs the number to exist on Twilio (inbound rings there).
+        on = bool(acct) and (provider == "echodial" or number in TX_VERIFIED)
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""UPDATE public.dialnytics_users SET twilio_in=%s,
@@ -1348,6 +1358,59 @@ def customer_update(request:Request,email:str,name:str=Form(...),plan_name:str=F
                 cur.execute('UPDATE public.user_sessions SET revoked_at=NOW() WHERE user_id=%s AND revoked_at IS NULL',(row['id'],))
     refresh_users()
     return RedirectResponse('/customers/'+email+'?saved=1',status_code=303)
+
+
+@app.post('/customers/{email}/set-provider')
+def customer_set_provider(request: Request, email: str, provider: str = Form(...)):
+    """Switch a user's provider while KEEPING their current number as caller ID.
+    Used for EchoDial: same number, calls go out through EchoDial instead."""
+    require_admin(request)
+    from urllib.parse import quote
+    provider = (provider or "").strip()
+    if provider not in PROVIDERS:
+        raise HTTPException(422, "Unknown provider")
+    if provider == "echodial" and not echodial_enabled():
+        raise HTTPException(503, "EchoDial is not configured on the server")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, phone_number FROM public.dialnytics_users WHERE lower(email)=lower(%s)", (email,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "User not found")
+            cur.execute("UPDATE public.dialnytics_users SET provider=%s WHERE id=%s", (provider, row["id"]))
+    number = row["phone_number"] or ""
+    if provider == "telnyx" and number:
+        _set_user_telnyx_account(row["id"], telnyx_number_accounts().get(number, "t1"))
+    _sync_twilio_inbound(row["id"], provider, number)
+    refresh_users()
+    log.info("Provider for %s set to %s (number kept: %s)", email, provider, number)
+    return RedirectResponse("/customers/" + quote(email, safe="") + "?number_updated=1", status_code=303)
+
+
+@app.post('/admin/provider-switch')
+def admin_provider_switch(request: Request, from_provider: str = Form(...), to_provider: str = Form(...)):
+    """Main-provider switch: move every active user currently on from_provider to
+    to_provider, each keeping their own number as caller ID."""
+    require_admin(request)
+    if from_provider not in PROVIDERS or to_provider not in PROVIDERS:
+        raise HTTPException(422, "Unknown provider")
+    if to_provider == "echodial" and not echodial_enabled():
+        raise HTTPException(503, "EchoDial is not configured on the server")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, phone_number FROM public.dialnytics_users
+                WHERE COALESCE(provider,'telnyx')=%s AND role<>'admin' AND is_active""", (from_provider,))
+            rows = cur.fetchall()
+            cur.execute("""UPDATE public.dialnytics_users SET provider=%s
+                WHERE COALESCE(provider,'telnyx')=%s AND role<>'admin' AND is_active""", (to_provider, from_provider))
+    for r in rows:
+        num = r["phone_number"] or ""
+        if to_provider == "telnyx" and num:
+            _set_user_telnyx_account(r["id"], telnyx_number_accounts().get(num, "t1"))
+        _sync_twilio_inbound(r["id"], to_provider, num)
+    refresh_users()
+    log.info("Main provider switch: %d users moved from %s to %s", len(rows), from_provider, to_provider)
+    return RedirectResponse(request.headers.get("referer", "/customers") + ("?switched=%d" % len(rows)), status_code=303)
 
 
 @app.post('/customers/{email}/change-number')
@@ -2050,7 +2113,9 @@ templates.env.globals["has_power"] = has_power
 templates.env.globals["support_whatsapp"] = os.getenv("SUPPORT_WHATSAPP", "447476629105").strip().lstrip("+")
 templates.env.globals["leg_tag"] = ct.leg_tag
 def provider_label(u):
-    """'Twilio', 'Telnyx', or 'Telnyx 1' / 'Telnyx 2' when two Telnyx accounts are set up."""
+    """'Twilio', 'Telnyx', 'EchoDial', or 'Telnyx 1' / 'Telnyx 2' when two Telnyx accounts are set up."""
+    if (u.get("provider") or "telnyx") == "echodial":
+        return "EchoDial"
     if (u.get("provider") or "telnyx") == "twilio":
         return tw_conf(u.get("twilio_account") or "w1")["label"] if len(TWILIO_ACCOUNTS) > 1 else "Twilio"
     if len(TELNYX_ACCOUNTS) > 1:
@@ -3709,6 +3774,25 @@ def _db_user_by_id(user_id):
             cur.execute("SELECT * FROM public.dialnytics_users WHERE id=%s AND is_active=TRUE", (user_id,))
             row = cur.fetchone()
     return _db_user(row) if row else None
+
+@app.get("/api/echodial-token")
+@_customer_safe
+async def echodial_token(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if user.get("role") != "admin" and plan_status(user)["days_left"] < 0:
+        raise HTTPException(status_code=402, detail="Subscription expired")
+    if (user.get("provider") or "telnyx") != "echodial":
+        raise HTTPException(status_code=409, detail="This account does not use EchoDial")
+    if not echodial_enabled():
+        raise HTTPException(status_code=503, detail="EchoDial is not configured on the server")
+    # Shared SIP login; the caller ID (the user's own number) makes each agent distinct.
+    return JSONResponse({"wss": ECHODIAL["wss"], "domain": ECHODIAL["domain"],
+                         "username": ECHODIAL["username"], "password": ECHODIAL["password"],
+                         "cli": user.get("phone_number") or ""},
+                        headers={"Cache-Control": "no-store"})
+
 
 @app.get("/api/twilio-token")
 @_customer_safe

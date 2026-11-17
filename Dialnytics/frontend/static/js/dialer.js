@@ -5,10 +5,10 @@ const input = document.getElementById('numberInput');
     const FROM = cfg.dataset.from || '';
     const RECORDING_OK = cfg.dataset.recording === '1';
     const EXPIRED = cfg.dataset.expired === '1';
-    const PROVIDER = cfg.dataset.provider === 'twilio' ? 'twilio' : 'telnyx';
+    const PROVIDER = ({ twilio: 'twilio', echodial: 'echodial' })[cfg.dataset.provider] || 'telnyx';
     const IS_ADMIN = cfg.dataset.admin === '1';
     // Twilio number verified on Telnyx: calls out go through Telnyx, calls in ring through Twilio.
-    const TWILIO_IN = PROVIDER === 'telnyx' && cfg.dataset.twin === '1';
+    const TWILIO_IN = (PROVIDER === 'telnyx' || PROVIDER === 'echodial') && cfg.dataset.twin === '1';
     let twInbound = null;
     // Customers never see provider names or raw provider error codes. Admins keep the full text.
     function friendlyError(m) {
@@ -418,6 +418,126 @@ function markEnded(reason) {
     })();
     function backspace() { input.value = input.value.slice(0, -1); }
 
+    // ---------- EchoDial (ConnexCS) adapter: wraps a JsSIP session in the same
+    // call shape the dialer uses for Telnyx/Twilio. Browser SIP over WSS.
+    function echoRemoteStream(session) {
+        try {
+            const pc = session.connection;
+            if (!pc) return null;
+            const ms = new MediaStream();
+            pc.getReceivers().forEach((r) => { if (r.track && r.track.kind === 'audio') ms.addTrack(r.track); });
+            return ms.getAudioTracks().length ? ms : null;
+        } catch (e) { return null; }
+    }
+    function echoShim(session, number, incoming) {
+        const shim = {
+            _echo: true,
+            _accepted: false,
+            _session: session,
+            _stream: null,
+            direction: incoming ? 'inbound' : 'outbound',
+            id: 'echo-' + Math.random().toString(36).slice(2),
+            state: incoming ? 'ringing' : 'new',
+            cause: '',
+            sipCode: 0,
+            options: { destinationNumber: number, remoteCallerNumber: number },
+            get remoteStream() { return this._stream || (this._stream = echoRemoteStream(session)); },
+            get peerConnection() { try { return session.connection || null; } catch (e) { return null; } },
+            answer() { try { session.answer({ mediaConstraints: { audio: true, video: false }, pcConfig: { iceServers: [] } }); } catch (e) {} },
+            reject() { try { session.terminate({ status_code: 603 }); } catch (e) {} },
+            hangup() { try { session.terminate(); } catch (e) {} },
+            dtmf(d) { try { session.sendDTMF(d); } catch (e) {} },
+            muteAudio() { try { session.mute({ audio: true }); } catch (e) {} },
+            unmuteAudio() { try { session.unmute({ audio: true }); } catch (e) {} },
+            hold() { try { session.hold(); } catch (e) {} },
+            unhold() { try { session.unhold(); } catch (e) {} }
+        };
+        const finish = (reason, code) => {
+            shim.state = 'hangup';
+            if (code) shim.sipCode = code;
+            if (incomingCall === shim) { stopRing(); incomingCall = null; showDialPad(); setStatus('Missed call'); return; }
+            if (activeCall === shim) markEnded(reason || endReason(shim));
+            if (heldCall === shim) heldCall = null;
+        };
+        session.on('peerconnection', (e) => {
+            try {
+                e.peerconnection.addEventListener('track', () => {
+                    shim._stream = echoRemoteStream(session);
+                    const a = document.getElementById('remoteAudio');
+                    if (a && activeCall === shim && shim._stream) { a.srcObject = shim._stream; a.play().catch(() => {}); }
+                });
+            } catch (_) {}
+        });
+        session.on('progress', () => { if (shim.state === 'new') shim.state = 'ringing'; if (activeCall === shim) showState('ringing'); });
+        session.on('accepted', () => {
+            shim._accepted = true; shim.state = 'active';
+            if (activeCall === shim) { activeConfirmed = true; lastState = ''; showState('active');
+                const a = document.getElementById('remoteAudio'); shim._stream = echoRemoteStream(session);
+                if (a && shim._stream) { a.srcObject = shim._stream; a.play().catch(() => {}); } }
+        });
+        session.on('confirmed', () => { if (activeCall === shim && shim.state !== 'active') { shim.state = 'active'; activeConfirmed = true; showState('active'); } });
+        session.on('failed', (e) => {
+            const code = (e && e.message && e.message.status_code) || 0;
+            shim.cause = (e && e.cause) || '';
+            finish(code === 486 ? 'Busy' : (code === 603 ? 'Call declined' : 'Call ended'), code);
+        });
+        session.on('ended', () => finish('Call ended'));
+        return shim;
+    }
+
+    let echoUA = null;
+    let echoDomain = '';
+    async function echoConfig() {
+        const res = await fetch('/api/echodial-token', { cache: 'no-store' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'EchoDial config failed');
+        return data;
+    }
+    async function bootEcho() {
+        if (!window.JsSIP) {
+            rtcStatus.textContent = 'SDK missing';
+            setStatus('Calling service failed to load. Check your internet or ad blocker.', 'var(--danger)');
+            return;
+        }
+        try {
+            const c = await echoConfig();
+            echoDomain = c.domain;
+            const socket = new JsSIP.WebSocketInterface(c.wss);
+            echoUA = new JsSIP.UA({
+                sockets: [socket], uri: 'sip:' + c.username + '@' + c.domain,
+                authorization_user: c.username, password: c.password,
+                register: true, session_timers: false, register_expires: 600
+            });
+            client = echoUA;
+            echoUA.on('connected', () => { rtcStatus.textContent = 'Connecting...'; });
+            echoUA.on('disconnected', () => { if (rtcStatus.textContent === 'Ready') rtcStatus.textContent = 'Not connected'; });
+            echoUA.on('registered', () => {
+                rtcStatus.textContent = 'Ready'; rtcStatus.style.color = 'var(--success)';
+                const params = new URLSearchParams(location.search);
+                if (params.get('call') === '1' && input.value && !window._autoDialed) { window._autoDialed = true; makeCall(); }
+            });
+            echoUA.on('unregistered', () => { if (rtcStatus.textContent === 'Ready') rtcStatus.textContent = 'Not connected'; });
+            echoUA.on('registrationFailed', (e) => { rtcStatus.textContent = 'RTC error'; setStatus('Line login failed', 'var(--danger)'); });
+            echoUA.on('newRTCSession', (ev) => {
+                if (ev.originator !== 'remote') return;        // outgoing handled in makeCall
+                if (TWILIO_IN) { try { ev.session.terminate({ status_code: 488 }); } catch (e) {} return; }  // hybrid: inbound via Twilio
+                if (activeCall || incomingCall) { try { ev.session.terminate({ status_code: 486 }); } catch (e) {} return; }
+                const from = (ev.session.remote_identity && ev.session.remote_identity.uri && ev.session.remote_identity.uri.user) || 'Unknown caller';
+                const shim = echoShim(ev.session, from, true);
+                ended = false; incomingCall = shim; hidePanels();
+                const view = document.getElementById('incomingView'); if (view) view.hidden = false;
+                const num = document.getElementById('incomingNumber'); if (num) num.textContent = from;
+                rtcStatus.textContent = 'Incoming'; rtcStatus.style.color = 'var(--success)';
+                setStatus('Incoming call'); startRing();
+            });
+            rtcStatus.textContent = 'Connecting...';
+            echoUA.start();
+        } catch (err) {
+            rtcStatus.textContent = 'Not connected';
+            setStatus(err.message || 'Line error', 'var(--danger)');
+        }
+    }
+
     // ---------- Twilio adapter: gives a Twilio Call the same shape the
     // dialer already uses for Telnyx calls (state, hangup, dtmf, mute...).
     function twilioShim(tw, number, incoming) {
@@ -592,6 +712,7 @@ function markEnded(reason) {
     }
 
     async function boot() {
+        if (PROVIDER === 'echodial') { if (TWILIO_IN) bootTwilioInbound(); return bootEcho(); }
         if (PROVIDER === 'twilio') return bootTwilio();
         if (TWILIO_IN) bootTwilioInbound();
         const Klass = RTC();
@@ -730,7 +851,17 @@ function markEnded(reason) {
         showInCall(number);
         placing = true;
         try {
-            if (PROVIDER === 'twilio') {
+            if (PROVIDER === 'echodial') {
+                const target = 'sip:' + number.replace(/\D/g, '') + '@' + echoDomain;
+                const cli = (FROM || '').replace(/\D/g, '');
+                const session = echoUA.call(target, {
+                    mediaConstraints: { audio: true, video: false },
+                    pcConfig: { iceServers: [] },
+                    fromUserName: cli || undefined
+                });
+                if (ended) { try { session.terminate(); } catch (e) {} placing = false; return; }
+                activeCall = echoShim(session, number, false);
+            } else if (PROVIDER === 'twilio') {
                 const tw = await client.connect({ params: { To: number } });
                 if (ended) {            // hung up while the call was being set up
                     try { tw.disconnect(); } catch (e) {}

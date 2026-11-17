@@ -42,6 +42,18 @@
     <button class="cm-btn" type="submit" id="numSubmit" disabled>Update Number</button>
   </form>
   <p class="cm-muted" style="font-size:12px;margin-top:12px">Numbers assigned to another user cannot be selected. Active calls are not intentionally disconnected.</p>
+  <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+  <h3 style="margin:0 0 6px;font-size:14px">Switch provider — keep the same number</h3>
+  <p class="cm-muted" style="font-size:12px;margin:0 0 10px">Changes only the provider; the caller ID (number) stays the same. Use this to move a user to EchoDial without changing their number. The user must refresh the dialer once.</p>
+  <form method="post" action="/customers/{{ customer.email|urlencode }}/set-provider" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"
+        onsubmit="return confirm('Switch provider for this user, keeping the same number? They should refresh the dialer.');">
+    <select name="provider" class="cm-input" style="max-width:220px">
+      <option value="telnyx"{% if prov == 'telnyx' %} selected{% endif %}>Telnyx</option>
+      <option value="twilio"{% if prov == 'twilio' %} selected{% endif %}>Twilio</option>
+      <option value="echodial"{% if prov == 'echodial' %} selected{% endif %}>EchoDial</option>
+    </select>
+    <button class="cm-btn" type="submit">Switch provider</button>
+  </form>
 </section>
 <script>
 (function () {

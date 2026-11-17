@@ -968,6 +968,7 @@ body.nav-collapsed .brand .brand-icon{display:block}
 .dn-pill.warn{background:rgba(245,158,11,.14);color:#fbbf24}
 .dn-pill.twilio{background:rgba(242,47,70,.14);color:#fb7185}
 .dn-pill.telnyx{background:rgba(34,211,238,.14);color:#22d3ee}
+.dn-pill.echodial{background:rgba(167,139,250,.16);color:#a78bfa}
 .dn-audio{width:100%;margin-top:16px}
 .dn-toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#111827;color:#fff;border-radius:10px;padding:11px 16px;font-size:13px;z-index:1000;box-shadow:0 10px 30px rgba(0,0,0,.35)}
 .log-row.clickable{cursor:pointer;border-radius:10px;padding:10px 8px}

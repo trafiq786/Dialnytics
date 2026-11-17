@@ -133,13 +133,17 @@
         <div class="mob-sheet-grid" id="mobMoreGrid"></div>
     </div>
     {% if not no_dialer %}
-    {% if user.provider == 'twilio' %}
+    {% if user.provider == 'echodial' %}
+    <script src="/static/js/jssip.min.js"></script>
+    {% if user.twilio_in %}<script src="https://cdn.jsdelivr.net/npm/@twilio/voice-sdk@2.18.1/dist/twilio.min.js"></script>{% endif %}
+    {% elif user.provider == 'twilio' %}
     <script src="https://cdn.jsdelivr.net/npm/@twilio/voice-sdk@2.18.1/dist/twilio.min.js"></script>
     {% else %}
     <script src="https://unpkg.com/@telnyx/webrtc@2.22.15/lib/bundle.js"></script>
+    {% if user.twilio_in %}<script src="https://cdn.jsdelivr.net/npm/@twilio/voice-sdk@2.18.1/dist/twilio.min.js"></script>{% endif %}
     {% endif %}
     <script src="/static/js/call-alert.js"></script>
-    <script src="/static/js/dialer.js?v=20261118"></script>
+    <script src="/static/js/dialer.js?v=20261119"></script>
     <script src="/static/js/dialer-extras.js?v=2"></script>
     <script src="/static/js/floating-phone.js?v=1"></script>
     <script src="/static/js/tour.js"></script>
