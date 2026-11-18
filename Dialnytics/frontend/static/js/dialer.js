@@ -454,6 +454,7 @@ function markEnded(reason) {
         };
         const finish = (reason, code) => {
             shim.state = 'hangup';
+            stopRingback();
             if (code) shim.sipCode = code;
             if (incomingCall === shim) { stopRing(); incomingCall = null; showDialPad(); setStatus('Missed call'); return; }
             if (activeCall === shim) markEnded(reason || endReason(shim));
@@ -464,12 +465,15 @@ function markEnded(reason) {
                 e.peerconnection.addEventListener('track', () => {
                     shim._stream = echoRemoteStream(session);
                     const a = document.getElementById('remoteAudio');
-                    if (a && activeCall === shim && shim._stream) { a.srcObject = shim._stream; a.play().catch(() => {}); }
+                    if (a && activeCall === shim && shim._stream) { stopRingback(); a.srcObject = shim._stream; a.play().catch(() => {}); }
                 });
             } catch (_) {}
         });
-        session.on('progress', () => { if (shim.state === 'new') shim.state = 'ringing'; if (activeCall === shim) showState('ringing'); });
+        // Ring tone: EchoDial sends no in-band ringback, so play a local one while the
+        // far end rings; it stops as soon as real audio arrives or the call is answered.
+        session.on('progress', () => { if (shim.state === 'new') shim.state = 'ringing'; if (activeCall === shim) { showState('ringing'); if (!incoming) startRingback(); } });
         session.on('accepted', () => {
+            stopRingback();
             shim._accepted = true; shim.state = 'active';
             if (activeCall === shim) { activeConfirmed = true; lastState = ''; showState('active');
                 const a = document.getElementById('remoteAudio'); shim._stream = echoRemoteStream(session);
@@ -861,6 +865,7 @@ function markEnded(reason) {
                 });
                 if (ended) { try { session.terminate(); } catch (e) {} placing = false; return; }
                 activeCall = echoShim(session, number, false);
+                startRingback();   // ring tone from the moment we dial (EchoDial sends none itself)
             } else if (PROVIDER === 'twilio') {
                 const tw = await client.connect({ params: { To: number } });
                 if (ended) {            // hung up while the call was being set up
@@ -1400,8 +1405,9 @@ function hangup() {
         if (!LEAVE_OK || !activeCall || activeCall._twilio || xfer || ended) return null;
         const legs = [activeCall].concat(confCalls, heldCalls);
         if (legs.length !== 2) return null;
-        // Outgoing calls are only server-controlled with Advanced calling.
-        if (!ADV && legs.some((c) => !String(c.direction || '').toLowerCase().startsWith('in'))) return null;
+        // Telnyx outgoing calls are only server-controlled with Advanced calling.
+        // EchoDial bridges the two callers inside this browser, so no server needed.
+        if (!ADV && !activeCall._echo && legs.some((c) => !String(c.direction || '').toLowerCase().startsWith('in'))) return null;
         return legs;
     }
     function syncLeaveBtn() {
@@ -1415,6 +1421,76 @@ function hangup() {
     function showNum(n) {
         return (window.DNNumber && window.DNNumber.pretty && n) ? window.DNNumber.pretty(n) : (n || 'Caller');
     }
+    // EchoDial "Leave call": no server and no SIP transfer (the trunk declines those).
+    // Instead this browser keeps relaying audio between the two callers, with the
+    // agent removed from the mix. The two lines stay up; the tab must stay open.
+    let echoLeftBridge = null;
+    function echoStartBridge(a, b) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) { setStatus('This browser cannot bridge the call', 'var(--danger)'); return null; }
+        let ctx;
+        try { ctx = new Ctx({ latencyHint: 'interactive', sampleRate: 48000 }); } catch (e) { ctx = new Ctx(); }
+        [a, b].forEach(lowLatency);
+        // Send each leg ONLY the other caller's audio (no agent mic).
+        const wire = (fromLeg, toLeg) => {
+            const sender = audioSender(toLeg);
+            if (!sender) return;
+            if (!toLeg._origTrack && sender.track) toLeg._origTrack = sender.track;
+            const dest = ctx.createMediaStreamDestination();
+            try { if (fromLeg.remoteStream) ctx.createMediaStreamSource(fromLeg.remoteStream).connect(dest); } catch (e) {}
+            const track = dest.stream.getAudioTracks()[0];
+            if (track) sender.replaceTrack(track).catch(() => {});
+        };
+        wire(b, a);   // A hears B
+        wire(a, b);   // B hears A
+        return { ctx: ctx, legs: [a, b] };
+    }
+    function echoEndBridge(reason) {
+        const br = echoLeftBridge; echoLeftBridge = null;
+        const card = document.getElementById('echoLeftCard'); if (card) card.remove();
+        if (!br) return;
+        try { br.ctx.close(); } catch (e) {}
+        br.legs.forEach((c) => { detachLegAudio(c); try { if (c.hangup) c.hangup(); } catch (e) {} });
+        if (reason) setStatus(reason);
+    }
+    function echoShowLeftCard(legs) {
+        let card = document.getElementById('echoLeftCard');
+        if (!card) {
+            card = document.createElement('div');
+            card.id = 'echoLeftCard';
+            card.style.cssText = 'position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:9999;background:#132132;border:1px solid #2b3c57;color:#eaf0ff;border-radius:12px;padding:12px 14px;box-shadow:0 10px 30px rgba(0,0,0,.45);font:13px/1.45 system-ui,sans-serif;max-width:94vw';
+            document.body.appendChild(card);
+        }
+        const names = legs.map((c) => showNum(legNumber(c))).join('  ↔  ');
+        card.innerHTML = '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">' +
+            '<span>📞 <b>' + esc(names) + '</b> abhi baat kar rahe hain. Is tab ko khula rakhein.</span>' +
+            '<button type="button" id="echoEndBoth" style="background:#b4243a;border:0;color:#fff;border-radius:8px;padding:8px 13px;cursor:pointer;font-weight:600">End both</button></div>';
+        const btn = document.getElementById('echoEndBoth');
+        if (btn) btn.onclick = () => echoEndBridge('You ended both calls');
+    }
+    async function echoLeave(legs) {
+        const a = legs[0], b = legs[1];
+        if (!a || !b) return setStatus('Leave call needs two other people on the call', 'var(--danger)');
+        const nums = [a, b].map((c) => legNumber(c) || '');
+        const ok = await askLeave(showNum(nums[0]) + ' and ' + showNum(nums[1]) +
+            ' will keep talking through this tab. Keep this tab open until they finish — if you close it, their call ends.',
+            'Leave call', 'Leave the call?');
+        if (!ok) return;
+        teardownMixer();
+        const br = echoStartBridge(a, b);
+        if (!br) return;
+        echoLeftBridge = br;
+        // If either caller hangs up, drop the bridge and end the other side too.
+        [a, b].forEach((c) => {
+            const s = c._session;
+            try { if (s && s.once) s.once('ended', () => echoEndBridge('Their call has ended')); } catch (e) {}
+        });
+        // Take both legs out of the normal call state and reset the agent's screen.
+        confCalls.splice(0); heldCalls.splice(0); syncHeld();
+        activeCall = null;
+        markEnded('You left · they keep talking');
+        echoShowLeftCard([a, b]);
+    }
     async function leaveCall() {
         let legs = leaveTargets();
         if (!legs) return setStatus('Leave call works when exactly two other people are on the call', 'var(--danger)');
@@ -1425,6 +1501,7 @@ function hangup() {
         if (!ok) return;
         legs = leaveTargets();
         if (!legs) return setStatus('The call changed. Try again.', 'var(--danger)');
+        if (legs[0]._echo) return echoLeave(legs);
         const btn = document.getElementById('leaveBtn');
         if (btn) btn.disabled = true;
         setStatus('Connecting them...');
