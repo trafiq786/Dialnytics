@@ -33,6 +33,7 @@
           {% for l in calling_lines() %}<option value="{{ l.value }}" data-provider="{{ l.provider }}" data-account="{{ l.account }}" data-manual="{{ 1 if l.manual else 0 }}"{% if l.value == cur_line %} selected{% endif %}{% if not l.ready %} disabled{% endif %}>{{ l.label }}{% if not l.ready %} — not set up{% endif %}</option>{% endfor %}
         </select>
         <input type="hidden" name="provider" id="numProviderValue" value="{{ prov }}">
+        <input type="hidden" name="sip_provider_id" id="numSipId" value="{{ customer.sip_provider_id or '' }}">
       </div>
       <div class="cm-field"><label for="numSelect"><span id="numLabel">Available number</span>
           <a href="#" id="numManualToggle" style="font-size:11px;font-weight:600;margin-left:8px">✎ Type manually</a></label>
@@ -48,14 +49,19 @@
   <h3 style="margin:0 0 6px;font-size:14px">Switch provider — keep the same number</h3>
   <p class="cm-muted" style="font-size:12px;margin:0 0 10px">Changes only the provider; the caller ID (number) stays the same. Use this to move a user to EchoDial without changing their number. The user must refresh the dialer once.</p>
   <form method="post" action="/customers/{{ customer.email|urlencode }}/set-provider" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"
-        onsubmit="return confirm('Switch provider for this user, keeping the same number? They should refresh the dialer.');">
-    <select name="provider" class="cm-input" style="max-width:220px">
-      <option value="telnyx"{% if prov == 'telnyx' %} selected{% endif %}>Telnyx</option>
-      <option value="twilio"{% if prov == 'twilio' %} selected{% endif %}>Twilio</option>
-      <option value="echodial"{% if prov == 'echodial' %} selected{% endif %}>EchoDial</option>
+        onsubmit="return confirm('Switch provider for this user, keeping the same number? They should refresh the dialer.');"
+        id="switchProviderForm">
+    {% set cur_sip = customer.sip_provider_id %}
+    <select id="switchProviderSel" class="cm-input" style="max-width:240px">
+      <option value="telnyx" data-provider="telnyx" data-sip=""{% if prov == 'telnyx' %} selected{% endif %}>Telnyx</option>
+      <option value="twilio" data-provider="twilio" data-sip=""{% if prov == 'twilio' %} selected{% endif %}>Twilio</option>
+      {% for l in calling_lines() if l.provider == 'echodial' %}<option value="{{ l.value }}" data-provider="echodial" data-sip="{{ '' if l.account == 'e1' else l.account }}"{% if prov == 'echodial' and ((l.account == 'e1' and not cur_sip) or (l.account == cur_sip|string)) %} selected{% endif %}>{{ l.label }}</option>{% endfor %}
     </select>
+    <input type="hidden" name="provider" id="switchProviderValue" value="{{ prov }}">
+    <input type="hidden" name="sip_provider_id" id="switchSipId" value="{{ cur_sip or '' }}">
     <button class="cm-btn" type="submit">Switch provider</button>
   </form>
+  <script>(function(){var s=document.getElementById('switchProviderSel');if(!s)return;function sync(){var o=s.selectedOptions[0];document.getElementById('switchProviderValue').value=o.dataset.provider;document.getElementById('switchSipId').value=o.dataset.sip||'';}s.addEventListener('change',sync);sync();})();</script>
 </section>
 <script>
 (function () {
@@ -73,6 +79,7 @@
     const opt = provider.selectedOptions[0];
     const name = opt.textContent.trim();
     document.getElementById('numProviderValue').value = opt.dataset.provider;
+    document.getElementById('numSipId').value = (opt.dataset.provider === 'echodial' && /^\d+$/.test(opt.dataset.account)) ? opt.dataset.account : '';
 if(!manualMode){document.getElementById('numLabel').textContent = 'Available ' + name + ' number';}
     select.replaceChildren(new Option('Loading ' + name + ' numbers...', ''));
     submit.disabled = true;

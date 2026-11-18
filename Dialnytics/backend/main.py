@@ -190,6 +190,48 @@ ECHODIAL = {
 def echodial_enabled():
     return bool(ECHODIAL["wss"] and ECHODIAL["domain"] and ECHODIAL["username"] and ECHODIAL["password"])
 
+def _sip_domain_from_wss(wss):
+    """Pull the host out of a wss URL, e.g. wss://sip.echodial.ai:443/ws -> sip.echodial.ai"""
+    m = re.search(r"//([^/:]+)", str(wss or ""))
+    return m.group(1) if m else ""
+
+def sip_providers_all(active_only=True):
+    """Admin-added SIP providers (browser WebRTC). Safe to call often; small table."""
+    try:
+        with db_connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT id,name,wss,sip_domain,username,password,active,created_at "
+                    "FROM public.sip_providers " + ("WHERE active " if active_only else "") +
+                    "ORDER BY name")
+                return cur.fetchall()
+    except Exception:
+        log.exception("sip_providers_all failed")
+        return []
+
+def sip_provider_get(pid):
+    if not pid:
+        return None
+    try:
+        with db_connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT id,name,wss,sip_domain,username,password,active "
+                            "FROM public.sip_providers WHERE id=%s", (int(pid),))
+                return cur.fetchone()
+    except Exception:
+        return None
+
+def echo_cfg_for(user):
+    """SIP login config for a browser-SIP (echodial) user. If the user is tied to an
+    admin-added SIP provider (sip_provider_id), use that row; otherwise the env EchoDial."""
+    row = sip_provider_get(user.get("sip_provider_id")) if user else None
+    if row:
+        return {"wss": row["wss"].strip(),
+                "domain": (row["sip_domain"] or _sip_domain_from_wss(row["wss"])).strip(),
+                "username": row["username"].strip(), "password": row["password"],
+                "name": row["name"]}
+    return dict(ECHODIAL, name="EchoDial")
+
 # Private recording storage: Supabase Storage when configured, else the database.
 storage = vh.SupabaseStorage(os.getenv("SUPABASE_URL", ""),
                              os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
@@ -317,6 +359,7 @@ def _db_user(row):
         "telnyx_account": tx_key(row.get("telnyx_account") or "t1"),
         "call_countries": row.get("call_countries") or "",
         "twilio_account": tw_key(row.get("twilio_account") or "w1"),
+        "sip_provider_id": row.get("sip_provider_id"),
         "twilio_in": bool(row.get("twilio_in", False)),
         "partner_plan": row.get("partner_plan") or "",
         "is_demo": bool(row.get("is_demo", False)),
@@ -489,6 +532,20 @@ ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS call_countries text
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS twilio_account text NOT NULL DEFAULT 'w1';
 -- 30: Twilio number verified on Telnyx: outgoing via Telnyx, incoming rings through Twilio
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS twilio_in boolean NOT NULL DEFAULT false;
+-- 31: admin-added SIP providers (browser WebRTC/JsSIP), e.g. EchoDial or any wholesale SIP trunk.
+--     A user on provider='echodial' with sip_provider_id set uses that row's config; NULL = env EchoDial.
+CREATE TABLE IF NOT EXISTS public.sip_providers (
+    id serial PRIMARY KEY,
+    name text NOT NULL,
+    wss text NOT NULL,
+    sip_domain text NOT NULL DEFAULT '',
+    username text NOT NULL,
+    password text NOT NULL,
+    active boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+REVOKE ALL ON public.sip_providers FROM anon, authenticated;
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS sip_provider_id integer;
 -- 16: single-leader lease so background workers run on ONE instance only
 --     (lets the app scale to several Render instances without double-ringing)
 CREATE TABLE IF NOT EXISTS public.worker_leader (
@@ -1265,7 +1322,7 @@ def require_admin(request):
 def _customer_data(email):
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.provider,u.telnyx_account,u.twilio_account,u.account_id,u.plan_name,
+            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.provider,u.telnyx_account,u.twilio_account,u.sip_provider_id,u.account_id,u.plan_name,
                 u.plan_start,u.plan_renewal,u.created_at,u.is_active,u.is_demo,
                 u.last_paid_amount,u.recording_premium,u.contact_name,u.contact_phone,
                 u.contact_address,u.customer_notes,
@@ -1361,23 +1418,28 @@ def customer_update(request:Request,email:str,name:str=Form(...),plan_name:str=F
 
 
 @app.post('/customers/{email}/set-provider')
-def customer_set_provider(request: Request, email: str, provider: str = Form(...)):
+def customer_set_provider(request: Request, email: str, provider: str = Form(...),
+                          sip_provider_id: str = Form("")):
     """Switch a user's provider while KEEPING their current number as caller ID.
-    Used for EchoDial: same number, calls go out through EchoDial instead."""
+    Used for EchoDial / any SIP provider: same number, calls go out through it."""
     require_admin(request)
     from urllib.parse import quote
     provider = (provider or "").strip()
     if provider not in PROVIDERS:
         raise HTTPException(422, "Unknown provider")
-    if provider == "echodial" and not echodial_enabled():
+    sip_id = int(sip_provider_id) if str(sip_provider_id).strip().isdigit() else None
+    if provider == "echodial" and not sip_id and not echodial_enabled():
         raise HTTPException(503, "EchoDial is not configured on the server")
+    if provider == "echodial" and sip_id and not sip_provider_get(sip_id):
+        raise HTTPException(404, "SIP provider not found")
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id, phone_number FROM public.dialnytics_users WHERE lower(email)=lower(%s)", (email,))
             row = cur.fetchone()
             if not row:
                 raise HTTPException(404, "User not found")
-            cur.execute("UPDATE public.dialnytics_users SET provider=%s WHERE id=%s", (provider, row["id"]))
+            cur.execute("UPDATE public.dialnytics_users SET provider=%s, sip_provider_id=%s WHERE id=%s",
+                        (provider, sip_id if provider == "echodial" else None, row["id"]))
     number = row["phone_number"] or ""
     if provider == "telnyx" and number:
         _set_user_telnyx_account(row["id"], telnyx_number_accounts().get(number, "t1"))
@@ -1415,12 +1477,15 @@ def admin_provider_switch(request: Request, from_provider: str = Form(...), to_p
 
 @app.post('/customers/{email}/change-number')
 def customer_change_number(request: Request, email: str, phone_number: str = Form(...),
-                                 provider: str = Form("telnyx")):
+                                 provider: str = Form("telnyx"), sip_provider_id: str = Form("")):
     require_admin(request)
     from urllib.parse import quote
     new_number = phone_number.strip()
     if provider not in PROVIDERS:
         raise HTTPException(422, 'Unknown provider')
+    sip_id = int(sip_provider_id) if (provider == 'echodial' and str(sip_provider_id).strip().isdigit()) else None
+    if sip_id and not sip_provider_get(sip_id):
+        raise HTTPException(404, 'SIP provider not found')
     if not re.fullmatch(r"\+[1-9][0-9]{7,14}", new_number):
         raise HTTPException(422, 'Invalid E.164 phone number')
     # Verify ownership with the provider before changing the database.
@@ -1447,8 +1512,8 @@ def customer_change_number(request: Request, email: str, phone_number: str = For
             # Remove old assignment and insert new assignment in one transaction.
             cur.execute('DELETE FROM public.caller_id_assignments WHERE user_id=%s', (target['id'],))
             cur.execute('INSERT INTO public.caller_id_assignments(user_id,phone_number) VALUES (%s,%s)', (target['id'],new_number))
-            cur.execute('UPDATE public.dialnytics_users SET phone_number=%s,provider=%s WHERE id=%s',
-                        (new_number,provider,target['id']))
+            cur.execute('UPDATE public.dialnytics_users SET phone_number=%s,provider=%s,sip_provider_id=%s WHERE id=%s',
+                        (new_number,provider,sip_id,target['id']))
     if provider == 'telnyx':
         _set_user_telnyx_account(target['id'], telnyx_number_accounts().get(new_number, 't1'))
     elif provider == 'twilio':
@@ -1706,6 +1771,7 @@ async def create_user(
     plan_renewal: str = Form(""),
     is_demo: bool = Form(False),
     provider: str = Form("telnyx"),
+    sip_provider_id: str = Form(""),
     user_type: str = Form("customer"),
     company_mode: str = Form("new"),
     company_name: str = Form(""),
@@ -1845,6 +1911,10 @@ async def create_user(
                     (plan_name or '1 USER ACCOUNT').strip(),start,renewal,amount_paid,is_demo,provider,
                     new_account, account_role if user_type == 'customer' else 'agent', user_type))
                 new_id = cur.fetchone()['id']
+                # EchoDial-type user tied to an admin-added SIP provider: remember which one.
+                if provider == 'echodial' and str(sip_provider_id).strip().isdigit():
+                    cur.execute('UPDATE public.dialnytics_users SET sip_provider_id=%s WHERE id=%s',
+                                (int(sip_provider_id), new_id))
                 if phone_number:
                     cur.execute('INSERT INTO public.caller_id_assignments(user_id,phone_number) VALUES (%s,%s)',
                                 (new_id,phone_number))
@@ -2117,6 +2187,10 @@ templates.env.globals["leg_tag"] = ct.leg_tag
 def provider_label(u):
     """'Twilio', 'Telnyx', 'EchoDial', or 'Telnyx 1' / 'Telnyx 2' when two Telnyx accounts are set up."""
     if (u.get("provider") or "telnyx") == "echodial":
+        if u.get("sip_provider_id"):
+            row = sip_provider_get(u.get("sip_provider_id"))
+            if row:
+                return row["name"]
         return "EchoDial"
     if (u.get("provider") or "telnyx") == "twilio":
         return tw_conf(u.get("twilio_account") or "w1")["label"] if len(TWILIO_ACCOUNTS) > 1 else "Twilio"
@@ -2136,11 +2210,18 @@ def calling_lines():
         c = TWILIO_ACCOUNTS.get(key)
         out.append({"value": "twilio:" + key, "provider": "twilio", "account": key, "label": label,
                     "ready": bool(c and c["sid"] and c["token"])})
-    out.append({"value": "echodial:e1", "provider": "echodial", "account": "e1", "label": "EchoDial",
-                "ready": echodial_enabled(), "manual": True})
+    if echodial_enabled():
+        out.append({"value": "echodial:e1", "provider": "echodial", "account": "e1", "label": "EchoDial",
+                    "ready": True, "manual": True})
+    # Admin-added SIP providers (browser WebRTC). Each is an EchoDial-type line.
+    for p in sip_providers_all():
+        out.append({"value": "echodial:" + str(p["id"]), "provider": "echodial", "account": str(p["id"]),
+                    "label": p["name"], "ready": True, "manual": True})
     return out
 
 def user_line(u):
+    if (u.get("provider") or "telnyx") == "echodial":
+        return "echodial:" + (str(u.get("sip_provider_id")) if u.get("sip_provider_id") else "e1")
     if (u.get("provider") or "telnyx") == "twilio":
         return "twilio:" + (u.get("twilio_account") or "w1")
     return "telnyx:" + (u.get("telnyx_account") or "t1")
@@ -3789,11 +3870,12 @@ async def echodial_token(request: Request):
         raise HTTPException(status_code=402, detail="Subscription expired")
     if (user.get("provider") or "telnyx") != "echodial":
         raise HTTPException(status_code=409, detail="This account does not use EchoDial")
-    if not echodial_enabled():
-        raise HTTPException(status_code=503, detail="EchoDial is not configured on the server")
+    cfg = echo_cfg_for(user)   # the user's chosen SIP provider, or env EchoDial
+    if not (cfg["wss"] and cfg["domain"] and cfg["username"] and cfg["password"]):
+        raise HTTPException(status_code=503, detail="This SIP provider is not configured")
     # Shared SIP login; the caller ID (the user's own number) makes each agent distinct.
-    return JSONResponse({"wss": ECHODIAL["wss"], "domain": ECHODIAL["domain"],
-                         "username": ECHODIAL["username"], "password": ECHODIAL["password"],
+    return JSONResponse({"wss": cfg["wss"], "domain": cfg["domain"],
+                         "username": cfg["username"], "password": cfg["password"],
                          "cli": user.get("phone_number") or ""},
                         headers={"Cache-Control": "no-store"})
 
@@ -5725,6 +5807,56 @@ def team_member_page(member_id: uuid.UUID, request: Request):
         "user": user, "member": target, "live": me, "calls": calls, "recordings": recordings,
         "back_url": "/team" + ("?account=" + target["account_id"] if _is_admin(user) else ""),
     })
+
+# ---- Admin: SIP providers (browser WebRTC trunks) ----
+@app.get("/sip-providers", response_class=HTMLResponse)
+def sip_providers_page(request: Request):
+    admin = require_admin(request)
+    rows = sip_providers_all(active_only=False)
+    # how many users are on each provider
+    counts = {}
+    try:
+        with db_connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT sip_provider_id, COUNT(*) n FROM public.dialnytics_users "
+                            "WHERE sip_provider_id IS NOT NULL AND is_active GROUP BY sip_provider_id")
+                counts = {r["sip_provider_id"]: r["n"] for r in cur.fetchall()}
+    except Exception:
+        pass
+    return templates.TemplateResponse(request=request, name="sip_providers.html", context={
+        "user": admin, "providers": rows, "counts": counts,
+        "msg": request.query_params.get("msg"), "err": request.query_params.get("err")})
+
+@app.post("/sip-providers")
+def sip_provider_create(request: Request, name: str = Form(...), wss: str = Form(...),
+                        username: str = Form(...), password: str = Form(...),
+                        sip_domain: str = Form("")):
+    require_admin(request)
+    name, wss, username = name.strip()[:80], wss.strip()[:200], username.strip()[:120]
+    sip_domain = (sip_domain.strip() or _sip_domain_from_wss(wss))[:120]
+    if not (name and wss and username and password):
+        return RedirectResponse("/sip-providers?err=Please+fill+name,+WSS,+username+and+password", status_code=303)
+    if not re.match(r"^wss://", wss, re.I):
+        return RedirectResponse("/sip-providers?err=WSS+must+start+with+wss://", status_code=303)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO public.sip_providers(name,wss,sip_domain,username,password)
+                           VALUES (%s,%s,%s,%s,%s)""", (name, wss, sip_domain, username, password))
+    log.info("SIP provider added: %s (%s)", name, wss)
+    return RedirectResponse("/sip-providers?msg=Provider+added", status_code=303)
+
+@app.post("/sip-providers/{pid}/delete")
+def sip_provider_delete(request: Request, pid: int):
+    require_admin(request)
+    with db_connect() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT COUNT(*) n FROM public.dialnytics_users WHERE sip_provider_id=%s AND is_active", (pid,))
+            if (cur.fetchone() or {}).get("n"):
+                return RedirectResponse("/sip-providers?err=Still+in+use+by+users;+move+them+first", status_code=303)
+            cur.execute("DELETE FROM public.sip_providers WHERE id=%s", (pid,))
+    refresh_users()
+    return RedirectResponse("/sip-providers?msg=Provider+deleted", status_code=303)
+
 
 # ---- Admin: companies ----
 @app.get("/companies", response_class=HTMLResponse)

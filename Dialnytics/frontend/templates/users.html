@@ -27,7 +27,7 @@
  <div class="field company-existing" hidden><label for="company-select">Existing company</label><select id="company-select" name="account_id"><option value="">Select company…</option>{% for c in companies %}<option value="{{ c.id }}">{{ c.name }} ({{ c.users }} users)</option>{% endfor %}</select></div>
  <div class="field company-existing" hidden><label for="account-role">Role in company</label><select id="account-role" name="account_role"><option value="agent" selected>Agent (makes calls)</option><option value="owner">Owner (sees the whole team)</option></select><small>Owners see live status, call logs and recordings of every team member.</small></div>
  </div>
- <div class="field calling-only"><label for="provider-select">Calling Provider</label><select id="provider-select" required>{% for l in calling_lines() %}<option value="{{ l.value }}" data-provider="{{ l.provider }}" data-account="{{ l.account }}" data-manual="{{ 1 if l.manual else 0 }}"{% if loop.first %} selected{% endif %}{% if not l.ready %} disabled{% endif %}>{{ l.label }}{% if not l.ready %} — not set up{% endif %}</option>{% endfor %}</select><input type="hidden" name="provider" id="provider-value" value="telnyx"><small>The Caller ID list below shows only the numbers of the selected account.</small><div id="lines-status" class="lines-status" aria-live="polite">Checking calling accounts…</div></div>
+ <div class="field calling-only"><label for="provider-select">Calling Provider</label><select id="provider-select" required>{% for l in calling_lines() %}<option value="{{ l.value }}" data-provider="{{ l.provider }}" data-account="{{ l.account }}" data-manual="{{ 1 if l.manual else 0 }}"{% if loop.first %} selected{% endif %}{% if not l.ready %} disabled{% endif %}>{{ l.label }}{% if not l.ready %} — not set up{% endif %}</option>{% endfor %}</select><input type="hidden" name="provider" id="provider-value" value="telnyx"><input type="hidden" name="sip_provider_id" id="sip-provider-id" value=""><small>The Caller ID list below shows only the numbers of the selected account.</small><div id="lines-status" class="lines-status" aria-live="polite">Checking calling accounts…</div></div>
  <div class="field"><label for="caller-id" id="caller-id-label">Caller ID · Telnyx Numbers <a href="#" id="caller-manual-toggle" style="font-size:11px;font-weight:600;margin-left:8px">✎ Type manually</a></label><select id="caller-id" name="phone_number"><option value="">Loading Telnyx numbers...</option></select><input type="text" id="caller-manual" name="phone_number" placeholder="+1XXXXXXXXXX (approved caller ID)" hidden disabled inputmode="tel"><input type="hidden" id="confirm-shared-number" name="confirm_shared_number" value="no"><input type="hidden" id="share-number" name="share_number" value="no"><small id="caller-id-message" aria-live="polite">Numbers assigned to other users require transfer confirmation.</small><small>Owners can be created without a number (they only watch the team). Agents need a number.</small></div>
  </section>
  <section class="user-panel"><div class="panel-title"><span class="panel-icon">▤</span><div><h2>Subscription & Payment</h2><p>Manage plan and PKR payments</p></div></div>
@@ -57,6 +57,7 @@
     const account = opt.dataset.account;
     const providerName = opt.textContent.trim();
     document.getElementById('provider-value').value = provider;
+    document.getElementById('sip-provider-id').value = (provider === 'echodial' && /^\d+$/.test(account)) ? account : '';
     if(!manualMode){label.textContent = 'Caller ID · ' + providerName + ' Numbers';}
     select.replaceChildren(new Option('Loading ' + providerName + ' numbers...', ''));
     message.textContent = 'Numbers assigned to other users require transfer confirmation.';
@@ -110,6 +111,7 @@
     confirmedNumber = ''; confirmation.value = 'no';
     const opt = providerSelect.selectedOptions[0];
     document.getElementById('provider-value').value = opt.dataset.provider;
+    document.getElementById('sip-provider-id').value = (opt.dataset.provider === 'echodial' && /^\d+$/.test(opt.dataset.account)) ? opt.dataset.account : '';
     if (opt.dataset.manual === '1') { manualMode = false; applyManual(); }
     else { manualMode = false; applyManual(); loadCallerIds(); }
   });
