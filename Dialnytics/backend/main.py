@@ -1424,7 +1424,9 @@ def customer_change_number(request: Request, email: str, phone_number: str = For
     if not re.fullmatch(r"\+[1-9][0-9]{7,14}", new_number):
         raise HTTPException(422, 'Invalid E.164 phone number')
     # Verify ownership with the provider before changing the database.
-    if new_number not in get_provider_numbers(provider):
+    # EchoDial numbers are typed manually (the SIP provider approves CLIs
+    # separately), so there is no owned-number list to check against.
+    if provider != 'echodial' and new_number not in get_provider_numbers(provider):
         raise HTTPException(422, f'Number is not owned by this {provider.capitalize()} account')
     with db_connect() as conn:
         with conn.cursor() as cur:
