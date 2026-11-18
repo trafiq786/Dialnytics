@@ -1,63 +1,69 @@
 {% extends "base.html" %}
 {% block title %}SIP Providers — Dialnytics{% endblock %}
+{% block page_title %}SIP Providers{% endblock %}
 {% block content %}
 <style>
-.sp-grid{display:grid;grid-template-columns:minmax(0,360px) minmax(0,1fr);gap:18px;align-items:start}
+.sp-grid{display:grid;grid-template-columns:minmax(0,420px) minmax(0,1fr);gap:22px;align-items:start}
 @media (max-width:900px){.sp-grid{grid-template-columns:1fr}}
-.sp-form{display:grid;gap:12px}
-.sp-form label{display:grid;gap:5px;font-size:13px;font-weight:600;color:var(--text-secondary)}
-.sp-form input{width:100%}
-.sp-form small{font-weight:400;color:var(--text-muted);font-size:11.5px}
 .sp-table{width:100%;border-collapse:collapse}
-.sp-table th,.sp-table td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:top}
-.sp-table th{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)}
+.sp-table th,.sp-table td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--border);font-size:13.5px;vertical-align:top}
+.sp-table th{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-muted);font-weight:700}
+.sp-table tbody tr:last-child td{border-bottom:none}
 .sp-mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text-secondary);word-break:break-all}
-.sp-badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11.5px;border:1px solid var(--border)}
-.sp-note{background:rgba(99,102,241,.08);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:12.5px;color:var(--text-secondary)}
+.sp-count{display:inline-block;min-width:26px;text-align:center;padding:2px 8px;border-radius:999px;background:rgba(99,102,241,.16);color:#a5b4fc;font-weight:700;font-size:12px}
+.sp-del{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);color:#fca5a5;border-radius:9px;padding:7px 13px;font:inherit;font-weight:600;cursor:pointer}
+.sp-del:hover{background:rgba(239,68,68,.2)}
+.sp-empty{padding:26px 14px;color:var(--text-muted);text-align:center}
+.sp-note{margin-top:16px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.28);border-radius:12px;padding:12px 14px;font-size:12.5px;color:var(--text-secondary);line-height:1.5}
+.sp-foot{font-size:12.5px;color:var(--text-muted);margin:14px 0 0}
 </style>
 
-<div class="page-head"><div><h1>SIP Providers</h1><p class="muted">Add any browser-calling (WebRTC / SIP) provider — EchoDial or any wholesale SIP trunk. Then pick it as the calling provider when you create a user or change their provider.</p></div></div>
+<section class="users-hero">
+  <div><span class="eyebrow">CALLING INFRASTRUCTURE</span><h1>SIP Providers</h1>
+  <p>Add any browser-calling (WebRTC / SIP) provider — EchoDial or any wholesale SIP trunk — then pick it when you create a user or change their provider.</p></div>
+  <a class="btn btn-secondary" style="width:auto;flex:0 0 auto" href="/users/new">＋ Create User</a>
+</section>
 
-{% if msg %}<div class="alert alert-success" role="status" style="margin-bottom:12px">{{ msg }}</div>{% endif %}
-{% if err %}<div class="alert alert-error" role="status" style="margin-bottom:12px">{{ err }}</div>{% endif %}
+{% if err %}<div class="error-msg">{{ err }}</div>{% endif %}
+{% if msg %}<div class="success-msg">{{ msg }}</div>{% endif %}
 
 <div class="sp-grid">
-  <section class="panel">
-    <h2 style="margin:0 0 12px;font-size:16px">Add a provider</h2>
-    <form method="post" action="/sip-providers" class="sp-form">
-      <label>Provider name<input name="name" maxlength="80" required placeholder="e.g. MyTrunk US"></label>
-      <label>WebSocket (WSS) URL<input name="wss" maxlength="200" required placeholder="wss://sip.example.com:443/ws"><small>Provider se jo websocket URL mile, wahi. Port 443/ws aam tor par chalta hai.</small></label>
-      <label>SIP domain <span style="font-weight:400;color:var(--text-muted)">(optional)</span><input name="sip_domain" maxlength="120" placeholder="sip.example.com"><small>Khali chhodo to WSS URL se khud nikal lega.</small></label>
-      <label>SIP username<input name="username" maxlength="120" required placeholder="username" autocomplete="off"></label>
-      <label>SIP password<input name="password" type="password" required placeholder="password" autocomplete="new-password"><small>Server par mahfooz rakha jata hai; sirf is provider ke assigned users ke dialer ko bheja jata hai.</small></label>
-      <div style="display:flex;justify-content:flex-end"><button class="dn-btn primary" type="submit">Add provider</button></div>
+  <section class="user-panel">
+    <div class="panel-title"><span class="panel-icon">📡</span><div><h2>Add a provider</h2><p>Enter the SIP login your provider gave you</p></div></div>
+    <form method="post" action="/sip-providers" class="user-form">
+      <div class="field"><label>Provider name</label><input name="name" maxlength="80" required placeholder="e.g. MyTrunk US" autocomplete="off"></div>
+      <div class="field"><label>WebSocket (WSS) URL</label><input name="wss" maxlength="200" required placeholder="wss://sip.example.com:443/ws" autocomplete="off"><small>Provider se jo websocket URL mile, wahi. Port 443/ws aam tor par chalta hai.</small></div>
+      <div class="field"><label>SIP domain <span style="color:var(--text-muted);font-weight:400">(optional)</span></label><input name="sip_domain" maxlength="120" placeholder="sip.example.com" autocomplete="off"><small>Khali chhodo to WSS URL se khud nikal lega.</small></div>
+      <div class="field"><label>SIP username</label><input name="username" maxlength="120" required placeholder="username" autocomplete="off"></div>
+      <div class="field"><label>SIP password</label><input name="password" type="password" required placeholder="password" autocomplete="new-password"><small>Server par mahfooz rakha jata hai; sirf is provider ke assigned users ke dialer ko bheja jata hai.</small></div>
+      <button class="btn btn-primary" type="submit" style="width:auto;flex:0 0 auto;margin-top:4px">Add provider</button>
+      <div class="sp-note"><b>Note:</b> jo number user ki Caller ID (CLI) banega, wo is provider par <b>approved CLI</b> hona chahiye — warna calls route nahi hongi (503). Ye provider ki routing/approval par depend karta hai.</div>
     </form>
-    <div class="sp-note" style="margin-top:12px">Note: jo number user ki Caller ID (CLI) banega, wo is provider par <b>approved CLI</b> hona chahiye — warna calls route nahi hongi (503). Ye provider ki routing/approval par depend karta hai.</div>
   </section>
 
-  <section class="panel">
-    <h2 style="margin:0 0 12px;font-size:16px">Your providers</h2>
+  <section class="user-panel">
+    <div class="panel-title"><span class="panel-icon">🗂</span><div><h2>Your providers</h2><p>Added providers and how many users are on each</p></div></div>
     <div class="table-scroll"><table class="sp-table">
       <thead><tr><th>Name</th><th>WSS / domain</th><th>Username</th><th>Users</th><th></th></tr></thead>
       <tbody>
       {% for p in providers %}
       <tr>
-        <td><b>{{ p.name }}</b>{% if not p.active %} <span class="sp-badge">off</span>{% endif %}</td>
+        <td><b>{{ p.name }}</b></td>
         <td><div class="sp-mono">{{ p.wss }}</div><div class="sp-mono" style="color:var(--text-muted)">{{ p.sip_domain }}</div></td>
         <td class="sp-mono">{{ p.username }}</td>
-        <td>{{ counts.get(p.id, 0) }}</td>
+        <td><span class="sp-count">{{ counts.get(p.id, 0) }}</span></td>
         <td style="white-space:nowrap">
           <form method="post" action="/sip-providers/{{ p.id }}/delete" onsubmit="return confirm('Delete {{ p.name }}? Users on it must be moved first.')">
-            <button class="dn-btn danger" type="submit">Delete</button>
+            <button class="sp-del" type="submit">Delete</button>
           </form>
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="5" class="empty-note">No SIP providers yet. Add one on the left.</td></tr>
+      <tr><td colspan="5" class="sp-empty">No SIP providers yet. Add one on the left.</td></tr>
       {% endfor %}
       </tbody>
     </table></div>
-    <p class="muted" style="font-size:12.5px;margin:10px 0 0">Provider delete karne se pehle us ke users ko kisi aur provider par move karna hoga (Customers → user → Change number / provider).</p>
+    <p class="sp-foot">Provider delete karne se pehle us ke users ko kisi aur provider par move karna hoga (Customers → user → Change number / provider).</p>
   </section>
 </div>
 {% endblock %}
