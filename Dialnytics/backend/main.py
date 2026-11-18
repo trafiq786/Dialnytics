@@ -1449,7 +1449,7 @@ def customer_change_number(request: Request, email: str, phone_number: str = For
                         (new_number,provider,target['id']))
     if provider == 'telnyx':
         _set_user_telnyx_account(target['id'], telnyx_number_accounts().get(new_number, 't1'))
-    else:
+    elif provider == 'twilio':
         _set_user_twilio_account(target['id'], new_number)
     _sync_twilio_inbound(target['id'], provider, new_number)
     refresh_users()
@@ -1738,7 +1738,7 @@ async def create_user(
         return fail('Agents need a Caller ID to make calls')
     if provider not in PROVIDERS:
         return fail('Select a calling provider')
-    if phone_number:
+    if phone_number and provider != 'echodial':
         provider_label = provider.capitalize()
         try:
             owned_numbers = get_provider_numbers(provider)
@@ -1865,7 +1865,7 @@ async def create_user(
     if phone_number:
         if provider == 'twilio':
             _twilio_configure_number(phone_number)
-        else:
+        elif provider == 'telnyx':
             try:
                 with tx_ctx(acct):
                     _ensure_credential(email)
@@ -2134,6 +2134,8 @@ def calling_lines():
         c = TWILIO_ACCOUNTS.get(key)
         out.append({"value": "twilio:" + key, "provider": "twilio", "account": key, "label": label,
                     "ready": bool(c and c["sid"] and c["token"])})
+    out.append({"value": "echodial:e1", "provider": "echodial", "account": "e1", "label": "EchoDial",
+                "ready": echodial_enabled(), "manual": True})
     return out
 
 def user_line(u):

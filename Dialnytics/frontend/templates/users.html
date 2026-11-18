@@ -27,8 +27,8 @@
  <div class="field company-existing" hidden><label for="company-select">Existing company</label><select id="company-select" name="account_id"><option value="">Select company…</option>{% for c in companies %}<option value="{{ c.id }}">{{ c.name }} ({{ c.users }} users)</option>{% endfor %}</select></div>
  <div class="field company-existing" hidden><label for="account-role">Role in company</label><select id="account-role" name="account_role"><option value="agent" selected>Agent (makes calls)</option><option value="owner">Owner (sees the whole team)</option></select><small>Owners see live status, call logs and recordings of every team member.</small></div>
  </div>
- <div class="field calling-only"><label for="provider-select">Calling Provider</label><select id="provider-select" required>{% for l in calling_lines() %}<option value="{{ l.value }}" data-provider="{{ l.provider }}" data-account="{{ l.account }}"{% if loop.first %} selected{% endif %}{% if not l.ready %} disabled{% endif %}>{{ l.label }}{% if not l.ready %} — not set up{% endif %}</option>{% endfor %}</select><input type="hidden" name="provider" id="provider-value" value="telnyx"><small>The Caller ID list below shows only the numbers of the selected account.</small><div id="lines-status" class="lines-status" aria-live="polite">Checking calling accounts…</div></div>
- <div class="field"><label for="caller-id" id="caller-id-label">Caller ID · Telnyx Numbers</label><select id="caller-id" name="phone_number"><option value="">Loading Telnyx numbers...</option></select><input type="hidden" id="confirm-shared-number" name="confirm_shared_number" value="no"><input type="hidden" id="share-number" name="share_number" value="no"><small id="caller-id-message" aria-live="polite">Numbers assigned to other users require transfer confirmation.</small><small>Owners can be created without a number (they only watch the team). Agents need a number.</small></div>
+ <div class="field calling-only"><label for="provider-select">Calling Provider</label><select id="provider-select" required>{% for l in calling_lines() %}<option value="{{ l.value }}" data-provider="{{ l.provider }}" data-account="{{ l.account }}" data-manual="{{ 1 if l.manual else 0 }}"{% if loop.first %} selected{% endif %}{% if not l.ready %} disabled{% endif %}>{{ l.label }}{% if not l.ready %} — not set up{% endif %}</option>{% endfor %}</select><input type="hidden" name="provider" id="provider-value" value="telnyx"><small>The Caller ID list below shows only the numbers of the selected account.</small><div id="lines-status" class="lines-status" aria-live="polite">Checking calling accounts…</div></div>
+ <div class="field"><label for="caller-id" id="caller-id-label">Caller ID · Telnyx Numbers <a href="#" id="caller-manual-toggle" style="font-size:11px;font-weight:600;margin-left:8px">✎ Type manually</a></label><select id="caller-id" name="phone_number"><option value="">Loading Telnyx numbers...</option></select><input type="text" id="caller-manual" name="phone_number" placeholder="+1XXXXXXXXXX (approved caller ID)" hidden disabled inputmode="tel"><input type="hidden" id="confirm-shared-number" name="confirm_shared_number" value="no"><input type="hidden" id="share-number" name="share_number" value="no"><small id="caller-id-message" aria-live="polite">Numbers assigned to other users require transfer confirmation.</small><small>Owners can be created without a number (they only watch the team). Agents need a number.</small></div>
  </section>
  <section class="user-panel"><div class="panel-title"><span class="panel-icon">▤</span><div><h2>Subscription & Payment</h2><p>Manage plan and PKR payments</p></div></div>
  <div class="field"><label style="display:flex;gap:10px;align-items:center"><input type="checkbox" name="is_demo" value="true" id="demoTrial" style="width:auto"> 1-hour demo / free trial</label><small>Trial starts on first successful login. Calling access expires after 60 minutes.</small></div>
@@ -57,7 +57,7 @@
     const account = opt.dataset.account;
     const providerName = opt.textContent.trim();
     document.getElementById('provider-value').value = provider;
-    label.textContent = 'Caller ID · ' + providerName + ' Numbers';
+    if(!manualMode){label.textContent = 'Caller ID · ' + providerName + ' Numbers';}
     select.replaceChildren(new Option('Loading ' + providerName + ' numbers...', ''));
     message.textContent = 'Numbers assigned to other users require transfer confirmation.';
     callerIds = [];
@@ -92,7 +92,27 @@
       box.appendChild(chip);
     });
   }).catch(() => { document.getElementById('lines-status').textContent = ''; });
-  providerSelect.addEventListener('change', () => { confirmedNumber = ''; confirmation.value = 'no'; loadCallerIds(); });
+  const manualInput = document.getElementById('caller-manual');
+  const manualToggle = document.getElementById('caller-manual-toggle');
+  let manualMode = false;
+  function applyManual() {
+    const opt = providerSelect.selectedOptions[0];
+    const forced = opt && opt.dataset.manual === '1';
+    const on = manualMode || forced;
+    manualInput.hidden = !on; manualInput.disabled = !on;
+    select.hidden = on; select.disabled = on;
+    manualToggle.textContent = on ? 'Pick from list' : '✎ Type manually';
+    manualToggle.style.display = forced ? 'none' : '';
+    if (on) { label.textContent = 'Caller ID (type the number)'; message.textContent = 'For EchoDial the number must be an approved CLI.'; }
+  }
+  manualToggle.addEventListener('click', (e) => { e.preventDefault(); manualMode = !manualMode; applyManual(); });
+  providerSelect.addEventListener('change', () => {
+    confirmedNumber = ''; confirmation.value = 'no';
+    const opt = providerSelect.selectedOptions[0];
+    document.getElementById('provider-value').value = opt.dataset.provider;
+    if (opt.dataset.manual === '1') { manualMode = false; applyManual(); }
+    else { manualMode = false; applyManual(); loadCallerIds(); }
+  });
   const shareInput = document.getElementById('share-number');
   // Same company as the number's current users? Then the number can be shared.
   function sameCompany(item) {
@@ -134,8 +154,10 @@
   form.addEventListener('submit', event => {
     const reseller = typeSel.value === 'reseller';
     const needsNumber = !reseller && modeSel.value === 'existing' && roleSel.value === 'agent';
+    const manualVal = (!manualInput.disabled && manualInput.value.trim()) ? manualInput.value.trim() : '';
+    if (manualVal) return;   // typed a number manually: let it submit as-is
     if (reseller || !select.value) {
-      if (needsNumber) { event.preventDefault(); message.textContent = 'Agents need a Caller ID. Select a number.'; select.focus(); }
+      if (needsNumber) { event.preventDefault(); message.textContent = 'Agents need a Caller ID. Select or type a number.'; }
       return;
     }
     const selected = callerIds.find(item => item.number === select.value);
