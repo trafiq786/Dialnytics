@@ -483,9 +483,18 @@ function markEnded(reason) {
         session.on('failed', (e) => {
             const code = (e && e.message && e.message.status_code) || 0;
             shim.cause = (e && e.cause) || '';
-            finish(code === 486 ? 'Busy' : (code === 603 ? 'Call declined' : 'Call ended'), code);
+            let label = code === 486 ? 'Busy' : (code === 603 ? 'Call declined' : 'Call ended');
+            if (IS_ADMIN && (code || shim.cause)) label += ' — SIP ' + (code || '?') + (shim.cause ? ' ' + shim.cause : '');
+            finish(label, code);
         });
-        session.on('ended', () => finish('Call ended'));
+        session.on('ended', (e) => {
+            const code = (e && e.message && e.message.status_code) || 0;
+            const cause = (e && e.cause) || '';
+            const who = e && e.originator ? e.originator : '';   // 'remote' = other side hung up
+            let label = 'Call ended';
+            if (IS_ADMIN && (code || cause || who)) label += ' — ' + (code ? 'SIP ' + code + ' ' : '') + cause + (who ? ' [' + who + ']' : '');
+            finish(label, code);
+        });
         return shim;
     }
 
