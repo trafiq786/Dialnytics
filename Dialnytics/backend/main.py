@@ -4705,9 +4705,11 @@ async def _toggle_switch(request, email, column, name):
             row = cur.fetchone()
     if not row:
         return fail("User not found")
-    if (row["provider"] or "telnyx") != "telnyx":
-        return fail(f"{name} is only for Telnyx lines")
     turn_on = not bool(row["cur"])
+    # Advanced calling / Live listening route calls through the Telnyx server.
+    # Turning them ON is Telnyx-only; turning OFF is always allowed (clears a stale flag).
+    if turn_on and (row["provider"] or "telnyx") != "telnyx":
+        return fail(f"{name} is only for Telnyx lines")
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(f"UPDATE public.dialnytics_users SET {column}=%s WHERE id=%s", (turn_on, row["id"]))

@@ -96,3 +96,23 @@ phir Render py deploy kar dein.
   py rahoge. Is case mein EchoDial (ConnexCS) support se bol
   dena ke "attended transfer / REFER with Replaces" enable
   kar dein. Transfer aur Conference is par depend nahi karte.
+
+
+-----------------------------------------------------------
+  FIX (is update mein shamil): "Advanced calling is only
+  for Telnyx lines" wala message
+-----------------------------------------------------------
+  EchoDial user ko edit karte waqt "Advanced calling" aur
+  "Live listening" ab khud disabled dikhte hain — kyunke ye
+  sirf Telnyx ki server-routing features hain. EchoDial py
+  transfer unke baghair hi chalta hai, is liye ab wo error
+  nahi aayega.
+
+  "Leave call" checkbox EchoDial k liye ON kiya ja sakta hai.
+
+  (Agar kisi EchoDial user py pehle se Advanced calling on
+  tha, to save karne py wo khud khamoshi se off ho jayega —
+  koi error nahi.)
+
+  File: frontend/templates/users.html bhi is update mein
+  shamil hai.

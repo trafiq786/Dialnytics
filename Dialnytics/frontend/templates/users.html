@@ -291,8 +291,12 @@ aside#userDrawer.user-drawer.open{transform:translate(-50%,-50%) scale(1);opacit
   $('editName').value=u.name;$('editEmail').value=u.email;$('editPlan').value=u.plan||'';$('editRenewal').value=u.renewal||'';
   $('chkRecording').checked=!!u.recording;$('chkPower').checked=!!u.power;
   const tw=u.provider==='twilio';
+  const echo=u.provider==='echodial';
   $('chkSms').checked=!!u.sms;$('chkSms').disabled=!u.number;$('smsHint').textContent=(u.number?'Text messages from the user\'s number':'Needs a calling number');
-  $('chkLeave').checked=!!u.leave;$('chkLeave').disabled=tw;$('leaveHint').textContent=tw?'Telnyx lines only':'Leave a 3-way call while the other two keep talking. Outgoing calls also need Advanced calling. Calls after leaving are billed to this account.';$('chkLive').checked=!!u.live;$('chkLive').disabled=tw;$('liveHint').textContent=tw?'Telnyx lines only':'You can hear, whisper or join this user\'s outgoing calls. No transfer for the agent. User must refresh the dialer once. (+$0.002/min)';$('chkAdv').checked=!!u.adv;$('chkAdv').disabled=tw;$('advHint').textContent=tw?'Telnyx lines only':'Transfer outgoing calls (user must refresh the dialer)';
+  // Leave call: Telnyx and EchoDial. Advanced calling / Live listening: Telnyx only.
+  $('chkLeave').checked=!!u.leave;$('chkLeave').disabled=tw;$('leaveHint').textContent=tw?'Telnyx lines only':(echo?'Leave a 3-way call while the other two keep talking. Works on EchoDial. Calls after leaving are billed to this account.':'Leave a 3-way call while the other two keep talking. Outgoing calls also need Advanced calling. Calls after leaving are billed to this account.');
+  $('chkLive').checked=!!u.live;$('chkLive').disabled=tw||echo;$('liveHint').textContent=(tw||echo)?'Telnyx lines only':'You can hear, whisper or join this user\'s outgoing calls. No transfer for the agent. User must refresh the dialer once. (+$0.002/min)';
+  $('chkAdv').checked=!!u.adv&&!echo;$('chkAdv').disabled=tw||echo;$('advHint').textContent=tw?'Telnyx lines only':(echo?'Not needed on EchoDial — transfer already works on these lines':'Transfer outgoing calls (user must refresh the dialer)');
   $('creditsInput').value=(u.credits===''||u.credits==null)?'':u.credits;
   $('creditsState').textContent=(u.credits===''||u.credits==null)?'· now unlimited':('· '+u.credits+' left');
   const zs=(u.zones||'').split(',');$('zoneUS').checked=zs.includes('US');$('zoneUK').checked=zs.includes('UK');
