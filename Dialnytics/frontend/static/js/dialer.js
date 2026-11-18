@@ -961,27 +961,22 @@ function hangup() {
         box.innerHTML = '<p class="xfer-empty">Loading team...</p>';
         const outgoing = activeCall && !String(activeCall.direction || '').toLowerCase().startsWith('in');
         const twilioLine = !!(activeCall && activeCall._twilio);
-        const echoLine = !!(activeCall && activeCall._echo);
-        if (echoLine) pickerNote('Pick a teammate and the caller is moved to them (your side ends). You can also tap "Transfer to a number" to send the caller to any phone number.');
-        else if (twilioLine) pickerNote('Pick a teammate. The caller is moved to them right away and your side of the call ends. If they do not answer, the caller can leave them a voicemail.');
+        if (twilioLine) pickerNote('Pick a teammate. The caller is moved to them right away and your side of the call ends. If they do not answer, the caller can leave them a voicemail.');
         else if (outgoing && !XFER_OUT) pickerNote('Outgoing calls can be transferred after the admin turns on Advanced calling for your account. Incoming calls can be transferred now.', true);
         else pickerNote('Pick a teammate. If they are on another call, the caller hears hold music and the call goes to them as soon as they are free (max 3 minutes).');
         try {
-            const url = echoLine ? '/api/echodial/transfer/targets'
-                      : (twilioLine ? '/api/twilio/transfer/targets' : '/api/transfer/targets');
-            const res = await fetch(url, { cache: 'no-store' });
+            const res = await fetch(twilioLine ? '/api/twilio/transfer/targets' : '/api/transfer/targets', { cache: 'no-store' });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || 'Could not load the team');
             const agents = data.agents || [];
             const labels = { free: 'Available', busy: 'On a call · will wait', offline: 'Offline' };
             box.innerHTML = agents.length ? agents.map((a) =>
-                '<button type="button" class="xfer-agent" data-id="' + esc(a.id) + '" data-name="' + esc(a.name) + '" data-number="' + esc(a.number || '') + '"' + (a.status === 'offline' ? ' disabled' : '') + '>' +
+                '<button type="button" class="xfer-agent" data-id="' + esc(a.id) + '" data-name="' + esc(a.name) + '"' + (a.status === 'offline' ? ' disabled' : '') + '>' +
                 '<div class="call-avatar">' + esc((a.name || '?').trim().charAt(0).toUpperCase()) + '</div>' +
                 '<div class="call-meta"><strong>' + esc(a.name) + '</strong><span><i class="xfer-dot ' + esc(a.status) + '"></i>' + esc(labels[a.status] || a.status) + '</span></div></button>'
             ).join('') : '<p class="xfer-empty">No other agents in your company yet.</p>';
             box.querySelectorAll('.xfer-agent:not([disabled])').forEach((b) => b.addEventListener('click', () => {
-                if (echoLine) startTransfer({ to_number: b.dataset.number, to_name: b.dataset.name }, b.dataset.name);
-                else startTransfer({ to_user: b.dataset.id }, b.dataset.name);
+                startTransfer({ to_user: b.dataset.id }, b.dataset.name);
             }));
         } catch (err) {
             box.innerHTML = '<p class="xfer-empty">' + esc(err.message) + '</p>';
@@ -1001,7 +996,6 @@ function hangup() {
         if (fromPicker) pickerNote('Transferring to ' + (name || 'agent') + '...');
         else setStatus('Starting transfer...');
         if (call._twilio) return twilioTransfer(call, body, name, fromPicker);
-        if (call._echo) return echoTransfer(call, body, name, fromPicker);
         let data = {};
         try {
             const res = await fetch('/api/transfer', {
@@ -1045,52 +1039,6 @@ function hangup() {
                 markEnded('Transferred to ' + (name || 'agent'));
             }
         }, 1200);
-    }
-    // EchoDial (browser SIP): blind transfer with a SIP REFER. The carrier moves
-    // the caller to the new number and then drops our side of the call.
-    async function echoTransfer(call, body, name, fromPicker) {
-        const session = call._session;
-        const number = String(body.to_number || '').replace(/[^\d]/g, '');
-        if (!session || !number) {
-            const msg = 'Transfer needs a valid number';
-            if (fromPicker) pickerNote(msg, true); else setStatus(msg, 'var(--danger)');
-            return;
-        }
-        const target = 'sip:' + number + '@' + echoDomain;
-        const label = name || showNum(number);
-        if (fromPicker) pickerNote('Transferring to ' + label + '...');
-        else setStatus('Transferring to ' + label + '...');
-        let done = false;
-        const finishXfer = () => {
-            if (done) return; done = true;
-            composeMode = '';
-            setStatus('Transferred to ' + label);
-            if (activeCall === call && !ended) {
-                try { call.hangup(); } catch (e) {}
-                markEnded('Transferred to ' + label);
-            }
-        };
-        const failXfer = (why) => {
-            if (done) return; done = true;
-            const msg = (why || 'Transfer did not go through') + ' · the caller is still with you';
-            if (fromPicker) pickerNote(msg, true);
-            else { showInCall(legNumber(call) || number); setStatus(msg, 'var(--danger)'); }
-        };
-        try {
-            session.refer(target, {
-                eventHandlers: {
-                    accepted: () => finishXfer(),   // NOTIFY 200: the new party answered
-                    failed: (e) => failXfer(e && e.status_code ? 'Call rejected (' + e.status_code + ')' : 'Transfer failed')
-                }
-            });
-            composeMode = '';
-            showInCall(legNumber(call) || number);
-            try { session.once('ended', () => finishXfer()); } catch (e) {}
-            // Some trunks move the call without a NOTIFY; drop our side after a grace period.
-            setTimeout(() => { if (!done && activeCall === call && !ended) finishXfer(); }, 20000);
-        } catch (err) {
-            failXfer(err && err.message);
-        }
     }
     function renderXfer(t) {
         const bar = document.getElementById('xferBar');
@@ -1452,9 +1400,8 @@ function hangup() {
         if (!LEAVE_OK || !activeCall || activeCall._twilio || xfer || ended) return null;
         const legs = [activeCall].concat(confCalls, heldCalls);
         if (legs.length !== 2) return null;
-        // Telnyx outgoing calls are only server-controlled with Advanced calling.
-        // EchoDial (browser SIP) controls its own legs, so no Advanced calling needed.
-        if (!ADV && !activeCall._echo && legs.some((c) => !String(c.direction || '').toLowerCase().startsWith('in'))) return null;
+        // Outgoing calls are only server-controlled with Advanced calling.
+        if (!ADV && legs.some((c) => !String(c.direction || '').toLowerCase().startsWith('in'))) return null;
         return legs;
     }
     function syncLeaveBtn() {
@@ -1468,45 +1415,6 @@ function hangup() {
     function showNum(n) {
         return (window.DNNumber && window.DNNumber.pretty && n) ? window.DNNumber.pretty(n) : (n || 'Caller');
     }
-    // EchoDial (browser SIP) leave call: an attended SIP transfer. We tell leg A
-    // to talk straight to leg B (Replaces leg B's dialog), so the carrier joins the
-    // two callers and drops us. Needs REFER-with-Replaces support on the SIP trunk.
-    async function echoLeave(legs) {
-        const a = legs[0], b = legs[1];
-        const sa = a && a._session, sb = b && b._session;
-        if (!sa || !sb || !sb.remote_identity) return setStatus('Leave call is not ready on this line', 'var(--danger)');
-        const btn = document.getElementById('leaveBtn');
-        if (btn) btn.disabled = true;
-        setStatus('Connecting them...');
-        let left = false;
-        const bye = () => {
-            if (left) return; left = true;
-            teardownMixer();
-            [a, b].forEach((c) => { c._leaving = true; detachLegAudio(c); });
-            confCalls.splice(0); heldCalls.splice(0); syncHeld();
-            [a, b].forEach((c) => { try { if (c.hangup) c.hangup(); } catch (e) {} });
-            markEnded('You left · they keep talking');
-        };
-        const fail = (why) => {
-            if (left) return;
-            if (btn) btn.disabled = false;
-            [a, b].forEach((c) => { c._leaving = false; });
-            setStatus('Could not connect them (' + (why || 'no reply') + '). You are still on the call.', 'var(--danger)');
-        };
-        try {
-            sa.refer(sb.remote_identity.uri, {
-                replaces: sb,
-                eventHandlers: {
-                    accepted: () => bye(),
-                    failed: (e) => fail(e && e.status_code ? 'rejected ' + e.status_code : 'rejected')
-                }
-            });
-            // If the trunk bridges them without a NOTIFY, it just BYEs our legs.
-            try { sa.once('ended', bye); sb.once('ended', bye); } catch (e) {}
-        } catch (err) {
-            fail(err && err.message);
-        }
-    }
     async function leaveCall() {
         let legs = leaveTargets();
         if (!legs) return setStatus('Leave call works when exactly two other people are on the call', 'var(--danger)');
@@ -1517,7 +1425,6 @@ function hangup() {
         if (!ok) return;
         legs = leaveTargets();
         if (!legs) return setStatus('The call changed. Try again.', 'var(--danger)');
-        if (legs[0]._echo) return echoLeave(legs);
         const btn = document.getElementById('leaveBtn');
         if (btn) btn.disabled = true;
         setStatus('Connecting them...');

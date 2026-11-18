@@ -3796,34 +3796,6 @@ async def echodial_token(request: Request):
                         headers={"Cache-Control": "no-store"})
 
 
-@app.get("/api/echodial/transfer/targets")
-@_customer_safe
-async def echodial_transfer_targets(request: Request):
-    """Teammates an EchoDial user can transfer to. Browser-side transfer is a
-    SIP REFER to the teammate's own number, so we return each teammate's DID.
-    No live presence on a browser SIP line, so everyone shows as available."""
-    user = get_current_user(request)
-    if not user:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    if (user.get("provider") or "telnyx") != "echodial":
-        raise HTTPException(status_code=409, detail="This account does not use EchoDial")
-    out = []
-    if user.get("account_id"):
-        with db_connect() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    """SELECT id, name, email, phone_number
-                         FROM public.dialnytics_users
-                        WHERE account_id=%s AND is_active AND id<>%s
-                          AND COALESCE(phone_number,'') <> ''
-                        ORDER BY lower(name)""",
-                    (user["account_id"], user["id"]))
-                for r in cur.fetchall():
-                    out.append({"id": str(r["id"]), "name": r["name"] or r["email"],
-                                "number": r["phone_number"], "status": "free"})
-    return JSONResponse({"agents": out}, headers={"Cache-Control": "no-store"})
-
-
 @app.get("/api/twilio-token")
 @_customer_safe
 async def twilio_token(request: Request):
@@ -4705,11 +4677,9 @@ async def _toggle_switch(request, email, column, name):
             row = cur.fetchone()
     if not row:
         return fail("User not found")
-    turn_on = not bool(row["cur"])
-    # Advanced calling / Live listening route calls through the Telnyx server.
-    # Turning them ON is Telnyx-only; turning OFF is always allowed (clears a stale flag).
-    if turn_on and (row["provider"] or "telnyx") != "telnyx":
+    if (row["provider"] or "telnyx") != "telnyx":
         return fail(f"{name} is only for Telnyx lines")
+    turn_on = not bool(row["cur"])
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(f"UPDATE public.dialnytics_users SET {column}=%s WHERE id=%s", (turn_on, row["id"]))
