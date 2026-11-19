@@ -61,11 +61,31 @@ templates.env.globals["brand_icon"] = "/static/img/dialnytics-favlogo.png"
 # Product tour on the marketing website, linked from the sign-in page (override with PRODUCT_TOUR_URL).
 templates.env.globals["tour_url"] = os.getenv("PRODUCT_TOUR_URL", "https://dialnytics.uk/product/tour/")
 
+# Admin-added SIP providers' WSS hosts, for the CSP connect-src allowlist.
+# Cached ~60s so a newly added provider is allowed within a minute without a restart.
+_sip_csp_cache = {"val": "", "ts": 0.0}
+def sip_csp_extra():
+    now = time.time()
+    if now - _sip_csp_cache["ts"] > 60:
+        parts, seen = [], set()
+        try:
+            for p in sip_providers_all():
+                host = _sip_domain_from_wss(p.get("wss"))
+                if host and host not in seen:
+                    seen.add(host)
+                    parts.append("wss://" + host + " wss://" + host + ":*")
+        except Exception:
+            pass
+        _sip_csp_cache["val"] = " ".join(parts)
+        _sip_csp_cache["ts"] = now
+    return _sip_csp_cache["val"]
+
 # Security headers (CSP etc.) and CSRF protection for every form and fetch.
 app.add_middleware(
     vh.SecurityMiddleware,
     trusted_hosts=[h for h in os.getenv("TRUSTED_HOSTS", "").split(",") if h.strip()],
     report_only=vh.env_flag("CSP_REPORT_ONLY", False),
+    csp_extra=sip_csp_extra,
 )
 
 # ==================== CONFIG (Telnyx) ====================
@@ -5842,6 +5862,7 @@ def sip_provider_create(request: Request, name: str = Form(...), wss: str = Form
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO public.sip_providers(name,wss,sip_domain,username,password)
                            VALUES (%s,%s,%s,%s,%s)""", (name, wss, sip_domain, username, password))
+    _sip_csp_cache["ts"] = 0.0   # allow the new provider's WSS host in CSP right away
     log.info("SIP provider added: %s (%s)", name, wss)
     return RedirectResponse("/sip-providers?msg=Provider+added", status_code=303)
 
@@ -5854,6 +5875,7 @@ def sip_provider_delete(request: Request, pid: int):
             if (cur.fetchone() or {}).get("n"):
                 return RedirectResponse("/sip-providers?err=Still+in+use+by+users;+move+them+first", status_code=303)
             cur.execute("DELETE FROM public.sip_providers WHERE id=%s", (pid,))
+    _sip_csp_cache["ts"] = 0.0
     refresh_users()
     return RedirectResponse("/sip-providers?msg=Provider+deleted", status_code=303)
 

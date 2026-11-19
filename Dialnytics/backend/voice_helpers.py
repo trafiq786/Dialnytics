@@ -272,7 +272,12 @@ CSRF_FIELD = "csrf_token"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 
 
-def build_csp():
+def build_csp(extra_connect=""):
+    connect = ("connect-src 'self' wss://*.telnyx.com https://*.telnyx.com "
+               "wss://*.twilio.com https://*.twilio.com wss://*.echodial.ai "
+               "wss://*.echodial.ai:* https://*.echodial.ai https://*.echodial.ai:*")
+    if extra_connect:
+        connect = connect + " " + extra_connect.strip()
     return "; ".join([
         "default-src 'self'",
         # Existing templates use inline scripts and onclick handlers.
@@ -281,7 +286,7 @@ def build_csp():
         "font-src 'self' https://fonts.gstatic.com data:",
         "img-src 'self' data: blob:",
         "media-src 'self' blob: https://sdk.twilio.com https://media.twiliocdn.com",
-        "connect-src 'self' wss://*.telnyx.com https://*.telnyx.com wss://*.twilio.com https://*.twilio.com wss://*.echodial.ai wss://*.echodial.ai:* https://*.echodial.ai https://*.echodial.ai:*",
+        connect,
         "worker-src 'self' blob:",
         "frame-ancestors 'none'",
         "base-uri 'self'",
@@ -292,12 +297,16 @@ def build_csp():
 
 class SecurityMiddleware:
     def __init__(self, app, exempt_prefixes=("/webhooks/", "/twilio/", "/static/"),
-                 trusted_hosts=None, report_only=False, max_form_bytes=2 * 1024 * 1024):
+                 trusted_hosts=None, report_only=False, max_form_bytes=2 * 1024 * 1024,
+                 csp_extra=None):
         self.app = app
         self.exempt = tuple(exempt_prefixes)
         self.trusted_hosts = {h.strip().lower() for h in (trusted_hosts or []) if h.strip()}
         self.report_only = report_only
         self.max_form_bytes = max_form_bytes
+        # csp_extra: optional callable returning extra connect-src sources (e.g. admin-added
+        # SIP providers' WSS hosts), so new providers are allowed without a code change.
+        self.csp_extra = csp_extra
         self.csp = build_csp()
 
     @staticmethod
@@ -416,8 +425,16 @@ class SecurityMiddleware:
                 _log.info("CSRF token missing but same-origin verified: %s %s", method, path)
 
         csp_header = b"content-security-policy-report-only" if self.report_only else b"content-security-policy"
+        csp_value = self.csp
+        if self.csp_extra:
+            try:
+                extra = self.csp_extra()
+                if extra:
+                    csp_value = build_csp(extra)
+            except Exception:
+                pass
         security = [
-            (csp_header, self.csp.encode()),
+            (csp_header, csp_value.encode()),
             (b"x-content-type-options", b"nosniff"),
             (b"x-frame-options", b"DENY"),
             (b"referrer-policy", b"strict-origin-when-cross-origin"),
