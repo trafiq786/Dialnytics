@@ -273,7 +273,9 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 
 
 def build_csp(extra_connect=""):
-    connect = ("connect-src 'self' wss://*.telnyx.com https://*.telnyx.com "
+    # 'wss:' allows browser-SIP (WebRTC) to any secure WebSocket host, so admin-added
+    # SIP providers work without listing each one. Media (RTP) is WebRTC, not connect-src.
+    connect = ("connect-src 'self' wss: wss://*.telnyx.com https://*.telnyx.com "
                "wss://*.twilio.com https://*.twilio.com wss://*.echodial.ai "
                "wss://*.echodial.ai:* https://*.echodial.ai https://*.echodial.ai:*")
     if extra_connect:
