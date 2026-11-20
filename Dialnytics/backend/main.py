@@ -6006,8 +6006,9 @@ def local_presence_toggle(request: Request, user_id: str = Form(...), on: str = 
         with db_connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE public.dialnytics_users SET local_presence=%s WHERE id=%s",
-                            (val, int(user_id)))
+                            (val, user_id))   # id is a uuid — pass the string as-is
     except Exception:
+        log.exception("Local presence toggle failed for %s", user_id)
         return RedirectResponse("/local-presence?err=Could+not+update+user", status_code=303)
     refresh_users()
     return RedirectResponse("/local-presence?msg=User+updated", status_code=303)
