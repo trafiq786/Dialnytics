@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Local Presence — Dialnytics{% endblock %}
+{% block page_title %}Local Presence{% endblock %}
+{% block content %}
+<style>
+.lp-grid{display:grid;grid-template-columns:minmax(0,440px) minmax(0,1fr);gap:22px;align-items:start}
+@media (max-width:900px){.lp-grid{grid-template-columns:1fr}}
+.lp-stat{display:flex;align-items:baseline;gap:10px;margin:4px 0 14px}
+.lp-stat b{font-size:30px;font-weight:800;color:var(--text)}
+.lp-stat span{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-muted);font-weight:700}
+.lp-areas{display:flex;flex-wrap:wrap;gap:7px;margin:4px 0 16px}
+.lp-chip{display:inline-flex;gap:6px;align-items:center;background:rgba(99,102,241,.14);color:#a5b4fc;border-radius:999px;padding:4px 11px;font-size:12px;font-weight:600}
+.lp-chip b{color:#c7d2fe}
+.lp-drop{border:1.5px dashed var(--border);border-radius:12px;padding:16px;text-align:center}
+.lp-drop input[type=file]{width:100%;font:inherit;color:var(--text-secondary)}
+.lp-table{width:100%;border-collapse:collapse}
+.lp-table th,.lp-table td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--border);font-size:13.5px;vertical-align:middle}
+.lp-table th{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-muted);font-weight:700}
+.lp-table tbody tr:last-child td{border-bottom:none}
+.lp-mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text-secondary)}
+.lp-on{display:inline-block;padding:3px 10px;border-radius:999px;font-weight:700;font-size:11.5px;background:rgba(34,197,94,.15);color:#86efac}
+.lp-off{display:inline-block;padding:3px 10px;border-radius:999px;font-weight:700;font-size:11.5px;background:rgba(148,163,184,.14);color:var(--text-muted)}
+.lp-btn{border:1px solid var(--border);background:var(--surface-2,rgba(255,255,255,.03));color:var(--text);border-radius:9px;padding:6px 13px;font:inherit;font-weight:600;cursor:pointer}
+.lp-btn:hover{border-color:#6366f1}
+.lp-btn.danger{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.35);color:#fca5a5}
+.lp-note{margin-top:16px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.28);border-radius:12px;padding:12px 14px;font-size:12.5px;color:var(--text-secondary);line-height:1.55}
+.lp-foot{font-size:12.5px;color:var(--text-muted);margin:14px 0 0;line-height:1.5}
+.lp-skip td{color:var(--text-muted);padding:22px 12px;text-align:center}
+</style>
+
+<section class="users-hero">
+  <div><span class="eyebrow">CALLING</span><h1>Local Presence</h1>
+  <p>Upload a pool of your <b>own</b> caller-IDs. When a user has Local Presence on, each outbound EchoDial call automatically uses a number whose <b>area code matches the number being dialled</b> — so the call looks local. No match in the pool → the user's own number is used.</p></div>
+  <a class="btn btn-secondary" style="width:auto;flex:0 0 auto" href="/sip-providers">SIP Providers</a>
+</section>
+
+{% if err %}<div class="error-msg">{{ err }}</div>{% endif %}
+{% if msg %}<div class="success-msg">{{ msg }}</div>{% endif %}
+
+<div class="lp-grid">
+  <section class="user-panel">
+    <div class="panel-title"><span class="panel-icon">📍</span><div><h2>Number pool</h2><p>Your owned caller-IDs</p></div></div>
+
+    <div class="lp-stat"><b>{{ "{:,}".format(pool) }}</b><span>numbers in pool</span></div>
+
+    {% if areas %}
+    <div class="lp-areas">
+      {% for a in areas %}<span class="lp-chip">{{ a.area_code }} <b>{{ a.n }}</b></span>{% endfor %}
+      <span class="lp-chip" style="background:none;color:var(--text-muted)">top area codes</span>
+    </div>
+    {% endif %}
+
+    <form method="post" action="/local-presence/import" enctype="multipart/form-data" class="user-form">
+      <div class="field"><label>Import CSV (one number per row)</label>
+        <div class="lp-drop"><input type="file" name="file" accept=".csv,.txt" required></div>
+        <small>Sirf 10-digit US numbers (ya 1 ke saath 11-digit). Area code khud number se nikal lega. Duplicates skip. Baar baar import kar sakte ho — pool mein add hota rahega.</small>
+      </div>
+      <button class="btn btn-primary" type="submit" style="width:auto;flex:0 0 auto;margin-top:4px">Import numbers</button>
+    </form>
+
+    <div class="lp-note"><b>Zaroori:</b> ye numbers wahi hon jo tum <b>own</b> karte ho (ya jin ke use ki authorization ho). Kisi aur ke / random numbers ko caller-ID banana illegal spoofing hai. Carrier par bhi ye CLIs approved honi chahiye.</div>
+
+    <form method="post" action="/local-presence/clear" onsubmit="return confirm('Clear the entire pool? This removes all {{ pool }} numbers.')" style="margin-top:12px">
+      <button class="lp-btn danger" type="submit">Clear pool</button>
+    </form>
+  </section>
+
+  <section class="user-panel">
+    <div class="panel-title"><span class="panel-icon">👤</span><div><h2>Users</h2><p>Turn Local Presence on per user — only their dialer changes, everyone else stays normal</p></div></div>
+    <div class="table-scroll"><table class="lp-table">
+      <thead><tr><th>User</th><th>Number</th><th>Provider</th><th>Local Presence</th><th></th></tr></thead>
+      <tbody>
+      {% for u in users %}
+      <tr>
+        <td><b>{{ u.name or u.email }}</b><div class="lp-mono" style="color:var(--text-muted)">{{ u.email }}</div></td>
+        <td class="lp-mono">{{ u.phone_number or '—' }}</td>
+        <td class="lp-mono">{{ u.provider or 'telnyx' }}</td>
+        <td>{% if u.local_presence %}<span class="lp-on">ON</span>{% else %}<span class="lp-off">off</span>{% endif %}</td>
+        <td style="white-space:nowrap">
+          <form method="post" action="/local-presence/toggle">
+            <input type="hidden" name="user_id" value="{{ u.id }}">
+            <input type="hidden" name="on" value="{{ 0 if u.local_presence else 1 }}">
+            <button class="lp-btn" type="submit">{{ 'Turn off' if u.local_presence else 'Turn on' }}</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr class="lp-skip"><td colspan="5">No users yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    <p class="lp-foot">Local Presence sirf <b>EchoDial</b> (browser SIP) users par lagta hai. Jis user par ON hoga, uske har call par destination ke area code ki matching owned CLI backend se chun kar bheji jayegi — foran, koi delay nahi. Match na mile to us user ka apna number use hoga.</p>
+  </section>
+</div>
+{% endblock %}

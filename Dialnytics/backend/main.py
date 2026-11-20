@@ -252,6 +252,38 @@ def echo_cfg_for(user):
                 "name": row["name"]}
     return dict(ECHODIAL, name="EchoDial")
 
+# ---- Local presence: pick one of the customer's OWN caller-IDs by area code ----
+def lp_area_of(dialed):
+    """The US area code (first 3 of the 10-digit national number) from any dialed form."""
+    d = "".join(ch for ch in str(dialed or "") if ch.isdigit())
+    if len(d) == 11 and d.startswith("1"):
+        d = d[1:]
+    return d[:3] if len(d) >= 10 else ""
+
+def lp_pick_cli(area):
+    """A random OWNED caller-ID whose area code matches `area`, or '' if the pool has none.
+    random() over the (indexed) matching rows gives rotation for free, with no delay."""
+    if not area:
+        return ""
+    try:
+        with db_connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT number FROM public.local_presence_clis "
+                            "WHERE area_code=%s ORDER BY random() LIMIT 1", (area,))
+                r = cur.fetchone()
+                return (r or {}).get("number") or ""
+    except Exception:
+        return ""
+
+def lp_pool_count():
+    try:
+        with db_connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT COUNT(*) n FROM public.local_presence_clis")
+                return (cur.fetchone() or {}).get("n") or 0
+    except Exception:
+        return 0
+
 # Private recording storage: Supabase Storage when configured, else the database.
 storage = vh.SupabaseStorage(os.getenv("SUPABASE_URL", ""),
                              os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
@@ -380,6 +412,7 @@ def _db_user(row):
         "call_countries": row.get("call_countries") or "",
         "twilio_account": tw_key(row.get("twilio_account") or "w1"),
         "sip_provider_id": row.get("sip_provider_id"),
+        "local_presence": bool(row.get("local_presence", False)),
         "twilio_in": bool(row.get("twilio_in", False)),
         "partner_plan": row.get("partner_plan") or "",
         "is_demo": bool(row.get("is_demo", False)),
@@ -566,6 +599,18 @@ CREATE TABLE IF NOT EXISTS public.sip_providers (
 );
 REVOKE ALL ON public.sip_providers FROM anon, authenticated;
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS sip_provider_id integer;
+-- 32: Local presence. A pool of the customer's OWN caller-IDs. When a user has
+--     local_presence on, an outbound echodial call picks a CLI from the pool whose
+--     area code matches the dialled number (falls back to the user's own number).
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS local_presence boolean NOT NULL DEFAULT false;
+CREATE TABLE IF NOT EXISTS public.local_presence_clis (
+    id serial PRIMARY KEY,
+    number text NOT NULL UNIQUE,
+    area_code text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_lp_area ON public.local_presence_clis (area_code);
+REVOKE ALL ON public.local_presence_clis FROM anon, authenticated;
 -- 16: single-leader lease so background workers run on ONE instance only
 --     (lets the app scale to several Render instances without double-ringing)
 CREATE TABLE IF NOT EXISTS public.worker_leader (
@@ -3900,6 +3945,22 @@ async def echodial_token(request: Request):
                         headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/pick-cli")
+@_customer_safe
+async def pick_cli(request: Request):
+    """Local presence: given the number about to be dialled, return the caller-ID to use.
+    If the user has local presence on, that is an OWNED number matching the destination
+    area code; otherwise (or if the pool has no match) it is the user's own number."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    fallback = (user.get("phone_number") or "").replace("+", "")
+    cli = fallback
+    if user.get("local_presence"):
+        cli = lp_pick_cli(lp_area_of(request.query_params.get("dest", ""))) or fallback
+    return JSONResponse({"cli": cli}, headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/twilio-token")
 @_customer_safe
 async def twilio_token(request: Request):
@@ -5878,6 +5939,78 @@ def sip_provider_delete(request: Request, pid: int):
     _sip_csp_cache["ts"] = 0.0
     refresh_users()
     return RedirectResponse("/sip-providers?msg=Provider+deleted", status_code=303)
+
+
+# ==================== LOCAL PRESENCE (owned caller-ID pool) ====================
+@app.get("/local-presence", response_class=HTMLResponse)
+def local_presence_page(request: Request):
+    admin = require_admin(request)
+    pool = lp_pool_count()
+    # area-code spread, for a quick sanity check after import
+    areas = []
+    try:
+        with db_connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT area_code, COUNT(*) n FROM public.local_presence_clis "
+                            "GROUP BY area_code ORDER BY n DESC LIMIT 12")
+                areas = cur.fetchall()
+                cur.execute("SELECT id,name,email,phone_number,provider,local_presence "
+                            "FROM public.dialnytics_users WHERE is_active AND role<>'admin' "
+                            "ORDER BY local_presence DESC, name")
+                users = cur.fetchall()
+    except Exception:
+        users = []
+    return templates.TemplateResponse(request=request, name="local_presence.html", context={
+        "user": admin, "pool": pool, "areas": areas, "users": users,
+        "msg": request.query_params.get("msg"), "err": request.query_params.get("err")})
+
+@app.post("/local-presence/import")
+async def local_presence_import(request: Request, file: UploadFile = File(...)):
+    require_admin(request)
+    try:
+        raw = (await file.read()).decode("utf-8", "ignore")
+    except Exception:
+        return RedirectResponse("/local-presence?err=Could+not+read+the+file", status_code=303)
+    seen, rows = set(), []
+    for line in raw.replace("\r", "\n").split("\n"):
+        d = "".join(ch for ch in line if ch.isdigit())
+        if len(d) == 11 and d.startswith("1"):
+            d = d[1:]
+        if len(d) != 10 or d in seen:
+            continue
+        seen.add(d)
+        rows.append((d, d[:3]))
+    before = lp_pool_count()
+    if rows:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.executemany("INSERT INTO public.local_presence_clis(number,area_code) "
+                                "VALUES (%s,%s) ON CONFLICT (number) DO NOTHING", rows)
+    added = lp_pool_count() - before
+    log.info("Local presence import: %d valid rows, %d new", len(rows), added)
+    return RedirectResponse(f"/local-presence?msg={len(rows)}+valid+numbers,+{added}+new+added", status_code=303)
+
+@app.post("/local-presence/clear")
+def local_presence_clear(request: Request):
+    require_admin(request)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM public.local_presence_clis")
+    return RedirectResponse("/local-presence?msg=Pool+cleared", status_code=303)
+
+@app.post("/local-presence/toggle")
+def local_presence_toggle(request: Request, user_id: str = Form(...), on: str = Form("")):
+    require_admin(request)
+    val = str(on).strip() in ("1", "on", "true", "yes")
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE public.dialnytics_users SET local_presence=%s WHERE id=%s",
+                            (val, int(user_id)))
+    except Exception:
+        return RedirectResponse("/local-presence?err=Could+not+update+user", status_code=303)
+    refresh_users()
+    return RedirectResponse("/local-presence?msg=User+updated", status_code=303)
 
 
 # ---- Admin: companies ----

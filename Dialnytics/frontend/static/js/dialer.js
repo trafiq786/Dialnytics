@@ -42,6 +42,7 @@ const input = document.getElementById('numberInput');
     const XFER_OUT = cfg.dataset.xfer === '1';   // Advanced calling: outgoing calls can be transferred
     const LEAVE_OK = cfg.dataset.leave === '1';     // admin allowed "Leave call" for this user
     const LEGTAG = cfg.dataset.legtag || '';
+    const LOCAL_PRESENCE = cfg.dataset.localpresence === '1';   // EchoDial: pick an owned CLI matching the destination area code
     // Other scripts (announcement popups) wait while a call is live.
     try { Object.defineProperty(window, 'dnOnCall', { configurable: true, get: () => !!(activeCall && !ended) }); } catch (e) {}
     // Countries this line may call (empty = no limit). US = +1, UK = +44.
@@ -866,7 +867,17 @@ function markEnded(reason) {
         try {
             if (PROVIDER === 'echodial') {
                 const target = 'sip:' + number.replace(/\D/g, '') + '@' + echoDomain;
-                const cli = (FROM || '').replace(/\D/g, '');
+                let cli = (FROM || '').replace(/\D/g, '');
+                // Local presence: use an owned CLI that matches the destination area code.
+                // One fast lookup (the fallback stays the user's own number), so no real delay.
+                if (LOCAL_PRESENCE) {
+                    try {
+                        const pr = await fetch('/api/pick-cli?dest=' + encodeURIComponent(number.replace(/\D/g, '')), { cache: 'no-store' });
+                        const pd = await pr.json();
+                        if (pd && pd.cli) cli = String(pd.cli).replace(/\D/g, '');
+                    } catch (e) { /* keep the user's own CLI on any hiccup */ }
+                    if (ended) { placing = false; return; }
+                }
                 const session = echoUA.call(target, {
                     mediaConstraints: { audio: true, video: false },
                     pcConfig: { iceServers: [] },
