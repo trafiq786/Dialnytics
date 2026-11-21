@@ -3957,7 +3957,13 @@ async def pick_cli(request: Request):
     fallback = (user.get("phone_number") or "").replace("+", "")
     cli = fallback
     if user.get("local_presence"):
-        cli = lp_pick_cli(lp_area_of(request.query_params.get("dest", ""))) or fallback
+        picked = lp_pick_cli(lp_area_of(request.query_params.get("dest", "")))
+        if picked:
+            # Pool numbers are US 10-digit; send E.164 with the country code (1),
+            # so the CLI matches the destination format and carriers don't reject it.
+            cli = picked if len(picked) == 11 and picked.startswith("1") else ("1" + picked)
+        else:
+            cli = fallback
     return JSONResponse({"cli": cli}, headers={"Cache-Control": "no-store"})
 
 
