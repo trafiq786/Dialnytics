@@ -62,6 +62,23 @@
     <button class="cm-btn" type="submit">Switch provider</button>
   </form>
   <script>(function(){var s=document.getElementById('switchProviderSel');if(!s)return;function sync(){var o=s.selectedOptions[0];document.getElementById('switchProviderValue').value=o.dataset.provider;document.getElementById('switchSipId').value=o.dataset.sip||'';}s.addEventListener('change',sync);sync();})();</script>
+  <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+  <h3 style="margin:0 0 6px;font-size:14px">Hybrid calling — inbound on Twilio</h3>
+  <p class="cm-muted" style="font-size:12px;margin:0 0 10px">Outbound calls us ke provider (SIP / EchoDial) se jati hain; ON karne par inbound calls <b>Twilio DID</b> par aati hain aur user ke dialer par ring hoti hain.</p>
+  <p class="cm-muted" style="margin:0 0 10px">Status:
+    {% if customer.twilio_in %}<span class="dn-pill" style="background:rgba(34,197,94,.15);color:#86efac">Hybrid ON (inbound Twilio)</span>
+    {% else %}<span class="dn-pill" style="background:rgba(148,163,184,.14)">Hybrid off</span>{% endif %}
+  </p>
+  {% if not twilio_ready %}
+  <p class="cm-muted" style="font-size:12px;color:#fcd34d;margin:0 0 10px">⚠️ Twilio server par configured nahi (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN) — hybrid inbound kaam nahi karega.</p>
+  {% elif customer.twilio_in and not hybrid_number_ok %}
+  <p class="cm-muted" style="font-size:12px;color:#fcd34d;margin:0 0 10px">⚠️ Is user ka number Twilio ka nahi lagta — hybrid ON hai par inbound tab aayega jab number Twilio ka ho. Upar se Twilio number assign karo.</p>
+  {% endif %}
+  <form method="post" action="/customers/{{ customer.email|urlencode }}/hybrid"
+        onsubmit="return confirm('{{ 'Turn hybrid OFF?' if customer.twilio_in else 'Turn hybrid ON? Inbound Twilio par aayega.' }}');">
+    <input type="hidden" name="on" value="{{ 0 if customer.twilio_in else 1 }}">
+    <button class="cm-btn" type="submit">{{ 'Turn hybrid OFF' if customer.twilio_in else 'Turn hybrid ON' }}</button>
+  </form>
 </section>
 <script>
 (function () {

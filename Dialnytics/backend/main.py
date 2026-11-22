@@ -1399,7 +1399,7 @@ def require_admin(request):
 def _customer_data(email):
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.provider,u.telnyx_account,u.twilio_account,u.sip_provider_id,u.account_id,u.plan_name,
+            cur.execute("""SELECT u.id,u.name,u.email,u.phone_number,u.provider,u.telnyx_account,u.twilio_account,u.sip_provider_id,u.twilio_in,u.account_id,u.plan_name,
                 u.plan_start,u.plan_renewal,u.created_at,u.is_active,u.is_demo,
                 u.last_paid_amount,u.recording_premium,u.contact_name,u.contact_phone,
                 u.contact_address,u.customer_notes,
@@ -1455,11 +1455,46 @@ def customer_detail(request:Request,email:str):
     except Exception:
         log.exception("Cost summary failed for customer")
         costs = None
+    number = c.get('phone_number') or ''
+    try:
+        hybrid_number_ok = bool(number) and number in twilio_number_accounts()
+    except Exception:
+        hybrid_number_ok = False
     return templates.TemplateResponse(request=request,name='customer_detail.html',context={
         'user':admin,'customer':c,'payments':payments,'costs':costs,
         'payments_json':json.dumps([{'pid':r['pid'],'pkr':float(r['amount_pkr'] or 0),'usd':float(r['amount_usd'] or 0),
                                     'method':r['method'] or '','reference':r['reference'] or ''} for r in payments]).replace('<','\\u003c'),
-        'twilio_ready':twilio_enabled()})
+        'twilio_ready':twilio_enabled(),'hybrid_number_ok':hybrid_number_ok})
+
+
+@app.post('/customers/{email}/hybrid')
+def customer_hybrid(request:Request, email:str, on:str=Form('')):
+    """Manually turn hybrid (inbound on Twilio) on/off for one user.
+    ON  -> twilio_in=true; agar number Twilio ka hai to webhook set + account move.
+    OFF -> twilio_in=false (inbound wapas provider ke number par)."""
+    require_admin(request)
+    from urllib.parse import quote
+    want = (on or '').strip() in ('1','on','true','yes')
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id,phone_number FROM public.dialnytics_users WHERE lower(email)=lower(%s) AND role<>'admin'",(email,))
+            row=cur.fetchone()
+            if not row: raise HTTPException(404,'User not found')
+            cur.execute("UPDATE public.dialnytics_users SET twilio_in=%s WHERE id=%s",(want,row['id']))
+    number=row['phone_number'] or ''
+    if want and number and twilio_enabled():
+        try:
+            acct=twilio_number_accounts().get(number)
+        except Exception:
+            acct=None
+        if acct:
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE public.dialnytics_users SET twilio_account=%s WHERE id=%s",(acct,row['id']))
+            _twilio_configure_number(number)
+    refresh_users()
+    log.info("Hybrid %s for %s (number %s)", "ON" if want else "OFF", email, number)
+    return RedirectResponse('/customers/'+quote(email,safe='')+'?saved=1',status_code=303)
 
 
 @app.post('/customers/{email}/update')

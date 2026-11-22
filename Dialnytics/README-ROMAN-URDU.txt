@@ -1,45 +1,45 @@
 ===========================================================
-  ALL-IN-ONE  —  Auto-invoice + Routing (switch + hybrid)
-  (deploy crash "No module named 'mailer'" ka fix)
+  HYBRID TOGGLE  —  har user ki detail mein manual ON/OFF
 ===========================================================
 
-KYA HUA THA
------------
-ROUTING.zip ki main.py `mailer` aur `auto_invoice` ko import karti hai, lekin
-wo 2 nayi files repo mein nahi gayi thin -> app boot par crash:
-   ModuleNotFoundError: No module named 'mailer'
+KYA BANA
+--------
+Ab hybrid sirf auto (number Twilio ka ho to) par nahi — har customer ki
+detail page par ek manual toggle hai:
 
-FIX = bas ye saari files ek saath daal do (yahan sab ikatthe hain).
+  Customers -> (koi user) -> "Number / Provider" card ke neeche:
+  "Hybrid calling — inbound on Twilio"
+     Status: Hybrid ON / off
+     [ Turn hybrid ON ]  ya  [ Turn hybrid OFF ]
+
+  ON  -> us user ka inbound Twilio DID par aayega (twilio_in = true). Agar
+         number Twilio ka hai to us ka voice webhook bhi khud app par set
+         ho jata hai.
+  OFF -> inbound wapas us ke apne provider number par.
+
+Note:
+- Yeh har provider ke user par dikhai deta hai (sirf echodial nahi).
+- Agar Twilio server par configured na ho, ya user ka number Twilio ka na
+  ho, to toggle ON to ho jayega par ek ⚠️ warning dikhayega ke inbound tab
+  tak nahi aayega jab tak number Twilio ka na ho. Upar "change number" se
+  Twilio number do.
 
 
-IN SAARI FILES KO APNE REPO MEIN ISI JAGAH RAKHO (replace/add)
---------------------------------------------------------------
-  backend/mailer.py                        (NAYA  <- ye missing tha)
-  backend/auto_invoice.py                  (NAYA  <- ye missing tha)
+BADLE FILES  (apne repo mein replace karo)
+------------------------------------------
   backend/main.py                          (BADLA)
-  frontend/templates/base.html             (BADLA)
-  frontend/templates/renewals.html         (NAYA)
-  frontend/templates/routing.html          (NAYA)
+  frontend/templates/customer_detail.html  (BADLA)
 
-Khaas tor par confirm karo ke  backend/mailer.py  aur  backend/auto_invoice.py
-repo mein mojood hain (yehi do reh gaye the). Phir Render par deploy -> app
-theek chalega.
+Ye ALL-IN-ONE.zip ke UPAR aati hain. backend/main.py ismein SAARE features
+(auto-invoice + routing + ab hybrid toggle) samete hue hai — yehi latest hai.
+Baqi files (mailer.py, auto_invoice.py, renewals.html, routing.html,
+base.html) pehle wali ALL-IN-ONE.zip se already lagi hui honi chahiye —
+unhe dobara daalne ki zaroorat nahi.
 
+DATABASE: koi nayi table nahi (twilio_in column pehle se mojood hai).
 
-DEPLOY KE BAAD CHECK
---------------------
-- App start ho jaye (crash nahi).
-- Sidebar mein 2 naye links: Finance -> "Renewals" (📅), Calling -> "Routing" (🔀).
-- Dono pages khul jayein.
-
-Baqi istemaal/test ki tafseel pehle wali 2 READMEs mein hai (AUTO-INVOICE aur
-ROUTING). Khulasa:
-  * Renewals: SMTP_USER + SMTP_PASS (Zoho app password) set karo, phir 1 test
-    customer par "Run now", phir "Auto-invoice ON".
-  * Routing: From/To provider -> "Switch all users" (target provider ACTIVE
-    ho). Hybrid ke liye "Re-sync hybrid".
-
-DATABASE: koi manual SQL nahi — app start par khud migrate ho jata hai
-(auto_invoice_log table + settings).
+TEST: ek user ki detail kholo -> "Turn hybrid ON" -> status ON ho jaye.
+Us ko Twilio number assign ho to us number par baahar se call karo ->
+dialer par ring aani chahiye. "Turn hybrid OFF" -> wapas normal.
 
 Sawal ho to batao.
