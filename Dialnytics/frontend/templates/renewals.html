@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Renewals — Dialnytics{% endblock %}
+{% block page_title %}Renewals{% endblock %}
+{% block content %}
+<style>
+.rn-grid{display:grid;grid-template-columns:minmax(0,420px) minmax(0,1fr);gap:22px;align-items:start}
+@media (max-width:900px){.rn-grid{grid-template-columns:1fr}}
+.rn-row{display:flex;align-items:center;gap:10px;margin:0 0 12px}
+.rn-row label{font-size:13px;color:var(--text-secondary);font-weight:600}
+.rn-pill{display:inline-block;padding:3px 10px;border-radius:999px;font-weight:700;font-size:11.5px}
+.rn-ok{background:rgba(34,197,94,.15);color:#86efac}
+.rn-bad{background:rgba(239,68,68,.12);color:#fca5a5}
+.rn-muted{background:rgba(148,163,184,.14);color:var(--text-muted)}
+.rn-table{width:100%;border-collapse:collapse}
+.rn-table th,.rn-table td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:middle}
+.rn-table th{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-muted);font-weight:700}
+.rn-table tbody tr:last-child td{border-bottom:none}
+.rn-mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text-secondary)}
+.rn-d{font-weight:800}.rn-d.soon{color:#fca5a5}.rn-d.near{color:#fcd34d}
+.rn-btn{border:1px solid var(--border);background:var(--surface-2,rgba(255,255,255,.03));color:var(--text);border-radius:9px;padding:7px 14px;font:inherit;font-weight:600;cursor:pointer}
+.rn-btn:hover{border-color:#6366f1}
+.rn-note{margin-top:14px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.28);border-radius:12px;padding:12px 14px;font-size:12.5px;color:var(--text-secondary);line-height:1.55}
+.rn-switch{margin:4px 0 16px}
+.rn-foot{font-size:12.5px;color:var(--text-muted);margin:14px 0 0;line-height:1.5}
+.rn-skip td{color:var(--text-muted);padding:22px 12px;text-align:center}
+.rn-num{width:70px}
+.rn-cron{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;word-break:break-all;background:var(--surface-2,rgba(255,255,255,.03));border:1px solid var(--border);border-radius:8px;padding:8px 10px;color:var(--text-secondary);margin-top:6px}
+</style>
+
+<section class="users-hero">
+  <div><span class="eyebrow">FINANCE</span><h1>Renewals &amp; auto-invoice</h1>
+  <p>Jis customer ki renewal date paas aati hai (default <b>3 din</b> pehle), system khud uska invoice bana ke uski email par PDF ke saath bhej deta hai. Per customer sirf ek baar per cycle — double nahi hota.</p></div>
+  <a class="btn btn-secondary" style="width:auto;flex:0 0 auto" href="/invoices">All invoices</a>
+</section>
+
+{% if err %}<div class="error-msg">{{ err }}</div>{% endif %}
+{% if msg %}<div class="success-msg">{{ msg }}</div>{% endif %}
+
+<div class="rn-grid">
+  <section class="user-panel">
+    <div class="panel-title"><span class="panel-icon">⚙️</span><div><h2>Settings</h2><p>Automatic renewal invoicing</p></div></div>
+
+    <div class="rn-row" style="margin-bottom:6px">
+      <span class="rn-pill {{ 'rn-ok' if smtp_ready else 'rn-bad' }}">{{ 'Email ready' if smtp_ready else 'Email OFF' }}</span>
+      {% if smtp_ready %}<span class="rn-mono">from {{ smtp_from }}</span>
+      {% else %}<span class="rn-mono">SMTP_USER / SMTP_PASS set karo</span>{% endif %}
+    </div>
+    {% if not smtp_ready %}
+    <div class="rn-note" style="margin-top:4px">Email bhejne ke liye Render par ye env vars set karo (Zoho):<br>
+      <span class="rn-mono">SMTP_USER=billing@dialnytics.com</span><br>
+      <span class="rn-mono">SMTP_PASS=&lt;Zoho app password&gt;</span><br>
+      (host/port default smtp.zoho.com:465). Jab tak ye na hon, invoice <b>ban</b> jayega par <b>email nahi</b> jayegi — tum manually bhej sakte ho.</div>
+    {% endif %}
+
+    <form method="post" action="/renewals/settings" class="user-form" style="margin-top:14px">
+      <div class="rn-switch">
+        <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+          <input type="checkbox" name="enabled" value="on" {{ 'checked' if enabled }}>
+          <span><b>Auto-invoice ON</b> — roz khud check kar ke invoice bheje</span>
+        </label>
+      </div>
+      <div class="rn-row">
+        <label>Invoice bhejo</label>
+        <input class="rn-num" type="number" name="days" min="1" max="30" value="{{ days }}">
+        <label>din renewal se pehle</label>
+      </div>
+      <div class="field"><label>CC (optional) — ek copy admin ko</label>
+        <input type="email" name="cc" value="{{ cc }}" placeholder="admin@dialnytics.com">
+      </div>
+      <button class="btn btn-primary" type="submit" style="width:auto;flex:0 0 auto;margin-top:4px">Save settings</button>
+    </form>
+
+    <div class="panel-title" style="margin-top:22px"><span class="panel-icon">▶️</span><div><h2>Run now</h2><p>Abhi chala ke dekho (test-on-one-first)</p></div></div>
+    <form method="post" action="/renewals/run-now" class="user-form">
+      <div class="field"><label>Sirf ek customer par test (email) — khali = sab due customers</label>
+        <input type="email" name="only_email" placeholder="ek.customer@example.com">
+      </div>
+      <button class="rn-btn" type="submit">Run now</button>
+      <small style="display:block;margin-top:8px">Ye un customers ka invoice banata hai jinki renewal <b>theek {{ days }} din</b> baad hai. Pehle apne 1 test customer ki renewal date aaj+{{ days }} set karke yahan uski email daal ke test karo.</small>
+    </form>
+
+    <div class="rn-note">Daily scheduler app ke andar chalta hai (koi Render cron zaroori nahi). Backup ke liye ek keyed URL bhi hai jise koi bhi daily cron hit kar sakta hai:
+      <div class="rn-cron">{{ cron_url }}</div>
+      <small>Key = Render env <span class="rn-mono">AUTO_INVOICE_CRON_KEY</span>. Na ho to URL band rehta hai.</small>
+    </div>
+    <p class="rn-foot">{% if last_run %}Last daily run: <b>{{ last_run }}</b>{% else %}Abhi tak koi daily run nahi hua.{% endif %}</p>
+  </section>
+
+  <section class="user-panel">
+    <div class="panel-title"><span class="panel-icon">📅</span><div><h2>Upcoming (next 14 days)</h2><p>Jin ki renewal aa rahi hai</p></div></div>
+    <div class="table-scroll"><table class="rn-table">
+      <thead><tr><th>Customer</th><th>Plan</th><th>Renews</th><th>In</th><th>Amount</th><th>Status</th></tr></thead>
+      <tbody>
+      {% for u in upcoming %}
+      <tr>
+        <td><b>{{ u.name or u.email }}</b><div class="rn-mono" style="color:var(--text-muted)">{{ u.email }}</div></td>
+        <td class="rn-mono">{{ u.plan or '—' }}</td>
+        <td class="rn-mono">{{ u.renewal }}</td>
+        <td><span class="rn-d {{ 'soon' if u.days_left <= days else ('near' if u.days_left <= days+3 else '') }}">{{ u.days_left }}d</span></td>
+        <td class="rn-mono">{% if u.amount %}PKR {{ "{:,}".format(u.amount) }}{% else %}<span class="rn-pill rn-bad">no amount</span>{% endif %}</td>
+        <td>
+          {% if u.invoiced and u.emailed %}<span class="rn-pill rn-ok">invoiced + emailed</span>
+          {% elif u.invoiced %}<span class="rn-pill rn-muted">invoiced</span>
+          {% else %}<span class="rn-pill rn-muted">pending</span>{% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr class="rn-skip"><td colspan="6">Agle 14 din mein koi renewal nahi.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+
+    <div class="panel-title" style="margin-top:22px"><span class="panel-icon">🧾</span><div><h2>Recent auto-invoices</h2><p>Jo system ne bheje</p></div></div>
+    <div class="table-scroll"><table class="rn-table">
+      <thead><tr><th>When</th><th>Invoice</th><th>Customer</th><th>Amount</th><th>Email</th></tr></thead>
+      <tbody>
+      {% for r in recent %}
+      <tr>
+        <td class="rn-mono">{{ r.created_at.strftime('%Y-%m-%d %H:%M') if r.created_at else '' }}</td>
+        <td class="rn-mono">{{ r.invoice_number or '—' }}</td>
+        <td>{{ r.customer_name or '' }}</td>
+        <td class="rn-mono">{% if r.total_pkr %}PKR {{ "{:,}".format(r.total_pkr|int) }}{% else %}—{% endif %}</td>
+        <td>{% if r.emailed %}<span class="rn-pill rn-ok">sent</span>{% else %}<span class="rn-pill rn-muted">not sent</span>{% endif %}</td>
+      </tr>
+      {% else %}
+      <tr class="rn-skip"><td colspan="5">Abhi tak koi auto-invoice nahi bheja.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    <p class="rn-foot">Status <b>pending</b> = abhi tak auto-invoice nahi bana (ya to renewal {{ days }} din se door hai, ya scheduler ne abhi tak us din ko process nahi kiya). ON karne ke baad, renewal se {{ days }} din pehle apne aap invoice ban ke email chala jayega.</p>
+  </section>
+</div>
+{% endblock %}

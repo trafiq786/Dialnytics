@@ -1,84 +1,45 @@
 ===========================================================
-  ROUTING  —  1-click provider switch  +  hybrid calling
+  ALL-IN-ONE  —  Auto-invoice + Routing (switch + hybrid)
+  (deploy crash "No module named 'mailer'" ka fix)
 ===========================================================
 
-KYA BANA
---------
-Admin sidebar mein naya page: Calling -> "Routing" (🔀).
+KYA HUA THA
+-----------
+ROUTING.zip ki main.py `mailer` aur `auto_invoice` ko import karti hai, lekin
+wo 2 nayi files repo mein nahi gayi thin -> app boot par crash:
+   ModuleNotFoundError: No module named 'mailer'
 
-1) SWITCH PROVIDER (1 click failover)
-   Sab active EchoDial users ko ek SIP provider se doosre par ek click mein
-   move karo. Har user apna number (CLI) aur hybrid inbound barqarar rakhta
-   hai. Telnyx/Twilio users ko haath nahi lagta.
-   >> Jab kisi provider ka issue aaye: From = kharab provider, To = theek
-      provider, "Switch all users". Users agli call par naye provider se
-      register ho jate hain.
-
-2) HYBRID CALLING (out = SIP, in = Twilio DID)
-   Ye core pehle se app mein tha (jab EchoDial user ka number Twilio number
-   ho to outbound SIP se jati hai CLI = wahi Twilio number, aur inbound
-   Twilio par aati hai). Ab uska saaf control + status mil gaya:
-   - Har EchoDial user ke saamne "Inbound: Twilio (hybrid)" ya "SIP only".
-   - "Re-sync hybrid" button: sab EchoDial users ka twilio_in dobara set
-     karta hai aur har Twilio number ka voice webhook is app par point karta
-     hai. Naye users/numbers add karne ke baad ya inbound kaam na kare to
-     ye dabao.
+FIX = bas ye saari files ek saath daal do (yahan sab ikatthe hain).
 
 
-ZAROORI — main.py aur base.html CUMULATIVE hain
------------------------------------------------
-Is zip ki  backend/main.py  aur  frontend/templates/base.html  mein pehli
-wali AUTO-INVOICE (Renewals) changes BHI shamil hain. Yani ye LATEST hain —
-inhi ko rakho. Agar tum ne pehle AUTO-INVOICE.zip apply ki thi, to ye naye
-main.py/base.html us ke upar aa jayenge (kuch khoega nahi, dono features
-andar hain).
+IN SAARI FILES KO APNE REPO MEIN ISI JAGAH RAKHO (replace/add)
+--------------------------------------------------------------
+  backend/mailer.py                        (NAYA  <- ye missing tha)
+  backend/auto_invoice.py                  (NAYA  <- ye missing tha)
+  backend/main.py                          (BADLA)
+  frontend/templates/base.html             (BADLA)
+  frontend/templates/renewals.html         (NAYA)
+  frontend/templates/routing.html          (NAYA)
+
+Khaas tor par confirm karo ke  backend/mailer.py  aur  backend/auto_invoice.py
+repo mein mojood hain (yehi do reh gaye the). Phir Render par deploy -> app
+theek chalega.
 
 
-NAYE / BADLE FILES
-------------------
-  backend/main.py                          (BADLA — /routing routes [+ auto-invoice])
-  frontend/templates/base.html             (BADLA — nav: Routing [+ Renewals])
-  frontend/templates/routing.html          (NAYA — admin page)
+DEPLOY KE BAAD CHECK
+--------------------
+- App start ho jaye (crash nahi).
+- Sidebar mein 2 naye links: Finance -> "Renewals" (📅), Calling -> "Routing" (🔀).
+- Dono pages khul jayein.
 
-Note: is zip mein mailer.py / auto_invoice.py / renewals.html NAHI hain —
-wo AUTO-INVOICE.zip mein hain. Agar wo abhi tak apply nahi ki, to pehle wo
-3 files bhi daal do (warna app import error de ga, kyunke main.py unhe
-import karti hai).
+Baqi istemaal/test ki tafseel pehle wali 2 READMEs mein hai (AUTO-INVOICE aur
+ROUTING). Khulasa:
+  * Renewals: SMTP_USER + SMTP_PASS (Zoho app password) set karo, phir 1 test
+    customer par "Run now", phir "Auto-invoice ON".
+  * Routing: From/To provider -> "Switch all users" (target provider ACTIVE
+    ho). Hybrid ke liye "Re-sync hybrid".
 
-
-DATABASE
---------
-Koi nayi table nahi. Sab existing columns (sip_provider_id, twilio_in,
-provider) use hoti hain.
-
-
-ISTEMAAL
---------
-1) Deploy karo (Render push).
-2) Sidebar -> Calling -> "Routing" (🔀) kholo.
-3) Upar 3 stat: total EchoDial users, kitne hybrid, kitne providers.
-4) SWITCH: From/To chuno -> "Switch all users". Confirm. Count dikhega.
-   (Target provider pehle SIP Providers mein ACTIVE hona chahiye — warna
-    CSP us ka WSS block kar deta hai aur calling nahi chalti; page tumhe
-    rok dega aur bata dega.)
-5) HYBRID: Twilio configured ho to "Re-sync hybrid" dabao — sab ka inbound
-   Twilio par set ho jayega.
-
-
-TEST (test-on-one-first)
-------------------------
-- Pehle ek SIP provider aur daal lo (SIP Providers page) ya env EchoDial ko
-  target rakho.
-- Switch karne se pehle 1 test user ko dekho (wo ab bhi call kar pa raha ho).
-- Switch ke baad us test user se ek call karke confirm karo.
-- Hybrid: ek test user jiska number Twilio ka ho, us par ek baahar se call
-  karo -> uske dialer par ring aani chahiye (inbound Twilio).
-
-
-ROLLBACK
---------
-Routing sirf UI/action hai — koi schema/background change nahi. Hatana ho to
-purani main.py + base.html wapas daal do, routing.html ignore ho jayega.
-Jo switch pehle ho chuka wo users ke sip_provider_id mein mehfooz rehta hai.
+DATABASE: koi manual SQL nahi — app start par khud migrate ho jata hai
+(auto_invoice_log table + settings).
 
 Sawal ho to batao.
