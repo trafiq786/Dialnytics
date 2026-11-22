@@ -42,6 +42,8 @@ import live_listen as ll  # noqa: E402  (supervisors listen / whisper / join liv
 import website_orders as wo  # noqa: E402  (orders from the marketing website)
 import partners as pb  # noqa: E402  (white-label partners: wallet + seats)
 import announcements as an  # noqa: E402  (admin announcements: popup, banner, bell)
+import mailer  # noqa: E402  (tiny SMTP sender, used by auto-invoice)
+import auto_invoice as ai  # noqa: E402  (renewal invoices emailed automatically)
 
 app = FastAPI(title="Dialnytics", version="1.2.0")
 log = logging.getLogger("dialnytics")
@@ -645,7 +647,7 @@ CREATE INDEX IF NOT EXISTS monitor_recordings_user_idx ON public.monitor_recordi
 CREATE INDEX IF NOT EXISTS monitor_recordings_age_idx ON public.monitor_recordings(created_at);
 ALTER TABLE public.monitor_recordings ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.monitor_recordings FROM anon, authenticated;
-""" + ct.SCHEMA_SQL + rg.SCHEMA_SQL + wo.SCHEMA_SQL + ll.SCHEMA_SQL + pb.SCHEMA_SQL + an.SCHEMA_SQL
+""" + ct.SCHEMA_SQL + rg.SCHEMA_SQL + wo.SCHEMA_SQL + ll.SCHEMA_SQL + pb.SCHEMA_SQL + an.SCHEMA_SQL + ai.SCHEMA_SQL
 
 def ensure_schema():
     """Idempotent additive migration (same SQL as SUPABASE_MIGRATION_07)."""
@@ -677,6 +679,16 @@ def set_setting(key, value):
             cur.execute("""INSERT INTO public.dialnytics_settings(key,value,updated_at)
                 VALUES(%s,%s,NOW()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()""",
                 (key, str(value)))
+
+# ---- Auto-invoice (renewal invoices emailed automatically) ----
+def _auto_invoice_pdf(inv, items):
+    import invoice_pdf as ipdf
+    logo = os.path.join(FRONTEND_DIR, "static", "img", "dialnytics-logo-dark.png")
+    return ipdf.build_invoice_pdf(inv, [dict(i) for i in items], logo)
+
+ai.init(db_connect=db_connect, get_setting=get_setting, set_setting=set_setting,
+        build_pdf=_auto_invoice_pdf, mailer=mailer, public_base_url=PUBLIC_BASE_URL)
+ai.start_scheduler()
 
 def get_rates():
     rates = dict(vh.DEFAULT_RATES)
@@ -1540,6 +1552,101 @@ def admin_provider_switch(request: Request, from_provider: str = Form(...), to_p
     return RedirectResponse(request.headers.get("referer", "/customers") + ("?switched=%d" % len(rows)), status_code=303)
 
 
+# ==================== ROUTING: one-click SIP-provider switch + hybrid ====================
+def _sip_token(v):
+    """Form value -> (sip_provider_id or None, token). 'env' = NULL (env EchoDial)."""
+    v = (v or "").strip()
+    if v == "env":
+        return None, "env"
+    if v.isdigit():
+        return int(v), v
+    raise HTTPException(422, "Bad provider selection")
+
+
+@app.get('/routing', response_class=HTMLResponse)
+def routing_page(request: Request):
+    admin = require_admin(request)
+    providers = sip_providers_all(active_only=False)
+    with db_connect() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT id,name,email,phone_number,sip_provider_id,twilio_in
+                             FROM public.dialnytics_users
+                            WHERE COALESCE(provider,'telnyx')='echodial' AND role<>'admin' AND is_active
+                            ORDER BY name""")
+            users = cur.fetchall()
+    pname = {p["id"]: p["name"] for p in providers}
+    counts = {}
+    for u in users:
+        counts[u["sip_provider_id"]] = counts.get(u["sip_provider_id"], 0) + 1
+    rows = [{"name": u["name"] or u["email"], "email": u["email"], "number": u["phone_number"] or "",
+             "provider": pname.get(u["sip_provider_id"], "EchoDial (env)") if u["sip_provider_id"] else "EchoDial (env)",
+             "hybrid": bool(u["twilio_in"])} for u in users]
+    opts = [{"id": "env", "name": "EchoDial (env default)", "n": counts.get(None, 0), "active": echodial_enabled()}]
+    for p in providers:
+        opts.append({"id": str(p["id"]), "name": p["name"], "n": counts.get(p["id"], 0), "active": bool(p["active"])})
+    ctx = {"user": admin, "opts": opts, "rows": rows, "total": len(rows),
+           "hybrid_on": sum(1 for r in rows if r["hybrid"]), "twilio_ready": twilio_enabled(),
+           "msg": request.query_params.get("msg"), "err": request.query_params.get("err")}
+    return templates.TemplateResponse(request=request, name="routing.html", context=ctx)
+
+
+@app.post('/routing/switch-sip')
+def routing_switch_sip(request: Request, from_sip: str = Form(...), to_sip: str = Form(...)):
+    """Move EVERY active EchoDial user on one SIP provider to another, in one click.
+    Each user keeps their own number (CLI) and their Twilio inbound (hybrid) stays intact."""
+    require_admin(request)
+    from urllib.parse import quote
+    if (from_sip or "").strip() == (to_sip or "").strip():
+        return RedirectResponse('/routing?err=' + quote("Source and target are the same", safe=''), status_code=303)
+    from_id, _ = _sip_token(from_sip)
+    to_id, _ = _sip_token(to_sip)
+    if to_id is None and not echodial_enabled():
+        raise HTTPException(503, "EchoDial (env) is not configured on the server")
+    if to_id is not None:
+        tp = sip_provider_get(to_id)
+        if not tp:
+            raise HTTPException(404, "Target SIP provider not found")
+        if not tp.get("active"):
+            return RedirectResponse('/routing?err=' + quote(
+                "Target provider is inactive — activate it in SIP Providers first", safe=''), status_code=303)
+    with db_connect() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT id, phone_number FROM public.dialnytics_users
+                            WHERE COALESCE(provider,'telnyx')='echodial' AND role<>'admin' AND is_active
+                              AND sip_provider_id IS NOT DISTINCT FROM %s""", (from_id,))
+            rows = cur.fetchall()
+            cur.execute("""UPDATE public.dialnytics_users SET sip_provider_id=%s
+                            WHERE COALESCE(provider,'telnyx')='echodial' AND role<>'admin' AND is_active
+                              AND sip_provider_id IS NOT DISTINCT FROM %s""", (to_id, from_id))
+    for r in rows:
+        _sync_twilio_inbound(r["id"], "echodial", r["phone_number"] or "")
+    refresh_users()
+    log.info("SIP switch: %d echodial users moved %s -> %s", len(rows), from_sip, to_sip)
+    return RedirectResponse('/routing?msg=' + quote("Switched %d user(s) to the new provider" % len(rows), safe=''), status_code=303)
+
+
+@app.post('/routing/resync-hybrid')
+def routing_resync_hybrid(request: Request):
+    """Re-apply hybrid (inbound on Twilio) for all EchoDial users: sets twilio_in and
+    re-points each Twilio number's voice webhook at this app. Safe to run anytime."""
+    require_admin(request)
+    from urllib.parse import quote
+    with db_connect() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT id, phone_number FROM public.dialnytics_users
+                            WHERE COALESCE(provider,'telnyx')='echodial' AND role<>'admin' AND is_active""")
+            rows = cur.fetchall()
+    on = 0
+    for r in rows:
+        try:
+            if _sync_twilio_inbound(r["id"], "echodial", r["phone_number"] or ""):
+                on += 1
+        except Exception:
+            log.exception("resync hybrid failed for %s", r["id"])
+    refresh_users()
+    return RedirectResponse('/routing?msg=' + quote("Hybrid re-synced: %d user(s) now take inbound on Twilio" % on, safe=''), status_code=303)
+
+
 @app.post('/customers/{email}/change-number')
 def customer_change_number(request: Request, email: str, phone_number: str = Form(...),
                                  provider: str = Form("telnyx"), sip_provider_id: str = Form("")):
@@ -1790,6 +1897,84 @@ def invoice_pdf(request:Request,invoice_id:uuid.UUID):
     logo=os.path.join(FRONTEND_DIR,'static','img','dialnytics-logo-dark.png')
     data=ipdf.build_invoice_pdf(inv,[dict(i) for i in items],logo)
     return Response(data,media_type='application/pdf',headers={'Content-Disposition':f'attachment; filename="{inv["invoice_number"]}.pdf"','Cache-Control':'private, no-store'})
+
+# ==================== AUTO-INVOICE (renewal reminders) ====================
+@app.get('/renewals', response_class=HTMLResponse)
+def renewals_page(request: Request):
+    admin = require_admin(request)
+    today = date.today()
+    horizon = today + timedelta(days=14)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT u.id,u.name,u.email,u.plan_name,u.plan_renewal,u.last_paid_amount,
+                       (SELECT l.emailed FROM public.dialnytics_auto_invoice_log l
+                         WHERE l.customer_id=u.id AND l.renewal_date=u.plan_renewal) AS lp_emailed,
+                       (SELECT l.invoice_id FROM public.dialnytics_auto_invoice_log l
+                         WHERE l.customer_id=u.id AND l.renewal_date=u.plan_renewal) AS lp_invoice
+                  FROM public.dialnytics_users u
+                 WHERE u.role<>'admin' AND u.is_active=TRUE AND COALESCE(u.is_demo,FALSE)=FALSE
+                   AND u.plan_renewal IS NOT NULL
+                   AND u.plan_renewal BETWEEN %s AND %s
+                 ORDER BY u.plan_renewal, u.name
+            """, (today, horizon))
+            upcoming = []
+            for r in cur.fetchall():
+                d = r['plan_renewal']
+                upcoming.append({
+                    'name': r['name'], 'email': r['email'], 'plan': r['plan_name'] or '',
+                    'renewal': d, 'days_left': (d - today).days,
+                    'amount': int(round(float(r['last_paid_amount'] or 0))),
+                    'invoiced': bool(r['lp_invoice']), 'emailed': bool(r['lp_emailed']),
+                })
+            cur.execute("""SELECT l.renewal_date,l.emailed,l.detail,l.created_at,
+                                  i.invoice_number,i.customer_name,i.total_pkr
+                             FROM public.dialnytics_auto_invoice_log l
+                             LEFT JOIN public.dialnytics_invoices i ON i.id=l.invoice_id
+                            ORDER BY l.created_at DESC LIMIT 40""")
+            recent = [dict(r) for r in cur.fetchall()]
+    ctx = {'user': admin, 'upcoming': upcoming, 'recent': recent,
+           'enabled': ai.enabled(), 'days': ai.days_before(), 'cc': ai.cc_admin(),
+           'last_run': ai.last_run(), 'smtp_ready': mailer.configured(),
+           'smtp_from': mailer.from_address() if mailer.configured() else '',
+           'cron_url': (PUBLIC_BASE_URL + '/cron/auto-invoice?key=YOUR_KEY'),
+           'msg': request.query_params.get('msg', ''), 'err': request.query_params.get('err', '')}
+    return templates.TemplateResponse(request=request, name='renewals.html', context=ctx)
+
+
+@app.post('/renewals/settings')
+def renewals_settings(request: Request, enabled: str = Form(''), days: int = Form(3), cc: str = Form('')):
+    require_admin(request)
+    set_setting('auto_invoice_enabled', '1' if enabled in ('on', '1', 'true') else '0')
+    set_setting('auto_invoice_days', str(min(max(int(days or 3), 1), 30)))
+    set_setting('auto_invoice_cc', cc.strip()[:200])
+    return RedirectResponse('/renewals?msg=Settings+saved', status_code=303)
+
+
+@app.post('/renewals/run-now')
+def renewals_run_now(request: Request, only_email: str = Form('')):
+    require_admin(request)
+    summary = ai.run(only_email=only_email.strip() or None)
+    if summary.get('error'):
+        return RedirectResponse('/renewals?err=' + quote(summary['error'], safe=''), status_code=303)
+    parts = ['%d invoiced' % len(summary.get('invoiced', [])),
+             '%d emailed' % summary.get('emailed', 0),
+             '%d skipped' % len(summary.get('skipped', [])),
+             '%d errors' % len(summary.get('errors', []))]
+    if not mailer.configured():
+        parts.append('(SMTP off: invoices made, not emailed)')
+    return RedirectResponse('/renewals?msg=' + quote(' / '.join(parts), safe=''), status_code=303)
+
+
+@app.get('/cron/auto-invoice')
+def cron_auto_invoice(key: str = ''):
+    want = os.getenv('AUTO_INVOICE_CRON_KEY', '').strip()
+    if not want or key != want:
+        raise HTTPException(403, 'Forbidden')
+    if not ai.enabled():
+        return JSONResponse({'ok': True, 'skipped': 'auto-invoice disabled'})
+    return JSONResponse({'ok': True, 'summary': ai.run()})
+
 
 def _disabled_users():
     with db_connect() as conn:

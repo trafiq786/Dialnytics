@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Routing — Dialnytics{% endblock %}
+{% block page_title %}Routing{% endblock %}
+{% block content %}
+<style>
+.rt-grid{display:grid;grid-template-columns:minmax(0,460px) minmax(0,1fr);gap:22px;align-items:start}
+@media (max-width:900px){.rt-grid{grid-template-columns:1fr}}
+.rt-switch{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:6px 0 2px}
+.rt-switch .field{margin:0}
+.rt-sel{min-width:160px;padding:9px 11px;border:1px solid var(--border);border-radius:9px;background:var(--surface-2,rgba(255,255,255,.03));color:var(--text);font:inherit}
+.rt-arrow{font-size:20px;color:var(--text-muted);padding-bottom:7px}
+.rt-btn{border:1px solid var(--border);background:var(--surface-2,rgba(255,255,255,.03));color:var(--text);border-radius:9px;padding:9px 16px;font:inherit;font-weight:700;cursor:pointer}
+.rt-btn:hover{border-color:#6366f1}
+.rt-btn.primary{background:#6366f1;border-color:#6366f1;color:#fff}
+.rt-pill{display:inline-block;padding:3px 10px;border-radius:999px;font-weight:700;font-size:11.5px}
+.rt-ok{background:rgba(34,197,94,.15);color:#86efac}
+.rt-muted{background:rgba(148,163,184,.14);color:var(--text-muted)}
+.rt-warn{background:rgba(245,158,11,.14);color:#fcd34d}
+.rt-table{width:100%;border-collapse:collapse}
+.rt-table th,.rt-table td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px;vertical-align:middle}
+.rt-table th{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--text-muted);font-weight:700}
+.rt-table tbody tr:last-child td{border-bottom:none}
+.rt-mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text-secondary)}
+.rt-note{margin-top:14px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.28);border-radius:12px;padding:12px 14px;font-size:12.5px;color:var(--text-secondary);line-height:1.55}
+.rt-foot{font-size:12.5px;color:var(--text-muted);margin:14px 0 0;line-height:1.5}
+.rt-skip td{color:var(--text-muted);padding:22px 12px;text-align:center}
+.rt-stat{display:flex;gap:22px;margin:2px 0 14px;flex-wrap:wrap}
+.rt-stat b{font-size:26px;font-weight:800;color:var(--text);display:block;line-height:1}
+.rt-stat span{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);font-weight:700}
+</style>
+
+<section class="users-hero">
+  <div><span class="eyebrow">CALLING</span><h1>Routing &amp; failover</h1>
+  <p>EchoDial (browser SIP) users ka provider <b>ek click</b> mein badlo — agar kisi provider ka issue aaye to sab users doosre provider par. Aur <b>hybrid</b>: calls jati hain SIP se, aati hain Twilio DID par.</p></div>
+  <a class="btn btn-secondary" style="width:auto;flex:0 0 auto" href="/sip-providers">Manage SIP providers</a>
+</section>
+
+{% if err %}<div class="error-msg">{{ err }}</div>{% endif %}
+{% if msg %}<div class="success-msg">{{ msg }}</div>{% endif %}
+
+<div class="rt-stat">
+  <div><b>{{ total }}</b><span>EchoDial users</span></div>
+  <div><b>{{ hybrid_on }}</b><span>hybrid (inbound Twilio)</span></div>
+  <div><b>{{ opts|length }}</b><span>providers available</span></div>
+</div>
+
+<div class="rt-grid">
+  <section class="user-panel">
+    <div class="panel-title"><span class="panel-icon">🔀</span><div><h2>Switch provider</h2><p>Sab EchoDial users ek provider se doosre par</p></div></div>
+
+    <form method="post" action="/routing/switch-sip"
+          onsubmit="return confirm('Move all users from the FROM provider to the TO provider? Unke dialer agli call par naye provider se register honge.')">
+      <div class="rt-switch">
+        <div class="field"><label>From</label>
+          <select class="rt-sel" name="from_sip" required>
+            {% for o in opts %}<option value="{{ o.id }}">{{ o.name }} ({{ o.n }} users){% if not o.active %} — inactive{% endif %}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="rt-arrow">→</div>
+        <div class="field"><label>To</label>
+          <select class="rt-sel" name="to_sip" required>
+            {% for o in opts %}<option value="{{ o.id }}"{% if loop.index==2 %} selected{% endif %}>{{ o.name }}{% if not o.active %} — inactive{% endif %}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+      <button class="rt-btn primary" type="submit" style="margin-top:12px">Switch all users</button>
+      <small style="display:block;margin-top:8px">Sirf active EchoDial users par asar — har user apna number (CLI) aur hybrid inbound barqarar rakhta hai. Telnyx/Twilio users ko haath nahi lagta.</small>
+    </form>
+
+    <div class="rt-note"><b>Failover plan:</b> jab kisi provider ka masla ho — From = kharab provider, To = theek provider, "Switch all users". Users agli call par naye provider se register ho jayenge. Naya provider pehle <a href="/sip-providers" style="color:#2563eb">SIP Providers</a> mein add hona chahiye, aur us par in users ki CLIs approved honi chahiye.</div>
+
+    <div class="panel-title" style="margin-top:22px"><span class="panel-icon">📞</span><div><h2>Hybrid calling</h2><p>Out = SIP, In = Twilio DID</p></div></div>
+    <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin:2px 0 12px">
+      Hybrid khud chalta hai jab EchoDial user ka number ek <b>Twilio</b> number ho: outbound call SIP provider se jati hai (CLI = wahi Twilio number), aur jab koi wapas call kare to Twilio par aati hai aur user ke dialer par ring hoti hai. Niche "inbound Twilio" us user ke liye ON dikhta hai.
+    </p>
+    {% if twilio_ready %}
+    <form method="post" action="/routing/resync-hybrid"
+          onsubmit="return confirm('Re-apply hybrid for all EchoDial users? Twilio numbers ke webhooks dobara set honge.')">
+      <button class="rt-btn" type="submit">Re-sync hybrid (inbound Twilio)</button>
+      <small style="display:block;margin-top:8px">Jab naye users/numbers add karo ya inbound kaam na kare to ye dabao — har EchoDial user ka twilio_in dobara set hoga aur Twilio number ka voice webhook is app par point ho jayega.</small>
+    </form>
+    {% else %}
+    <div class="rt-note" style="margin-top:4px">Twilio server par configured nahi (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN). Hybrid inbound ke liye Twilio set karo. Outbound SIP phir bhi chalta rahega.</div>
+    {% endif %}
+  </section>
+
+  <section class="user-panel">
+    <div class="panel-title"><span class="panel-icon">👥</span><div><h2>EchoDial users</h2><p>Kaun kis provider par, aur hybrid status</p></div></div>
+    <div class="table-scroll"><table class="rt-table">
+      <thead><tr><th>User</th><th>Number (CLI)</th><th>Out provider</th><th>Inbound</th></tr></thead>
+      <tbody>
+      {% for u in rows %}
+      <tr>
+        <td><b>{{ u.name }}</b><div class="rt-mono" style="color:var(--text-muted)">{{ u.email }}</div></td>
+        <td class="rt-mono">{{ u.number or '—' }}</td>
+        <td><span class="rt-pill rt-muted">{{ u.provider }}</span></td>
+        <td>{% if u.hybrid %}<span class="rt-pill rt-ok">Twilio (hybrid)</span>{% else %}<span class="rt-pill rt-warn">SIP only</span>{% endif %}</td>
+      </tr>
+      {% else %}
+      <tr class="rt-skip"><td colspan="4">Koi EchoDial user nahi.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    <p class="rt-foot"><b>Inbound "SIP only"</b> = us user ka number Twilio par nahi (ya Twilio off), to wapsi call provider ke number par aayegi. Hybrid chahiye to us user ko ek Twilio number do (Customers → change number) phir "Re-sync hybrid".</p>
+  </section>
+</div>
+{% endblock %}

@@ -77,12 +77,14 @@
                     <a href="/users/pending" class="{% if request.url.path == '/users/pending' %}active{% endif %}"><span class="ni">⏳</span><span>Pending Orders</span></a>
                     <a href="/users/website-orders" class="{% if request.url.path == '/users/website-orders' %}active{% endif %}"><span class="ni">🛒</span><span>Website Orders</span></a>
                     <a href="/sip-providers" class="{% if request.url.path.startswith('/sip-providers') %}active{% endif %}"><span class="ni">📡</span><span>SIP Providers</span></a>
+                    <a href="/routing" class="{% if request.url.path.startswith('/routing') %}active{% endif %}"><span class="ni">🔀</span><span>Routing</span></a>
                     <a href="/local-presence" class="{% if request.url.path.startswith('/local-presence') %}active{% endif %}"><span class="ni">📍</span><span>Local Presence</span></a>
                     <div class="nav-group">Partners</div>
                     <a href="/resellers" class="{% if request.url.path.startswith('/resellers') %}active{% endif %}"><span class="ni ni-svg"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 17l2 2a1 1 0 0 0 1.4 0l5.3-5.3a2 2 0 0 0 0-2.8L16 7.2"/><path d="M14 10l-3-3-5.6 5.6a2 2 0 0 0 0 2.8L8 18"/><path d="M2 12l4-4M22 12l-4-4"/></svg></span><span>Resellers</span></a>
                     {% set pp = partner_pending_payments() %}<a href="/partners/payments" class="{% if request.url.path.startswith('/partners/payments') %}active{% endif %}"><span class="ni">💳</span><span>Partner payments{% if pp %} <b class="dn-pill warn" style="margin-left:4px">{{ pp }}</b>{% endif %}</span></a>
                     <div class="nav-group">Finance</div>
                     <a href="/invoices" class="{% if request.url.path.startswith('/invoices') %}active{% endif %}"><span class="ni ni-svg"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2h12v20l-3-2-3 2-3-2-3 2z"/><path d="M9 7h6M9 11h6M9 15h4"/></svg></span><span>Invoices</span></a>
+                    <a href="/renewals" class="{% if request.url.path.startswith('/renewals') %}active{% endif %}"><span class="ni">📅</span><span>Renewals</span></a>
                     {% else %}
                     <a href="/dashboard" class="{% if request.url.path == '/dashboard' %}active{% endif %}"><span class="ni">▦</span><span>Dashboard</span></a>
                     {% if is_owner(user) %}<a href="/team" class="{% if request.url.path.startswith('/team') %}active{% endif %}"><span class="ni">🟢</span><span>Team</span></a>{% endif %}
