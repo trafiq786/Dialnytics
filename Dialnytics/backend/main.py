@@ -410,6 +410,7 @@ def _db_user(row):
         "adv_calling": bool(row.get("adv_calling", False)),
         "live_route": bool(row.get("live_route", False)),
         "conf_leave": bool(row.get("conf_leave", False)),
+        "conf_enabled": bool(row.get("conf_enabled", True)),
         "telnyx_account": tx_key(row.get("telnyx_account") or "t1"),
         "call_countries": row.get("call_countries") or "",
         "twilio_account": tw_key(row.get("twilio_account") or "w1"),
@@ -587,6 +588,7 @@ ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS call_countries text
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS twilio_account text NOT NULL DEFAULT 'w1';
 -- 30: Twilio number verified on Telnyx: outgoing via Telnyx, incoming rings through Twilio
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS twilio_in boolean NOT NULL DEFAULT false;
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS conf_enabled boolean NOT NULL DEFAULT true;
 -- 31: admin-added SIP providers (browser WebRTC/JsSIP), e.g. EchoDial or any wholesale SIP trunk.
 --     A user on provider='echodial' with sip_provider_id set uses that row's config; NULL = env EchoDial.
 CREATE TABLE IF NOT EXISTS public.sip_providers (
@@ -2228,6 +2230,49 @@ async def create_user(
                     _ensure_credential(email)
             except Exception:
                 log.exception('Telnyx credential creation failed for new user')
+
+    # ---- Add-ons / features chosen at creation ----
+    want_rec = bool(form.get('recording'))
+    want_power = bool(form.get('power'))
+    want_sms = bool(form.get('sms'))
+    want_adv = bool(form.get('adv'))
+    want_live = bool(form.get('live'))
+    want_leave = bool(form.get('leave'))
+    want_hybrid = bool(form.get('hybrid'))
+    want_conf = bool(form.get('conference'))
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE public.dialnytics_users
+                    SET recording_premium=%s, power_enabled=%s, conf_leave=%s, conf_enabled=%s,
+                        twilio_in = (twilio_in OR %s)
+                    WHERE id=%s""",
+                            (want_rec, want_power, want_leave, want_conf, want_hybrid, new_id))
+        refresh_users()
+    except Exception:
+        log.exception('Add-on flags on create failed')
+    # Provider-side add-ons reuse the same toggle handlers as the edit popup.
+    async def _addon_flip(handler, wanted):
+        if not wanted:
+            return
+        try:
+            await handler(request, email=email)
+        except Exception:
+            log.exception('Add-on toggle failed on create')
+    await _addon_flip(toggle_sms, want_sms)
+    await _addon_flip(toggle_advanced_calling, want_adv)
+    await _addon_flip(toggle_live_listening, want_live)
+    if want_hybrid and phone_number and twilio_enabled():
+        try:
+            acct = twilio_number_accounts().get(phone_number)
+            if acct:
+                with db_connect() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute('UPDATE public.dialnytics_users SET twilio_account=%s WHERE id=%s', (acct, new_id))
+                _twilio_configure_number(phone_number)
+                refresh_users()
+        except Exception:
+            log.exception('Hybrid configure on create failed')
     return RedirectResponse('/users?created=new', status_code=303)
 
 
@@ -2495,9 +2540,8 @@ def calling_lines():
         c = TWILIO_ACCOUNTS.get(key)
         out.append({"value": "twilio:" + key, "provider": "twilio", "account": key, "label": label,
                     "ready": bool(c and c["sid"] and c["token"])})
-    if echodial_enabled():
-        out.append({"value": "echodial:e1", "provider": "echodial", "account": "e1", "label": "EchoDial",
-                    "ready": True, "manual": True})
+    # Generic env "EchoDial" line retired — admin uses their own named SIP providers
+    # (ECONNET-CS etc.) added below. The env fallback still works for any legacy user.
     # Admin-added SIP providers (browser WebRTC). Each is an EchoDial-type line.
     for p in sip_providers_all():
         out.append({"value": "echodial:" + str(p["id"]), "provider": "echodial", "account": str(p["id"]),

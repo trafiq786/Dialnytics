@@ -1,45 +1,66 @@
 ===========================================================
-  HYBRID TOGGLE  —  har user ki detail mein manual ON/OFF
+  ADD-ONS AT CREATE  +  EchoDial env line removed
 ===========================================================
 
 KYA BANA
 --------
-Ab hybrid sirf auto (number Twilio ka ho to) par nahi — har customer ki
-detail page par ek manual toggle hai:
+1) USER CREATE form (Create User page) par naya "Add-ons & features" section —
+   create karte waqt hi chuno user ko kya milega:
+     - Call recording
+     - Conference (add call)      [default ON]
+     - Call transfer
+     - Live monitoring (listen / whisper / barge)
+     - Leave call
+     - Hybrid calling (outbound SIP, inbound Twilio)
+     - Power Dialer / Campaigns
+     - SMS texting
+   Jo tick karo ge wo naye user par set ho jayega (wahi flags jo edit popup
+   mein hain). Provider-side wale (transfer/monitoring/sms) apne proper setup
+   ke sath on hote hain, baqi seedha column set.
 
-  Customers -> (koi user) -> "Number / Provider" card ke neeche:
-  "Hybrid calling — inbound on Twilio"
-     Status: Hybrid ON / off
-     [ Turn hybrid ON ]  ya  [ Turn hybrid OFF ]
+2) "Conference (add call)" ab ek asli per-user toggle hai (naya column
+   conf_enabled, default TRUE). Purane sab users par pehle jaisa ON rehta hai
+   (default true) — kuch nahi tootta. Naye user par tum uncheck karke rok
+   sakte ho.
 
-  ON  -> us user ka inbound Twilio DID par aayega (twilio_in = true). Agar
-         number Twilio ka hai to us ka voice webhook bhi khud app par set
-         ho jata hai.
-  OFF -> inbound wapas us ke apne provider number par.
-
-Note:
-- Yeh har provider ke user par dikhai deta hai (sirf echodial nahi).
-- Agar Twilio server par configured na ho, ya user ka number Twilio ka na
-  ho, to toggle ON to ho jayega par ek ⚠️ warning dikhayega ke inbound tab
-  tak nahi aayega jab tak number Twilio ka na ho. Upar "change number" se
-  Twilio number do.
+3) EchoDial (generic env line) HATA DIYA dropdowns se — kyunke tum ne apna
+   provider "ECONNET-CS" add kar liya hai. Ab Provider list mein sirf tumhare
+   naam wale SIP providers (ECONNET-CS waghaira) + Telnyx/Twilio dikhte hain.
+   (Env fallback backend mein mojood hai taake koi purana user na toote, bas
+   dropdown mein "EchoDial" option nahi aata.)
 
 
 BADLE FILES  (apne repo mein replace karo)
 ------------------------------------------
   backend/main.py                          (BADLA)
-  frontend/templates/customer_detail.html  (BADLA)
+  frontend/templates/users.html            (BADLA — create form add-ons)
+  frontend/templates/dialer_rail.html      (BADLA — data-conf ab conf_enabled)
 
-Ye ALL-IN-ONE.zip ke UPAR aati hain. backend/main.py ismein SAARE features
-(auto-invoice + routing + ab hybrid toggle) samete hue hai — yehi latest hai.
-Baqi files (mailer.py, auto_invoice.py, renewals.html, routing.html,
-base.html) pehle wali ALL-IN-ONE.zip se already lagi hui honi chahiye —
-unhe dobara daalne ki zaroorat nahi.
+Ye sab pichli zips ke UPAR aata hai. backend/main.py ismein SAARE features
+(auto-invoice + routing + hybrid toggle + ab add-ons) samete hue hai — yehi
+latest hai. customer_detail.html (HYBRID-TOGGLE zip wali) jaisi hai waisi
+rehne do — is zip mein nahi hai, dobara daalne ki zaroorat nahi.
 
-DATABASE: koi nayi table nahi (twilio_in column pehle se mojood hai).
+DATABASE: koi manual SQL nahi — conf_enabled column app start par khud ban
+jata hai (default true, purane users safe).
 
-TEST: ek user ki detail kholo -> "Turn hybrid ON" -> status ON ho jaye.
-Us ko Twilio number assign ho to us number par baahar se call karo ->
-dialer par ring aani chahiye. "Turn hybrid OFF" -> wapas normal.
+
+ISTEMAAL / TEST
+---------------
+1) Deploy (Render push).
+2) Create User page kholo -> niche naya "Add-ons & features" section.
+3) Ek test user banao kuch add-ons tick karke -> banne ke baad us user ki
+   detail/edit mein wo add-ons on dikhne chahiyein.
+4) Provider dropdown mein "EchoDial" ab nahi — sirf ECONNET-CS (aur baqi)
+   dikhega. Confirm karo naya user ECONNET-CS par ban raha hai.
+
+
+NOTE (feature functionality)
+----------------------------
+Toggle set karne se flag on hota hai. Transfer / monitoring (whisper/barge) /
+leave ka EchoDial par POORA chalna wo alag kaam hai (jo plan diya tha —
+Phase 1/2/3, kuch ke liye ConnexCS API). Ye zip sirf "add-ons ka option
+create par" de raha hai + conference toggle + EchoDial line hatana. Feature
+build alag se hoga.
 
 Sawal ho to batao.

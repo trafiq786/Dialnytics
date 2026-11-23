@@ -37,6 +37,19 @@
  <div class="field"><label>Amount Received (PKR)</label><div class="money-field"><span>Rs.</span><input name="amount_paid" type="number" min="0" step="1" value="0" required></div></div>
  <div class="field"><label>Amount Received (USD)</label><div class="money-field"><span>$</span><input name="amount_usd" type="number" min="0" step="0.01" value="0"></div><small>Optional. Saved with the payment next to the PKR amount.</small></div>
  <div class="field"><label>Payment Status</label><select name="payment_status"><option value="paid">Paid</option><option value="partial">Partially Paid</option><option value="unpaid">Unpaid</option></select></div>
+ </section>
+ <section class="user-panel"><div class="panel-title"><span class="panel-icon">✦</span><div><h2>Add-ons &amp; features</h2><p>Is user ko kaunse features milein</p></div></div>
+ <div class="um-checks">
+  <label class="um-check"><input type="checkbox" name="recording" value="1"><span><b>Call recording</b><small>Record calls + Recordings page</small></span></label>
+  <label class="um-check"><input type="checkbox" name="conference" value="1" checked><span><b>Conference (add call)</b><small>3-way / add another person to a live call</small></span></label>
+  <label class="um-check"><input type="checkbox" name="adv" value="1"><span><b>Call transfer</b><small>Transfer a live call to a teammate or number</small></span></label>
+  <label class="um-check"><input type="checkbox" name="live" value="1"><span><b>Live monitoring</b><small>Supervisor listen / whisper / barge</small></span></label>
+  <label class="um-check"><input type="checkbox" name="leave" value="1"><span><b>Leave call</b><small>Leave a 3-way call while the other two keep talking</small></span></label>
+  <label class="um-check"><input type="checkbox" name="hybrid" value="1"><span><b>Hybrid calling</b><small>Outbound via SIP, inbound on Twilio DID</small></span></label>
+  <label class="um-check"><input type="checkbox" name="power" value="1"><span><b>Power Dialer / Campaigns</b><small>Campaigns, CRM &amp; follow-ups</small></span></label>
+  <label class="um-check"><input type="checkbox" name="sms" value="1"><span><b>SMS texting</b><small>Needs a Telnyx number</small></span></label>
+ </div>
+ <small style="display:block;margin-top:8px;color:#92a3cc;font-size:12px">Transfer / monitoring / leave abhi behtareen Telnyx par; EchoDial par inko universal banane ka kaam alag chal raha hai. Toggle ab set ho jata hai, feature ready hote hi chalega.</small>
  </section></div>
  <div class="form-footer"><span>Only administrators can see payment details.</span><button class="btn btn-primary create-user-button" type="submit">＋ Create User</button></div>
 </form>
