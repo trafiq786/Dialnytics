@@ -670,6 +670,12 @@ CREATE INDEX IF NOT EXISTS monitor_recordings_user_idx ON public.monitor_recordi
 CREATE INDEX IF NOT EXISTS monitor_recordings_age_idx ON public.monitor_recordings(created_at);
 ALTER TABLE public.monitor_recordings ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON public.monitor_recordings FROM anon, authenticated;
+-- Power Dialer: optional fully-automatic mode (no disposition clicks)
+DO $$ BEGIN
+  IF to_regclass('public.power_queues') IS NOT NULL THEN
+    ALTER TABLE public.power_queues ADD COLUMN IF NOT EXISTS skip_disposition boolean NOT NULL DEFAULT false;
+  END IF;
+END $$;
 """ + ct.SCHEMA_SQL + rg.SCHEMA_SQL + wo.SCHEMA_SQL + ll.SCHEMA_SQL + pb.SCHEMA_SQL + an.SCHEMA_SQL + ai.SCHEMA_SQL
 
 def ensure_schema():
@@ -2679,9 +2685,21 @@ def provider_labels_save(request: Request, labels: str = Form('')):
     return RedirectResponse('/users/new?msg=' + quote('Provider list updated', safe=''), status_code=303)
 
 def user_line(u):
-    if (u.get("provider") or "telnyx") == "echodial":
-        return "echodial:" + (str(u.get("sip_provider_id")) if u.get("sip_provider_id") else "e1")
-    if (u.get("provider") or "telnyx") == "twilio":
+    prov = (u.get("provider") or "telnyx")
+    if prov == "echodial":
+        # Legacy per-user SIP provider -> its own line.
+        if u.get("sip_provider_id"):
+            return "echodial:" + str(u.get("sip_provider_id"))
+        # Global SIP user -> the carrier-label line. Match the user's own label if listed,
+        # else fall back to the first label so an ECHODIAL line stays selected (never Telnyx).
+        lbl = (u.get("provider_label") or "").strip()
+        labels = provider_labels_list()
+        if lbl:
+            return "echodial:label:" + lbl
+        if labels:
+            return "echodial:label:" + labels[0]
+        return "echodial:label:SIP"
+    if prov == "twilio":
         return "twilio:" + (u.get("twilio_account") or "w1")
     return "telnyx:" + (u.get("telnyx_account") or "t1")
 
@@ -5745,6 +5763,7 @@ async def power_queue_create(request: Request):
     try: delay=int(data.get("delay",5))
     except (ValueError,TypeError): raise HTTPException(status_code=422,detail="Invalid delay")
     if not 3<=delay<=30: raise HTTPException(status_code=422,detail="Delay must be 3-30 seconds")
+    skip_disp = bool(data.get("skip_disposition")) and mode == "auto"
     requested=data.get("lead_ids")
     if not isinstance(requested,list) or not requested or len(requested)>POWER_QUEUE_MAX:
         raise HTTPException(status_code=422,detail=f"Select 1 to {POWER_QUEUE_MAX} CRM leads")
@@ -5761,8 +5780,8 @@ async def power_queue_create(request: Request):
                 raise HTTPException(status_code=422,detail="Some selected leads are ineligible or no longer available")
             ids=requested_ids
             if not ids: raise HTTPException(status_code=422,detail="No eligible opted-in CRM leads")
-            cur.execute("""INSERT INTO public.power_queues(user_id,mode,delay_seconds,status)
-                VALUES(%s,%s,%s,'paused') RETURNING id""",(user["id"],mode,delay))
+            cur.execute("""INSERT INTO public.power_queues(user_id,mode,delay_seconds,status,skip_disposition)
+                VALUES(%s,%s,%s,'paused',%s) RETURNING id""",(user["id"],mode,delay,skip_disp))
             qid=cur.fetchone()["id"]
             # one statement for the whole list (fast even for thousands of leads)
             cur.execute("""INSERT INTO public.power_queue_items(queue_id,lead_id,position)
@@ -5871,7 +5890,8 @@ async def power_queue_result(queue_id: uuid.UUID,request: Request):
     if not user: raise HTTPException(status_code=401,detail="Login required")
     data=await request.json()
     result=str(data.get("result") or "")
-    if result not in ("answered","no_answer","busy","failed","callback","interested","not_interested"):
+    # 'dialed' = fully-automatic mode finished this call without a human disposition.
+    if result not in ("answered","no_answer","busy","failed","callback","interested","not_interested","dialed"):
         raise HTTPException(status_code=422,detail="Invalid result")
     try: item_id=uuid.UUID(str(data.get("item_id")))
     except (ValueError,TypeError): raise HTTPException(status_code=422,detail="Invalid item ID")
