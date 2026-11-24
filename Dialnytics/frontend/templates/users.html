@@ -39,7 +39,7 @@
  <div class="field"><label>Amount Received (USD)</label><div class="money-field"><span>$</span><input name="amount_usd" type="number" min="0" step="0.01" value="0"></div><small>Optional. Saved with the payment next to the PKR amount.</small></div>
  <div class="field"><label>Payment Status</label><select name="payment_status"><option value="paid">Paid</option><option value="partial">Partially Paid</option><option value="unpaid">Unpaid</option></select></div>
  </section>
- <section class="user-panel"><div class="panel-title"><span class="panel-icon">✦</span><div><h2>Add-ons &amp; features</h2><p>Is user ko kaunse features milein</p></div></div>
+ <section class="user-panel addons-panel"><div class="panel-title"><span class="panel-icon">✦</span><div><h2>Add-ons &amp; features</h2><p>Is user ko kaunse features milein</p></div></div>
  <div class="um-checks">
   <label class="um-check"><input type="checkbox" name="recording" value="1"><span><b>Call recording</b><small>Record calls + Recordings page</small></span></label>
   <label class="um-check"><input type="checkbox" name="conference" value="1" checked><span><b>Conference (add call)</b><small>3-way / add another person to a live call</small></span></label>
@@ -217,7 +217,17 @@
   loadCallerIds();
 })();
 </script>
-<style>.lines-status{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;font-size:11px}.line-chip{border-radius:12px;padding:4px 9px;border:1px solid #33415c}.line-chip.ok{background:#173c39;color:#30d5a4;border-color:#1f5a50}.line-chip.off{color:#9fb1d0}.line-chip.bad{background:#4a1f2a;color:#ff8a9c;border-color:#7a2f40}</style>
+<style>.lines-status{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;font-size:11px}.line-chip{border-radius:12px;padding:4px 9px;border:1px solid #33415c}.line-chip.ok{background:#173c39;color:#30d5a4;border-color:#1f5a50}.line-chip.off{color:#9fb1d0}.line-chip.bad{background:#4a1f2a;color:#ff8a9c;border-color:#7a2f40}
+.addons-panel{grid-column:1 / -1}
+.um-checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:11px}
+.um-check{display:flex;gap:12px;align-items:flex-start;background:var(--bg-secondary);border:1px solid var(--border);border-radius:14px;padding:13px 15px;cursor:pointer;transition:border-color .12s,background .12s}
+.um-check:hover{border-color:var(--accent)}
+.um-check:has(input:checked){border-color:var(--accent);background:var(--accent-glow)}
+.um-check input{width:19px;height:19px;margin-top:1px;accent-color:var(--accent);flex:none}
+.um-check>span{min-width:0}
+.um-check b{display:block;font-size:13.5px;line-height:1.3}
+.um-check small{display:block;color:var(--text-secondary);font-size:11.5px;margin-top:3px;line-height:1.4}
+.addons-note{display:block;margin-top:13px;color:var(--text-secondary);font-size:12px;line-height:1.5}</style>
 {% else %}
 <section class="premium-users">
  <div class="premium-users-head"><div><h2>User Management</h2><p>Manage accounts, subscriptions and calling access.</p></div><div class="premium-count">{{ users|rejectattr('role','equalto','admin')|list|length }} users</div></div>
