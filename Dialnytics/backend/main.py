@@ -2337,6 +2337,7 @@ async def save_user_all(request: Request):
     want_sms, want_adv = bool(f.get("sms")), bool(f.get("adv"))
     want_live = bool(f.get("live"))
     want_leave = bool(f.get("leave"))
+    want_conf = bool(f.get("conference"))
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT id,role,sms_enabled,adv_calling,live_route FROM public.dialnytics_users
@@ -2348,8 +2349,8 @@ async def save_user_all(request: Request):
             if cur.fetchone():
                 return bounce("Email already exists")
             cur.execute("""UPDATE public.dialnytics_users SET name=%s,email=%s,plan_name=%s,plan_renewal=%s::date,
-                recording_premium=%s,power_enabled=%s,sms_credits=%s,call_countries=%s,conf_leave=%s WHERE id=%s""",
-                        (name, new_email, plan_name, renewal, want_rec, want_power, credits, zones, want_leave,
+                recording_premium=%s,power_enabled=%s,sms_credits=%s,call_countries=%s,conf_leave=%s,conf_enabled=%s WHERE id=%s""",
+                        (name, new_email, plan_name, renewal, want_rec, want_power, credits, zones, want_leave, want_conf,
                          target["id"]))
     refresh_users()
     problems = []
