@@ -243,15 +243,34 @@ def sip_provider_get(pid):
     except Exception:
         return None
 
+# Global SIP (Render env): ONE WSS/domain/password for everyone. Each user's own
+# number is the SIP username, so no per-user "SIP provider" needs to be created.
+SIP_GLOBAL = {
+    "wss": os.getenv("SIP_WSS", "").strip(),
+    "domain": os.getenv("SIP_DOMAIN", "").strip(),
+    "password": os.getenv("SIP_PASSWORD", ""),
+}
+def sip_global_enabled():
+    return bool(SIP_GLOBAL["wss"] and SIP_GLOBAL["domain"] and SIP_GLOBAL["password"])
+
+
 def echo_cfg_for(user):
-    """SIP login config for a browser-SIP (echodial) user. If the user is tied to an
-    admin-added SIP provider (sip_provider_id), use that row; otherwise the env EchoDial."""
+    """SIP login config for a browser-SIP (echodial) user.
+    Priority: (1) a per-user SIP provider row (backward compat), else
+    (2) global SIP from env with the USER'S OWN NUMBER as the username, else
+    (3) env EchoDial."""
     row = sip_provider_get(user.get("sip_provider_id")) if user else None
     if row:
         return {"wss": row["wss"].strip(),
                 "domain": (row["sip_domain"] or _sip_domain_from_wss(row["wss"])).strip(),
                 "username": row["username"].strip(), "password": row["password"],
                 "name": row["name"]}
+    if user and sip_global_enabled():
+        uname = re.sub(r"\D", "", str(user.get("phone_number") or ""))
+        if uname:
+            return {"wss": SIP_GLOBAL["wss"], "domain": SIP_GLOBAL["domain"],
+                    "username": uname, "password": SIP_GLOBAL["password"],
+                    "name": user.get("provider_label") or "SIP"}
     return dict(ECHODIAL, name="EchoDial")
 
 # ---- Local presence: pick one of the customer's OWN caller-IDs by area code ----
@@ -411,6 +430,7 @@ def _db_user(row):
         "live_route": bool(row.get("live_route", False)),
         "conf_leave": bool(row.get("conf_leave", False)),
         "conf_enabled": bool(row.get("conf_enabled", True)),
+        "provider_label": row.get("provider_label") or "",
         "telnyx_account": tx_key(row.get("telnyx_account") or "t1"),
         "call_countries": row.get("call_countries") or "",
         "twilio_account": tw_key(row.get("twilio_account") or "w1"),
@@ -589,6 +609,7 @@ ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS twilio_account text
 -- 30: Twilio number verified on Telnyx: outgoing via Telnyx, incoming rings through Twilio
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS twilio_in boolean NOT NULL DEFAULT false;
 ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS conf_enabled boolean NOT NULL DEFAULT true;
+ALTER TABLE public.dialnytics_users ADD COLUMN IF NOT EXISTS provider_label text;
 -- 31: admin-added SIP providers (browser WebRTC/JsSIP), e.g. EchoDial or any wholesale SIP trunk.
 --     A user on provider='echodial' with sip_provider_id set uses that row's config; NULL = env EchoDial.
 CREATE TABLE IF NOT EXISTS public.sip_providers (
@@ -2202,6 +2223,12 @@ async def create_user(
                 if provider == 'echodial' and str(sip_provider_id).strip().isdigit():
                     cur.execute('UPDATE public.dialnytics_users SET sip_provider_id=%s WHERE id=%s',
                                 (int(sip_provider_id), new_id))
+                # SIP carrier LABEL (global-SIP user): just for the record of which carrier.
+                if provider == 'echodial':
+                    _plabel = (form.get('provider_label') or '').strip()[:100]
+                    if _plabel:
+                        cur.execute('UPDATE public.dialnytics_users SET provider_label=%s WHERE id=%s',
+                                    (_plabel, new_id))
                 if phone_number:
                     cur.execute('INSERT INTO public.caller_id_assignments(user_id,phone_number) VALUES (%s,%s)',
                                 (new_id,phone_number))
@@ -2518,6 +2545,8 @@ templates.env.globals["leg_tag"] = ct.leg_tag
 def provider_label(u):
     """'Twilio', 'Telnyx', 'EchoDial', or 'Telnyx 1' / 'Telnyx 2' when two Telnyx accounts are set up."""
     if (u.get("provider") or "telnyx") == "echodial":
+        if u.get("provider_label"):
+            return u["provider_label"]
         if u.get("sip_provider_id"):
             row = sip_provider_get(u.get("sip_provider_id"))
             if row:
@@ -2530,8 +2559,22 @@ def provider_label(u):
     return "Telnyx"
 templates.env.globals["provider_label"] = provider_label
 
+def provider_labels_list():
+    """Editable list of SIP (EchoDial) carrier LABELS — for the record of which carrier a
+    user is on. Stored in settings; admin can add names. These all use the one global SIP."""
+    raw = get_setting("provider_labels", "")
+    names = [x.strip() for x in str(raw or "").replace(",", "\n").splitlines() if x.strip()]
+    if not names:
+        names = ["Infinity-USA", "Econnet", "Didlogic"]
+    seen, out = set(), []
+    for n in names:
+        if n.lower() not in seen:
+            seen.add(n.lower()); out.append(n)
+    return out
+
+
 def calling_lines():
-    """Provider choices for the admin: Telnyx 1, Telnyx 2, Twilio 1, Twilio 2."""
+    """Provider choices for the admin: Telnyx 1/2, Twilio 1/2, then the SIP carrier labels."""
     out = []
     for key, label in (("t1", "Telnyx 1"), ("t2", "Telnyx 2")):
         c = TELNYX_ACCOUNTS.get(key)
@@ -2541,13 +2584,26 @@ def calling_lines():
         c = TWILIO_ACCOUNTS.get(key)
         out.append({"value": "twilio:" + key, "provider": "twilio", "account": key, "label": label,
                     "ready": bool(c and c["sid"] and c["token"])})
-    # Generic env "EchoDial" line retired — admin uses their own named SIP providers
-    # (ECONNET-CS etc.) added below. The env fallback still works for any legacy user.
-    # Admin-added SIP providers (browser WebRTC). Each is an EchoDial-type line.
+    # SIP carriers via the ONE global SIP. Pick a label; the user's own number becomes the
+    # SIP username. No per-user SIP provider needed. Label is just for the record.
+    for name in provider_labels_list():
+        out.append({"value": "echodial:label:" + name, "provider": "echodial", "account": "",
+                    "label": name, "ready": sip_global_enabled(), "manual": True, "label_only": True})
+    # Legacy per-user SIP providers (kept so existing setups still work).
     for p in sip_providers_all():
         out.append({"value": "echodial:" + str(p["id"]), "provider": "echodial", "account": str(p["id"]),
-                    "label": p["name"], "ready": True, "manual": True})
+                    "label": p["name"] + " (legacy)", "ready": True, "manual": True})
     return out
+
+
+@app.post('/provider-labels')
+def provider_labels_save(request: Request, labels: str = Form('')):
+    """Admin edits the SIP carrier label list (one per line)."""
+    require_admin(request)
+    from urllib.parse import quote
+    cleaned = [x.strip() for x in str(labels or '').replace(',', '\n').splitlines() if x.strip()]
+    set_setting('provider_labels', '\n'.join(cleaned))
+    return RedirectResponse('/users/new?msg=' + quote('Provider list updated', safe=''), status_code=303)
 
 def user_line(u):
     if (u.get("provider") or "telnyx") == "echodial":
@@ -2557,6 +2613,7 @@ def user_line(u):
     return "telnyx:" + (u.get("telnyx_account") or "t1")
 
 templates.env.globals["calling_lines"] = calling_lines
+templates.env.globals["provider_labels_list"] = provider_labels_list
 templates.env.globals["user_line"] = user_line
 
 # ---- Calling countries: a UK line calls only the UK, a US line only US/Canada,
