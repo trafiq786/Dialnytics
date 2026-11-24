@@ -1,44 +1,44 @@
 ==========================================================
-  POWER DIALER — SKIP DISPOSITION (FULLY AUTO)
+  CRM IMPORT — AB HAR FORMAT KHUD UPLOAD HO JATA HAI
 ==========================================================
 
-KYA BANA
---------
-Power Dialer mein naya option: "Skip disposition — fully automatic".
-ON karo to:
-  - Mode khud "Auto" ho jata hai.
-  - Jaise hi ek call KHATAM ho, set delay (3-30s) ke baad AGLA lead
-    KHUD dial ho jata hai. Koi outcome/disposition button click NAHI
-    karna padta. Bas 1-by-1 auto calls chalti rahengi.
-  - Call khatam karne ke liye dialer par HANG-UP dabao (ya saamne wala
-    rakh de) -> phir timer chal kar agla number dial karega.
-
-KAISE CHALAO
+MASLA JO THA
 ------------
-1) /power-dialer kholo.
-2) Mode = Auto, "Delay between calls" set karo (jaise 8 sec).
-3) "Skip disposition — fully automatic" wala box TICK karo.
-4) Create Queue -> leads select -> Start.
-5) Ab bas baat karo aur hang-up dabate jao -> agla number khud lagta
-   rahega. Pause/Stop se rok sakte ho.
+Tumhari lead file (name, phone, email, consent, do_not_call) upload pe
+0 add / 351 skip ho rahi thi, kyunki:
+  1) consent column KHAALI thi -> CRM bina consent ke har lead reject kar
+     deta tha.
+  2) US 10-digit numbers ko import UK (+44) samajh ke None bana ke skip
+     kar deta tha.
 
-NOTE
-----
-- Ye sirf Auto mode mein chalta hai (box tick karte hi mode auto ho jata).
-- Har auto call "dialed" result ke saath history mein save hoti hai
-  (lead ka CRM status nahi badalta). Baad mein chaho to manually
-  disposition set kar sakte ho.
-- Delay = ek call khatam hone aur agla shuru hone ke BEECH ka gap.
-  (Calls stack nahi hoti — pehle call khatam, phir delay, phir agli.)
+AB KYA THEEK HUA (code)
+----------------------
+1) CONSENT: ab maan liya jata hai ke permission lead banate waqt li gayi.
+   Har row import hogi -- SIVAAE us ke jis ki consent cell mein saaf
+   likha ho: no / false / 0 / optout / declined / revoked / dnc,
+   YA do_not_call cell mein 'yes'. Khaali consent ab skip NAHI karti.
+
+2) NUMBERS: country KHUD detect hoti hai (US/Canada vs UK).
+   - US 10-digit (jaise 2163079977 / (616) 262-6271) -> khud +1 lag jata hai.
+   - 1XXXXXXXXXX -> +1. UK 0.../44... -> +44 (pehle jaisa).
+   File ke numbers dekh kar majority se decide hota hai.
+
+NATEEJA
+-------
+Wahi original file ab seedha upload karo -> ~269 leads add honge
+(naam, number, email CRM mein show). File clean karne ki zaroorat NAHI.
+(Jo rows bina number ke hain -- "Dialer Lead Id"/khaali -- wo phir bhi
+skip hongi kyunki unhe dial nahi kiya ja sakta.)
 
 BADLI FILES
 -----------
-  backend/main.py                        (skip_disposition column + create + 'dialed' result)
-  frontend/templates/power_dialer.html   (checkbox)
-  frontend/static/js/power-dialer.js     (auto-advance on call end)
+  backend/main.py                 (import: consent + US numbers)
+  frontend/templates/crm.html     (help text update)
 
-DATABASE: koi manual SQL nahi — power_queues.skip_disposition column
-khud ban jata hai (agar table maujood ho).
+NOTE: is main.py mein pichla sab kaam bhi shaamil hai (SIP migration +
+Power Dialer auto-dial) -- cumulative hai.
 
-Deploy ke baad power dialer page ek dafa HARD-REFRESH (Ctrl+F5) —
-JS ?v=5 ho gaya hai.
+COMPLIANCE
+----------
+Ye US cold leads hain -- dial se pehle DNC/TCPA scrub apni zimmedari par
+karna. Consent ab tumhari taraf se assumed hai.

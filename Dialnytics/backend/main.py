@@ -5500,7 +5500,7 @@ def _import_number(raw, default_cc="44"):
     if d.startswith("0"):                           # national trunk 0 -> country code
         rest = d[1:]
         return "+" + default_cc + rest if re.fullmatch(r"[1-9]\d{6,13}", rest) else None
-    if len(d) == 10 and d[0] == "7":                # UK mobile typed without the 0
+    if len(d) == 10 and d[0] in "23456789":         # 10-digit national number, no trunk 0 (US area code / UK mobile)
         return "+" + default_cc + d
     if 11 <= len(d) <= 15 and d[0] != "0":          # looks like it already has a country code
         return "+" + d
@@ -5665,7 +5665,10 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
         for row in table[1:]:
             r = {headers[i]: row[i] for i in range(min(len(headers), len(row)))}
             dnc = pickr(r, "donotcall", "dnc", "donotcontact").lower() in YES
-            consent_ok = (not has_consent_col) or pickr(r, "consent", "optin", "permission").lower() in YES
+            # Consent is assumed present (collected at lead generation). Import unless the
+            # consent cell EXPLICITLY says no / opt-out. An empty consent column no longer skips.
+            consent_ok = pickr(r, "consent", "optin", "permission").strip().lower() \
+                not in ("no", "false", "0", "n", "optout", "opt-out", "declined", "revoked", "dnc")
             phone_raw = pickr(r, "phone", "phonenumber", "mobile", "number", "telephone", "tel", "cell")
             name = pickr(r, "name", "fullname", "contact", "contactname", "leadname")
             if not name:
@@ -5712,6 +5715,13 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
     if len(leads_in) > 500:
         raise HTTPException(status_code=422, detail="Maximum 500 rows per import")
 
+    # Default country for bare national numbers (no + and no country code).
+    # US/Canada 10-digit (area code 2-9) vs UK 0-/44- numbers. Lean US unless UK clearly dominates.
+    _digs = [re.sub(r"\D", "", str(p or "")) for (_n, p, *_rest) in leads_in]
+    _uk = sum(1 for d in _digs if d.startswith("0") or (len(d) >= 11 and d.startswith("44")))
+    _us = sum(1 for d in _digs if (len(d) == 11 and d[0] == "1") or (len(d) == 10 and d and d[0] in "23456789"))
+    region_cc = "44" if _uk > _us else "1"
+
     added = 0; skipped = 0
     try:
         with db_connect() as conn:
@@ -5719,7 +5729,7 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
                 for (name, phone_raw, company, website, email, notes, consent_ok, dnc) in leads_in:
                     if dnc or not consent_ok:
                         skipped += 1; continue
-                    phone = _import_number(phone_raw)
+                    phone = _import_number(phone_raw, region_cc)
                     name = (name or "").strip()[:150]
                     if not phone or not name:
                         skipped += 1; continue
