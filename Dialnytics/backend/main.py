@@ -1638,6 +1638,7 @@ def routing_page(request: Request):
         counts[u["sip_provider_id"]] = counts.get(u["sip_provider_id"], 0) + 1
     rows = [{"name": u["name"] or u["email"], "email": u["email"], "number": u["phone_number"] or "",
              "provider": pname.get(u["sip_provider_id"], "EchoDial (env)") if u["sip_provider_id"] else "EchoDial (env)",
+             "legacy": bool(u["sip_provider_id"]),
              "hybrid": bool(u["twilio_in"])} for u in users]
     opts = [{"id": "env", "name": "EchoDial (env default)", "n": counts.get(None, 0), "active": echodial_enabled()}]
     for p in providers:
@@ -1703,6 +1704,78 @@ def routing_resync_hybrid(request: Request):
             log.exception("resync hybrid failed for %s", r["id"])
     refresh_users()
     return RedirectResponse('/routing?msg=' + quote("Hybrid re-synced: %d user(s) now take inbound on Twilio" % on, safe=''), status_code=303)
+
+
+# ----- Migrate OLD users (per-user SIP provider / 1001 style) to the NEW global SIP -----
+# Clears sip_provider_id -> echo_cfg_for falls through to global SIP, using the user's own
+# NUMBER as the SIP username. Admin still creates that number's SIP User Auth in ConnexCS.
+@app.post('/customers/{email}/to-global-sip')
+def customer_to_global_sip(request: Request, email: str, provider_label: str = Form("")):
+    require_admin(request)
+    from urllib.parse import quote
+    if not sip_global_enabled():
+        return RedirectResponse('/customers/' + quote(email, safe='') +
+                                '?err=' + quote("Global SIP not set on server (SIP_WSS/SIP_DOMAIN/SIP_PASSWORD)", safe=''),
+                                status_code=303)
+    plabel = (provider_label or "").strip()[:100]
+    with db_connect() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT id, phone_number FROM public.dialnytics_users WHERE lower(email)=lower(%s)", (email,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "User not found")
+            if plabel:
+                cur.execute("UPDATE public.dialnytics_users SET provider='echodial', sip_provider_id=NULL, provider_label=%s WHERE id=%s",
+                            (plabel, row["id"]))
+            else:
+                cur.execute("UPDATE public.dialnytics_users SET provider='echodial', sip_provider_id=NULL WHERE id=%s",
+                            (row["id"],))
+    try:
+        _sync_twilio_inbound(row["id"], "echodial", row["phone_number"] or "")
+    except Exception:
+        log.exception("to-global-sip hybrid resync failed for %s", row["id"])
+    refresh_users()
+    log.info("Migrated user %s to global SIP (label=%s)", email, plabel or "-")
+    return RedirectResponse('/customers/' + quote(email, safe='') + '?msg=' +
+                            quote("Moved to global SIP — create this number's SIP User Auth in ConnexCS, then the user hard-refreshes the dialer", safe=''),
+                            status_code=303)
+
+
+@app.post('/routing/to-global-sip')
+def routing_to_global_sip(request: Request, provider_label: str = Form("")):
+    """Bulk: move EVERY active EchoDial user that still has a per-user SIP provider
+    onto the global SIP (sip_provider_id=NULL). Each user keeps their own number (CLI)
+    and their Twilio inbound (hybrid)."""
+    require_admin(request)
+    from urllib.parse import quote
+    if not sip_global_enabled():
+        return RedirectResponse('/routing?err=' + quote(
+            "Global SIP not set on server (SIP_WSS / SIP_DOMAIN / SIP_PASSWORD)", safe=''), status_code=303)
+    plabel = (provider_label or "").strip()[:100]
+    with db_connect() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT id, phone_number FROM public.dialnytics_users
+                            WHERE COALESCE(provider,'telnyx')='echodial' AND role<>'admin' AND is_active
+                              AND sip_provider_id IS NOT NULL""")
+            rows = cur.fetchall()
+            if plabel:
+                cur.execute("""UPDATE public.dialnytics_users SET sip_provider_id=NULL, provider_label=%s
+                                WHERE COALESCE(provider,'telnyx')='echodial' AND role<>'admin' AND is_active
+                                  AND sip_provider_id IS NOT NULL""", (plabel,))
+            else:
+                cur.execute("""UPDATE public.dialnytics_users SET sip_provider_id=NULL
+                                WHERE COALESCE(provider,'telnyx')='echodial' AND role<>'admin' AND is_active
+                                  AND sip_provider_id IS NOT NULL""")
+    for r in rows:
+        try:
+            _sync_twilio_inbound(r["id"], "echodial", r["phone_number"] or "")
+        except Exception:
+            log.exception("bulk to-global-sip hybrid resync failed for %s", r["id"])
+    refresh_users()
+    log.info("Bulk migrated %d user(s) to global SIP (label=%s)", len(rows), plabel or "-")
+    return RedirectResponse('/routing?msg=' + quote(
+        "Moved %d user(s) to global SIP — make sure each number has a SIP User Auth in ConnexCS, then users hard-refresh" % len(rows),
+        safe=''), status_code=303)
 
 
 @app.post('/customers/{email}/change-number')

@@ -69,6 +69,25 @@
 
     <div class="rt-note"><b>Failover plan:</b> jab kisi provider ka masla ho — From = kharab provider, To = theek provider, "Switch all users". Users agli call par naye provider se register ho jayenge. Naya provider pehle <a href="/sip-providers" style="color:#2563eb">SIP Providers</a> mein add hona chahiye, aur us par in users ki CLIs approved honi chahiye.</div>
 
+    {% set legacy = rows|selectattr('legacy')|list %}
+    <div class="panel-title" style="margin-top:22px"><span class="panel-icon">🆕</span><div><h2>Move to global SIP</h2><p>Purane per-user SIP wale users ko naye system par</p></div></div>
+    <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin:2px 0 10px">
+      Purane users jinke paas apna alag "SIP Provider" laga hai (jaise 1001/1004) unko <b>global SIP</b> par le aao — phir unka apna <b>number</b> hi SIP username banega. Abhi <b>{{ legacy|length }}</b> user is purane system par hain.
+    </p>
+    {% if legacy %}
+    <form method="post" action="/routing/to-global-sip"
+          onsubmit="return confirm('Move {{ legacy|length }} user(s) to global SIP? Pehle yakeeni banao ke har number ki SIP User Auth ConnexCS mein bani ho (username = number). Users ko dialer hard-refresh karna hoga.')">
+      <div class="field" style="margin:0 0 10px;max-width:320px">
+        <label>Provider label (optional — sirf record ke liye)</label>
+        <input class="rt-sel" style="width:100%" name="provider_label" placeholder="jaise Infinity-USA" maxlength="100">
+      </div>
+      <button class="rt-btn primary" type="submit">Move {{ legacy|length }} user(s) to global SIP</button>
+      <small style="display:block;margin-top:8px">sip_provider_id clear ho jayega → har user apne number se global SIP par register karega. Number (CLI) aur hybrid inbound barqarar. ConnexCS mein har number ki SIP User Auth (username = digits, password = SIP_PASSWORD) honi chahiye.</small>
+    </form>
+    {% else %}
+    <div class="rt-note" style="margin-top:4px;background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.28)">Koi user purane per-user SIP par nahi — sab already global SIP (ya env) par hain. ✅</div>
+    {% endif %}
+
     <div class="panel-title" style="margin-top:22px"><span class="panel-icon">📞</span><div><h2>Hybrid calling</h2><p>Out = SIP, In = Twilio DID</p></div></div>
     <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin:2px 0 12px">
       Hybrid khud chalta hai jab EchoDial user ka number ek <b>Twilio</b> number ho: outbound call SIP provider se jati hai (CLI = wahi Twilio number), aur jab koi wapas call kare to Twilio par aati hai aur user ke dialer par ring hoti hai. Niche "inbound Twilio" us user ke liye ON dikhta hai.

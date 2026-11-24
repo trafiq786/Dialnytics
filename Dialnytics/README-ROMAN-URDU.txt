@@ -1,6 +1,7 @@
 ===========================================================
-  SIP AUTO-PROVIDER  +  Add-ons UI (Conference)
+  SIP AUTO-PROVIDER  +  Add-ons UI  +  MOVE-TO-GLOBAL-SIP
   (user banao -> SIP khud, alag provider nahi)
+  (purane users ko naye system par ek-click)
 ===========================================================
 
 KYA BANA
@@ -10,70 +11,75 @@ KYA BANA
    Provider" banane ki zaroorat NAHI.
 
 2) USER CREATE karte waqt:
-   - "Calling Provider" dropdown mein ab carrier LABELS aate hain
-     (Infinity-USA, Econnet, Didlogic ... + Telnyx/Twilio).
+   - "Calling Provider" dropdown mein carrier LABELS (Infinity-USA,
+     Econnet, Didlogic ... + Telnyx/Twilio).
    - Label chuno -> number type karo (= CLI = SIP username). Bas.
    - WSS/domain/password kuch nahi mangta (global se khud lagta hai).
-   - Provider label sirf RECORD ke liye (kis carrier par user hai);
-     routing ConnexCS mein hoti hai.
+   - Provider label sirf RECORD ke liye.
 
-3) PROVIDER LIST editable — Create User page par niche
-   "⚙ Manage provider list" -> naam add/edit karo (ek per line) -> Save.
+3) PROVIDER LIST editable — Create User page par "⚙ Manage provider list".
 
-4) ADD-ONS UI: edit popup mein ab "Conference (3-way)" toggle (har user par
-   ON/OFF). 3-way ab sirf is toggle se (partner-plan coupling hata di).
+4) ADD-ONS UI: edit popup mein "Conference (3-way)" toggle (har user par
+   ON/OFF). Full-width card layout (UI fix shaamil).
 
-5) Local presence: per-call CLI From header mein lagti rahegi (registration
-   username nahi badalta — wo user ka fixed number).
+5) >>> NAYA: MOVE-TO-GLOBAL-SIP <<<  (purane 1001/1004 wale users migrate)
+   Purane users jinke paas apna alag "SIP Provider" laga hai (sip_provider_id)
+   unko global SIP par le aao -> phir unka apna NUMBER hi SIP username banega.
+
+   (a) EK USER:  Customers -> user kholo -> "Calling Provider & Number" card
+       -> niche "🆕 Move to global SIP (new system)" -> (optional label)
+       -> "Move to global SIP".
+       Ye sirf tab dikhta hai jab user purane per-user SIP par ho.
+
+   (b) SAB EK SAATH (bulk):  Routing page -> "🆕 Move to global SIP" panel
+       -> (optional label) -> "Move N user(s) to global SIP".
+       Panel batata hai kitne users abhi purane system par hain.
+
+   Dono: sip_provider_id clear hota hai, number (CLI) aur hybrid inbound
+   barqarar rehte hain. Koi call drop nahi.
 
 
 RENDER ENV (ek dafa set karo)  << ZAROORI >>
 --------------------------------------------
   SIP_WSS       = wss://dialnytics.sip.direct/ws
   SIP_DOMAIN    = dialnytics.sip.direct
-  SIP_PASSWORD  = <wahi password jo tum ConnexCS SIP auth mein use karte ho>
+  SIP_PASSWORD  = <wahi password jo ConnexCS SIP auth mein use karte ho>
 
-Jab tak ye 3 set na hon, naya global-SIP mode OFF rehta hai (purane
-sip_provider_id wale users phir bhi chalte hain — kuch nahi tootta).
+Jab tak ye 3 set na hon: global-SIP mode + migration button OFF rehte hain
+(purane sip_provider_id wale users phir bhi chalte hain — kuch nahi tootta).
 
 
-CONNEXCS SIDE (tum manually — jaisa tum ne kaha)
-------------------------------------------------
-Har user ke liye ConnexCS customer mein ek SIP User Auth banao:
-  - Username = us user ka NUMBER, sirf digits (e.g. +1 580 808 3238 ->
-    username "15808083238")
-  - Password = wahi SIP_PASSWORD (sab same)
-Bas. Dialnytics is username/password se register karta hai, aur CLI usi
-number se jati hai.
+PURANE USERS KO MIGRATE KARNE KA TAREEQA
+----------------------------------------
+Har purane user ke liye (ya bulk se sab ke liye):
+  1) ConnexCS mein us user ke NUMBER ki SIP User Auth banao
+     (username = sirf digits, e.g. 15808083238 ; password = SIP_PASSWORD).
+  2) Dialnytics mein button dabao:
+     - Ek user:  Customer page -> "Move to global SIP"
+     - Sab:      Routing page -> "Move N user(s) to global SIP"
+  3) User dialer HARD-REFRESH kare (Ctrl+F5) -> ab apne number se register.
+
+Tip: pehle EK user par test karo (uska ConnexCS auth banao -> Customer page
+se migrate -> refresh -> US call -> CDR mein username ab number ka hoga).
+Theek chale to Routing se bulk kar do.
 
 
 BADLI FILES  (latest code ke upar)
 ----------------------------------
-  backend/main.py                       (global SIP, echo_cfg_for, labels, create)
-  frontend/templates/users.html         (provider labels + manage + Conference toggle)
-  frontend/templates/dialer_rail.html   (data-conf = conf_enabled)
+  backend/main.py                        (global SIP, migration routes)
+  frontend/templates/users.html          (provider labels + Conference toggle + UI fix)
+  frontend/templates/dialer_rail.html    (data-conf = conf_enabled)
+  frontend/templates/routing.html        (bulk Move-to-global-SIP panel)
+  frontend/templates/customer_detail.html(per-user Move-to-global-SIP button)
 
 DATABASE: koi manual SQL nahi — provider_label column khud ban jata hai.
 
 
-ISTEMAAL / TEST (test-on-one)
------------------------------
-1) Render par SIP_WSS / SIP_DOMAIN / SIP_PASSWORD set karo. Deploy.
-2) ConnexCS mein ek TEST number ke liye SIP User Auth banao
-   (username = digits, password = SIP_PASSWORD).
-3) Create User -> "Calling Provider" dropdown se label (jaise Infinity-USA)
-   chuno -> number type karo (wahi jiska ConnexCS auth banaya) -> Create.
-4) Us user se login -> dialer -> US call -> connect check karo.
-   (CDR mein username ab us number ka hoga, 1004 nahi.)
-5) Sahi chale to baqi users isi tarah banao — alag provider nahi banana.
-
-PROVIDER NAAM ADD karna ho: Create User page -> "⚙ Manage provider list".
-
-
 BACKWARD COMPAT
 ---------------
-- Purane users jinke paas sip_provider_id hai -> waise hi chalte hain
-  (echo_cfg_for pehle unka provider dekhta hai).
+- Purane users (sip_provider_id wale) deploy ke baad bhi waise hi chalte hain.
+  echo_cfg_for pehle unka provider dekhta hai. Migration tab hi hoti hai jab
+  tum button dabao. Koi disruption nahi.
 - SIP Providers page (ECONNET-CS etc.) abhi bhi hai; naye users ke liye
   zaroorat nahi.
 

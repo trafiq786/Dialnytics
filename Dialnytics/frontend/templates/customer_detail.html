@@ -5,6 +5,8 @@
 <div class="cm-hero"><h1>{{ customer.name }}</h1><p>{{ customer.email }}</p><div class="cm-metrics">{% if customer.collected_usd and customer.collected_usd|float > 0 %}<div class="cm-metric"><strong>${{ '{:,.2f}'.format(customer.collected_usd|float) }} ≈ Rs. {{ '{:,.0f}'.format((customer.collected|float)) }}</strong><small>Paid in USD · shown in PKR</small></div>{% endif %}<div class="cm-metric"><strong>{{ 'Unlimited' if customer.sms_credits is none else customer.sms_credits }}</strong><small>SMS left</small></div><div class="cm-metric"><strong>{{ customer.phone_number or '—' }}</strong><small>Caller ID</small></div><div class="cm-metric"><strong>{{ customer.calls_month }}</strong><small>Calls (plan cycle)</small></div><div class="cm-metric"><strong>{{ (customer.talk_seconds or 0)//60 }}m</strong><small>Talk Time (plan cycle)</small></div><div class="cm-metric"><strong>{{ customer.plan_renewal or '—' }}</strong><small>Next Renewal</small></div></div><p class="cm-muted" style="margin:12px 0 0;font-size:12px">Usage period: {{ customer.cycle_start }} → {{ customer.cycle_end }} (30 days from plan start / last renewal; resets on renewal)</p></div>
 {% if request.query_params.get('saved') %}<p class="cm-pill cm-ok">Customer updated</p>{% endif %}
 {% if request.query_params.get('number_updated') %}<p class="cm-pill cm-ok">Caller ID updated successfully.</p>{% endif %}
+{% if request.query_params.get('msg') %}<p class="cm-pill cm-ok">{{ request.query_params.get('msg') }}</p>{% endif %}
+{% if request.query_params.get('err') %}<p class="cm-pill cm-danger">{{ request.query_params.get('err') }}</p>{% endif %}
 {% set prov = customer.provider or 'telnyx' %}
 {% if costs %}
 <section class="cm-card">
@@ -62,6 +64,16 @@
     <button class="cm-btn" type="submit">Switch provider</button>
   </form>
   <script>(function(){var s=document.getElementById('switchProviderSel');if(!s)return;function sync(){var o=s.selectedOptions[0];document.getElementById('switchProviderValue').value=o.dataset.provider;document.getElementById('switchSipId').value=o.dataset.sip||'';}s.addEventListener('change',sync);sync();})();</script>
+  {% if customer.sip_provider_id %}
+  <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
+  <h3 style="margin:0 0 6px;font-size:14px">🆕 Move to global SIP (new system)</h3>
+  <p class="cm-muted" style="font-size:12px;margin:0 0 10px">Ye user abhi purane per-user SIP par hai. Global SIP par le aao — phir iska apna <b>number</b> hi SIP username banega, alag provider nahi chahiye. Pehle ConnexCS mein is number ki SIP User Auth banao (username = digits, password = SIP_PASSWORD), phir user dialer hard-refresh kare.</p>
+  <form method="post" action="/customers/{{ customer.email|urlencode }}/to-global-sip" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"
+        onsubmit="return confirm('Move this user to global SIP? ConnexCS mein is number ki SIP User Auth bani honi chahiye. User ko dialer hard-refresh karna hoga.');">
+    <input name="provider_label" class="cm-input" style="max-width:240px;background:var(--surface-secondary,#252c3d);color:var(--text-primary,#f5f7ff);border:1px solid var(--border,#394155);border-radius:9px;padding:11px" placeholder="Provider label (optional, e.g. Infinity-USA)" maxlength="100">
+    <button class="cm-btn" type="submit">Move to global SIP</button>
+  </form>
+  {% endif %}
   <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
   <h3 style="margin:0 0 6px;font-size:14px">Hybrid calling — inbound on Twilio</h3>
   <p class="cm-muted" style="font-size:12px;margin:0 0 10px">Outbound calls us ke provider (SIP / EchoDial) se jati hain; ON karne par inbound calls <b>Twilio DID</b> par aati hain aur user ke dialer par ring hoti hain.</p>
