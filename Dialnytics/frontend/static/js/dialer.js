@@ -447,7 +447,17 @@ function markEnded(reason) {
             answer() { try { session.answer({ mediaConstraints: { audio: true, video: false }, pcConfig: { iceServers: [] } }); } catch (e) {} },
             reject() { try { session.terminate({ status_code: 603 }); } catch (e) {} },
             hangup() { try { session.terminate(); } catch (e) {} },
-            dtmf(d) { try { session.sendDTMF(d); } catch (e) {} },
+            dtmf(d) {
+                // IVR tones: prefer in-band RFC2833 via the RTP sender; if the WebRTC leg
+                // has no telephone-event track (common on ConnexCS), fall back to SIP INFO.
+                try {
+                    var pc = session.connection;
+                    var snd = pc && pc.getSenders && pc.getSenders().find(function (x) { return x.dtmf; });
+                    if (snd && snd.dtmf && snd.dtmf.canInsertDTMF !== false) { snd.dtmf.insertDTMF(d, 200, 80); return; }
+                } catch (e) {}
+                try { if (session.sendInfo) { session.sendInfo('application/dtmf-relay', 'Signal=' + d + '\r\nDuration=200'); return; } } catch (e) {}
+                try { session.sendDTMF(d, { duration: 200, interToneGap: 80 }); } catch (e) {}
+            },
             muteAudio() { try { session.mute({ audio: true }); } catch (e) {} },
             unmuteAudio() { try { session.unmute({ audio: true }); } catch (e) {} },
             hold() { try { session.hold(); } catch (e) {} },

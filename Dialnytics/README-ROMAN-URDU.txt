@@ -1,44 +1,38 @@
 ==========================================================
-  CRM IMPORT — AB HAR FORMAT KHUD UPLOAD HO JATA HAI
+  DTMF FIX — IVR bots mein number press ab kaam kare (SIP)
 ==========================================================
 
-MASLA JO THA
-------------
-Tumhari lead file (name, phone, email, consent, do_not_call) upload pe
-0 add / 351 skip ho rahi thi, kyunki:
-  1) consent column KHAALI thi -> CRM bina consent ke har lead reject kar
-     deta tha.
-  2) US 10-digit numbers ko import UK (+44) samajh ke None bana ke skip
-     kar deta tha.
+MASLA
+-----
+Jab koi bot/IVR kehta hai "press 1 for sales..." to number dabane par
+tone aage nahi jati thi (SIP/EchoDial lines par).
 
-AB KYA THEEK HUA (code)
-----------------------
-1) CONSENT: ab maan liya jata hai ke permission lead banate waqt li gayi.
-   Har row import hogi -- SIVAAE us ke jis ki consent cell mein saaf
-   likha ho: no / false / 0 / optout / declined / revoked / dnc,
-   YA do_not_call cell mein 'yes'. Khaali consent ab skip NAHI karti.
+WAJAH
+-----
+SIP call par DTMF sirf RFC2833 (RTP) se bhej raha tha. ConnexCS WebRTC leg
+par agar telephone-event negotiate na ho to tone kahin nahi pohnchti.
 
-2) NUMBERS: country KHUD detect hoti hai (US/Canada vs UK).
-   - US 10-digit (jaise 2163079977 / (616) 262-6271) -> khud +1 lag jata hai.
-   - 1XXXXXXXXXX -> +1. UK 0.../44... -> +44 (pehle jaisa).
-   File ke numbers dekh kar majority se decide hota hai.
-
-NATEEJA
--------
-Wahi original file ab seedha upload karo -> ~269 leads add honge
-(naam, number, email CRM mein show). File clean karne ki zaroorat NAHI.
-(Jo rows bina number ke hain -- "Dialer Lead Id"/khaali -- wo phir bhi
-skip hongi kyunki unhe dial nahi kiya ja sakta.)
+AB KYA HUA
+----------
+In-call keypad ab SIP par DTMF aise bhejta hai:
+  1) Pehle RFC2833 (agar RTP sender support kare) — stronger 200ms tone.
+  2) Warna SIP INFO (application/dtmf-relay) — carrier-agnostic.
+Double digit ka risk nahi (ek hi method chalta hai).
 
 BADLI FILES
 -----------
-  backend/main.py                 (import: consent + US numbers)
-  frontend/templates/crm.html     (help text update)
+  frontend/static/js/dialer.js     (SIP dtmf: RFC2833 -> SIP INFO fallback)
+  frontend/templates/base.html     (dialer.js ?v=20261125 cache-bust)
 
-NOTE: is main.py mein pichla sab kaam bhi shaamil hai (SIP migration +
-Power Dialer auto-dial) -- cumulative hai.
+TEST
+----
+Deploy -> dialer page HARD-REFRESH (Ctrl+F5) -> kisi IVR/bot number par
+EchoDial(SIP) line se call -> keypad khol kar number dabao.
 
-COMPLIANCE
-----------
-Ye US cold leads hain -- dial se pehle DNC/TCPA scrub apni zimmedari par
-karna. Consent ab tumhari taraf se assumed hai.
+NOTE
+----
+- Ye fix SIP/EchoDial lines ke liye hai.
+- Twilio lines par DTMF alag SDK se jata hai (tw.sendDigits) — agar Twilio
+  line par masla hai to batao, usay alag dekhenge.
+- Agar SIP par phir bhi na chale: ConnexCS mein Infinity carrier par DTMF
+  relay mode (RFC2833) set karna pad sakta hai — wo switch-side setting hai.
