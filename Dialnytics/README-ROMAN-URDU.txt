@@ -1,40 +1,47 @@
 ==========================================================
-  SPEED FIX — dialer/CRM slow (50k leads par)
+  LOCAL PRESENCE — ab pool CLI asli ANI banegi (SIP)
 ==========================================================
 
-WAJAH
+MASLA
 -----
-1) crm_leads par INDEX nahi tha -> har query (CRM page, counts,
-   dashboard, dedup, picker) 50k rows seq-scan karti thi = slow.
-2) Power Dialer picker SAARI 50k leads browser mein load kar raha tha
-   (~bohat bada JSON) = tab slow/hang.
+Local presence ON tha lekin call assigned (user ka apna) number se ja
+rahi thi. Wajah: dialer sirf "From" header mein local CLI bhejta tha,
+par ConnexCS global SIP par registration username (= assigned number)
+ko hi asserted caller-ID (ANI) bana deta tha.
 
-AB KYA THEEK HUA
-----------------
-1) DB INDEXES khud ban jate hain (deploy par, ek dafa):
-     crm_leads(user_id), (user_id,phone), (user_id,followup_at)
-     power_queue_items(queue_id,position), (lead_id)
-   -> har query bohat tez.
-2) Picker ab sirf recent 5,000 leads browser mein lata hai (halka).
-3) NAYA button "Queue ALL eligible" -> poori 50k ko SERVER par queue
-   karta hai (browser mein 50k load kiye baghair). Yahi use karo bade
-   list dial karne ke liye.
+AB KYA HUA
+----------
+Jab local presence pool se koi ALAG CLI uthata hai, dialer ab us CLI ko
+P-Asserted-Identity (aur P-Preferred-Identity) header mein bhi bhejta hai.
+Tumhari ConnexCS wali P-Asserted-ID rewrite ( (.*) -> $1 ) ab usi ko
+aage Infinity tak le jayegi -> ANI = pool wala local number.
 
-KAISE 50k DIAL KARO (ab)
-------------------------
-Create Queue -> dialog -> Mode/Delay set -> "Queue ALL eligible" dabao
--> server poori eligible list queue kar deta hai -> Start.
-(Chhote hath se chunne ke liye search + Select all abhi bhi hai, 5k sample.)
+(Jab pool match na ho to pehle jaisa fallback = user ka apna number,
+koi PAI nahi bhejta -- behaviour safe.)
+
+TEST (ek user par)
+------------------
+1) Deploy -> dialer page HARD-REFRESH (Ctrl+F5).
+2) Local presence ON wale user se aisa number dial karo jiska AREA CODE
+   pool mein maujood ho.
+3) Call ke CDR/console mein ANI check karo -> ab pool wala local number
+   hona chahiye, assigned nahi.
+
+AGAR PHIR BHI ASSIGNED CLI JAYE
+-------------------------------
+Do mein se ek:
+ (a) Pool mein us destination ke AREA CODE ka koi number NAHI -> fallback
+     user ke number par. (Pool mein wo area code add karo.)
+ (b) ConnexCS us customer par client ki PAI accept/trust nahi kar raha.
+     ConnexCS customer -> CLI/Caller-ID setting ko "From header / PAI se
+     lo" (fixed/registration nahi) par set karna pad sakta hai. Agar call
+     FAIL ho jaye (403) to PAI reject ho rahi hai -> batao, revert kar
+     denge.
 
 BADLI FILES
 -----------
-  backend/main.py                       (indexes + /api/power/queue/all + picker cap)
-  frontend/templates/power_dialer.html  (Queue ALL button, ?v=8)
-  frontend/static/js/power-dialer.js    (queue-all handler)
-  frontend/templates/crm.html           (cumulative)
-  frontend/static/js/crm.js             (cumulative)
+  frontend/static/js/dialer.js     (PAI/PPI header jab local presence)
+  frontend/templates/base.html     (dialer.js ?v=20261126)
 
-DEPLOY ke baad CRM + Power Dialer dono HARD-REFRESH (Ctrl+F5).
-
-NOTE: Pehla deploy thoda der le sakta hai (index ban raha hota hai 50k par)
--- ek dafa ka kaam hai, phir tez.
+NOTE: ye change sirf local-presence+pool-match wali calls ko chhuta hai.
+Baqi calls bilkul pehle jaisi.

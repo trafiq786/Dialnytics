@@ -878,20 +878,33 @@ function markEnded(reason) {
             if (PROVIDER === 'echodial') {
                 const target = 'sip:' + number.replace(/\D/g, '') + '@' + echoDomain;
                 let cli = (FROM || '').replace(/\D/g, '');
+                let lpPicked = false;   // true only when local presence substituted a different CLI
                 // Local presence: use an owned CLI that matches the destination area code.
                 // One fast lookup (the fallback stays the user's own number), so no real delay.
                 if (LOCAL_PRESENCE) {
                     try {
                         const pr = await fetch('/api/pick-cli?dest=' + encodeURIComponent(number.replace(/\D/g, '')), { cache: 'no-store' });
                         const pd = await pr.json();
-                        if (pd && pd.cli) cli = String(pd.cli).replace(/\D/g, '');
+                        if (pd && pd.cli) {
+                            const nc = String(pd.cli).replace(/\D/g, '');
+                            if (nc && nc !== cli) { cli = nc; lpPicked = true; }
+                        }
                     } catch (e) { /* keep the user's own CLI on any hiccup */ }
                     if (ended) { placing = false; return; }
+                }
+                // When local presence picked a pool CLI, also assert it so the switch
+                // (ConnexCS) uses it as the outbound caller ID instead of the registration
+                // username. Needs the carrier's P-Asserted-ID rewrite to pass it through.
+                const echoExtra = [];
+                if (lpPicked) {
+                    echoExtra.push('P-Asserted-Identity: <sip:' + cli + '@' + echoDomain + '>');
+                    echoExtra.push('P-Preferred-Identity: <sip:' + cli + '@' + echoDomain + '>');
                 }
                 const session = echoUA.call(target, {
                     mediaConstraints: { audio: true, video: false },
                     pcConfig: { iceServers: [] },
-                    fromUserName: cli || undefined
+                    fromUserName: cli || undefined,
+                    extraHeaders: echoExtra.length ? echoExtra : undefined
                 });
                 if (ended) { try { session.terminate(); } catch (e) {} placing = false; return; }
                 activeCall = echoShim(session, number, false);
