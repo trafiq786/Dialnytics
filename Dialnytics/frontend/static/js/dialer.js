@@ -890,7 +890,11 @@ function markEnded(reason) {
                 }
                 const session = echoUA.call(target, {
                     mediaConstraints: { audio: true, video: false },
-                    pcConfig: { iceServers: [] },
+                    // STUN so ICE can gather srflx candidates and keep media alive through
+                    // NAT (empty iceServers made calls drop to "Reconnecting" mid-call).
+                    pcConfig: { iceServers: [
+                        { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
+                    ] },
                     fromUserName: cli || undefined
                 });
                 if (ended) { try { session.terminate(); } catch (e) {} placing = false; return; }
