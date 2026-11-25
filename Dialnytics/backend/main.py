@@ -5720,7 +5720,7 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
             extras = [cell(row[c]) for c in range(ncols) if c not in used and c < len(row) and cell(row[c])]
             leads_in.append((name, phone_raw, "", "", "", " · ".join(extras), True, False))
 
-    CRM_IMPORT_MAX = int(os.getenv("CRM_IMPORT_MAX", "250000"))
+    CRM_IMPORT_MAX = int(os.getenv("CRM_IMPORT_MAX", "50000"))
     if len(leads_in) > CRM_IMPORT_MAX:
         raise HTTPException(status_code=422, detail=f"Maximum {CRM_IMPORT_MAX:,} rows per import")
 
@@ -5752,14 +5752,14 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
                     seen.add(phone)
                     to_insert.append((user["id"], name, phone, (email or "")[:254],
                                       (company or "")[:200], (website or "")[:300], (notes or "")[:2000]))
-                # status/do_not_call set explicitly so the insert never depends on column
-                # defaults (matches the manual "Add lead" insert). Batched for speed.
-                SQL = ("INSERT INTO public.crm_leads "
-                       "(user_id,name,phone,email,company,website,notes,consent,status,do_not_call) "
-                       "VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE,'new',FALSE)")
-                B = 2000
-                for i in range(0, len(to_insert), B):
-                    cur.executemany(SQL, to_insert[i:i + B])
+                # Fast bulk load via COPY (dedup already done above). Loads tens of
+                # thousands of rows in a few seconds. consent/status/do_not_call are
+                # set explicitly, matching the manual "Add lead" insert.
+                with cur.copy("COPY public.crm_leads "
+                              "(user_id,name,phone,email,company,website,notes,consent,status,do_not_call) "
+                              "FROM STDIN") as cp:
+                    for rec in to_insert:
+                        cp.write_row((rec[0], rec[1], rec[2], rec[3], rec[4], rec[5], rec[6], True, "new", False))
                 added = len(to_insert)
     except psycopg.Error as e:
         # Surface a readable reason instead of a bare 500 (e.g. a missing column).

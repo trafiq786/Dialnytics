@@ -1,44 +1,29 @@
 ==========================================================
-  CRM IMPORT v2 — FN/LN format + BADE files (lakhs rows)
+  CRM IMPORT v3 — limit 50k + COPY (bohot fast)
 ==========================================================
 
-AB KYA SUPPORT HUA
-------------------
-1) NAAM 2 columns mein (First/Last): FN, LN, FNAME, LNAME, FIRST, LAST,
-   GIVENNAME, SURNAME -> khud jud kar "Full Name" ban jata hai.
-   (jaise FN=Max, LN=Tromba -> "Max Tromba")
+TABDEELI
+--------
+1) LIMIT ab 50,000 rows per import (pehle 250k thi).
+2) INSERT ab PostgreSQL COPY se hota hai -> 50k rows chand seconds mein
+   (pura import 1-2 minute se kaafi kam). Dedup pehle Python mein ho jata
+   hai (ek dafa existing numbers load), phir seedha COPY.
 
-2) ADDRESS columns (ADDR/ADDRESS/STREET + CITY + ST/STATE + ZIP/ZIP4)
-   -> agar notes khaali ho to ye address lead ke NOTES mein chala jata hai
-   (CRM mein nazar aata hai, zaaya nahi hota).
+(Pichle sab fixes isme shaamil: FN/LN naam, address->notes, US +1
+ auto, khaali consent allow.)
 
-3) US 10-digit numbers -> khud +1 (country auto-detect, pehle wala fix).
+ZAROORI
+-------
+- Tumhari Leads__3.csv mein 2.44 lakh rows hain -> ab 50k limit se ZYADA
+  hai, is liye poori ek dafa nahi chadhegi. Do tareeqe:
+    (a) File ko 50k-50k ke hisson mein baant kar alag alag upload karo, YA
+    (b) Render env CRM_IMPORT_MAX ko barha do (jaise 100000) -- lekin
+        50k hi rakhna behtar hai (CRM/Power Dialer light rahega).
 
-4) Consent khaali -> phir bhi import (permission assumed) -- pehle wala fix.
-
-5) BADE files: pehle sirf 500 rows ki limit thi. Ab limit 250,000 rows.
-   Aur insert fast ho gaya (ek dafa existing numbers load, phir batches
-   mein daalta hai) -- lakhs rows seconds-minute mein.
-
-TUMHARI FILE (Leads__3.csv) KA NATEEJA (simulate)
--------------------------------------------------
-  Total rows      : 244,546
-  ADD honge       : 169,277  (naam + +1 number + address notes mein)
-  SKIP honge      : 75,269   (duplicate numbers aapas mein)
+- Har upload: naye unique numbers add honge, duplicate khud skip.
 
 BADLI FILE
 ----------
-  backend/main.py   (import: FN/LN, address->notes, 250k limit, fast insert)
+  backend/main.py
 
-NOTE / EHTIYAT
---------------
-- Itne bade (1.7 lakh) leads EK user ke CRM mein bhari ho sakte hain --
-  CRM list/Power Dialer thoda slow lag sakta hai. Behtar ho to area/campaign
-  ke hisab se chhoti files mein baanto.
-- Agar bada import request time-out kare (bohot bade file par), file ko
-  2 hisson mein baant kar do dafa upload kar lena.
-- Limit badalni ho to Render env: CRM_IMPORT_MAX (default 250000).
-
-COMPLIANCE
-----------
-US cold leads -- dial se pehle DNC/TCPA scrub apni zimmedari par.
+NOTE: COPY tez hai lekin ek hi transaction -- 50k tak bilkul theek.
