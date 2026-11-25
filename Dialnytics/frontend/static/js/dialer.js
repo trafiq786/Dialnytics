@@ -430,7 +430,22 @@ function markEnded(reason) {
             return ms.getAudioTracks().length ? ms : null;
         } catch (e) { return null; }
     }
+    // Prefer G711 (PCMU=0, PCMA=8) in the SDP offer so the ConnexCS/Infinity leg gets a
+    // codec it natively carries, instead of transcoding Opus (a common cause of one-way /
+    // no audio). Only reorders the existing codec list — removes nothing (DTMF etc. stay).
+    function preferG711(sdp) {
+        try {
+            return sdp.replace(/^(m=audio \d+ [A-Za-z0-9\/]+) (.+)$/m, function (_, head, pts) {
+                const list = pts.trim().split(/\s+/);
+                const pref = list.filter((p) => p === '0' || p === '8');
+                if (!pref.length) return head + ' ' + pts;
+                const rest = list.filter((p) => p !== '0' && p !== '8');
+                return head + ' ' + pref.concat(rest).join(' ');
+            });
+        } catch (e) { return sdp; }
+    }
     function echoShim(session, number, incoming) {
+        try { session.on('sdp', (e) => { if (e && e.type === 'offer' && e.sdp) e.sdp = preferG711(e.sdp); }); } catch (_) {}
         const shim = {
             _echo: true,
             _accepted: false,
