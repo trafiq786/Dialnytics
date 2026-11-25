@@ -5637,6 +5637,24 @@ async def crm_bulk_delete(request: Request):
         raise HTTPException(status_code=422, detail="Invalid lead IDs")
     return {"deleted": _delete_leads(user["id"], ids)}
 
+@app.post("/api/crm/leads/delete-all")
+async def crm_delete_all(request: Request):
+    """Delete EVERY lead in this user's CRM (and any power-dialer queue rows pointing
+    at them). One statement, so it clears tens of thousands of leads instantly."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required")
+    if not has_power(user):
+        raise HTTPException(status_code=403, detail="CRM is an optional add-on for your plan")
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""DELETE FROM public.power_queue_items
+                           WHERE lead_id IN (SELECT id FROM public.crm_leads WHERE user_id=%s)""",
+                        (user["id"],))
+            cur.execute("DELETE FROM public.crm_leads WHERE user_id=%s", (user["id"],))
+            deleted = cur.rowcount
+    return {"deleted": deleted}
+
 @app.post("/api/crm/import")
 async def crm_import(request: Request, file: UploadFile = File(...)):
     user = get_current_user(request)
@@ -5812,7 +5830,7 @@ def power_dialer_page(request: Request):
     if not has_power(user): return locked_page(request, user, "Power Dialer")
     return templates.TemplateResponse(request=request,name="power_dialer.html",context={"user":user})
 
-POWER_QUEUE_MAX = int(os.getenv("POWER_QUEUE_MAX", "5000"))
+POWER_QUEUE_MAX = int(os.getenv("POWER_QUEUE_MAX", "50000"))
 
 @app.post("/api/power/queue")
 async def power_queue_create(request: Request):

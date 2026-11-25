@@ -1,42 +1,28 @@
 ==========================================================
-  CRM — 50k leads sahi show + Power Dialer sab tak pohnche
+  CRM — "Delete all" button (+ sab recent fixes cumulative)
 ==========================================================
 
-MASLA
------
-50k leads add hui thin lekin:
- - "Total leads" sirf 1000 dikha raha tha
- - List mein sirf 1000 nazar aati thin (delete karo to agli 1000)
- - Power Dialer bhi sirf 1000 tak dial kar sakta tha
+NAYA
+----
+CRM page par (search/filter ke saath) naya "Delete all" button.
+ - Dabane par confirm: "Delete ALL <N> leads? ... cannot be undone."
+ - Haan karne par SAARI leads ek saath delete (50k bhi instant --
+   single SQL statement). Queue rows bhi saaf.
 
-WAJAH
------
- - CRM page aur stats dono sirf latest 1000 (LIMIT 1000) se bante the.
- - /api/crm/leads ka GET route tha hi nahi -> Power Dialer /crm page
-   (1000) se leads uthata tha.
-
-AB KYA THEEK HUA
-----------------
-1) STATS (Total/Consented/Callbacks/Do-not-call) ab DB ke REAL COUNT se
-   -> poore 50k ka sahi number dikhega.
-2) CRM list ke upar note: "Showing latest 1000 of 50000 ... Power Dialer
-   mein sab available". (Table latest 1000 hi rakhta hai taake page tez
-   rahe -- 50k rows ek table mein browser hang kar deta.)
-3) NAYA GET /api/crm/leads -> Power Dialer ab SAARI leads load karta hai
-   (default 50,000 tak, env CRM_PICKER_MAX se badal sakte ho).
-4) Power Dialer lead-picker 50k par freeze na ho -> ek dafa pehli 800
-   dikhata hai + search se narrow. "Select all" phir bhi SAARI matching
-   select karta hai (phir queue banate waqt max 5000 per queue).
+ISME PICHLA SAB SHAAMIL (cumulative main.py):
+  - Queue limit 50,000
+  - CRM stats real COUNT, GET /api/crm/leads (Power Dialer sab leads)
+  - Picker/queue table render cap (freeze na ho)
+  - CSV 30MB upload, FN/LN, address->notes, US +1, 50k se zyada -> skip
 
 BADLI FILES
 -----------
-  backend/main.py                       (real counts + GET /api/crm/leads)
-  frontend/templates/crm.html           (stats + "1000 of N" note)
-  frontend/templates/power_dialer.html  (cache-bust ?v=6)
-  frontend/static/js/crm.js             (stats real totals)
-  frontend/static/js/power-dialer.js    (picker render cap)
+  backend/main.py                       (POST /api/crm/leads/delete-all)
+  frontend/templates/crm.html           (Delete all button, crm.js ?v=5)
+  frontend/static/js/crm.js             (delete-all handler)
+  frontend/templates/power_dialer.html  (?v=7)
+  frontend/static/js/power-dialer.js
 
-DEPLOY ke baad CRM aur Power Dialer dono pages HARD-REFRESH (Ctrl+F5).
+DEPLOY ke baad CRM page HARD-REFRESH (Ctrl+F5).
 
-NOTE: Ek queue max 5000 leads leta hai (POWER_QUEUE_MAX). 50k ko kai
-batches mein dial karna hoga (ya env se barha sakte ho).
+EHTIYAT: "Delete all" wapas nahi aata -- confirm soch kar dabao.
