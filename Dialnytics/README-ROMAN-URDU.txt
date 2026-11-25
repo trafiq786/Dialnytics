@@ -1,47 +1,35 @@
 ==========================================================
-  LOCAL PRESENCE — ab pool CLI asli ANI banegi (SIP)
+  REVERT — PAI header hata diya (calls phir connect)
 ==========================================================
 
-MASLA
------
-Local presence ON tha lekin call assigned (user ka apna) number se ja
-rahi thi. Wajah: dialer sirf "From" header mein local CLI bhejta tha,
-par ConnexCS global SIP par registration username (= assigned number)
-ko hi asserted caller-ID (ANI) bana deta tha.
+KYA HUA
+-------
+Pichle fix (P-Asserted-Identity header) se calls ring to ho rahi thi par
+connect nahi ho rahi thi -- ConnexCS/Infinity us PAI ko reject/mishandle
+kar raha tha. Isliye PAI/PPI header HATA diya.
 
-AB KYA HUA
-----------
-Jab local presence pool se koi ALAG CLI uthata hai, dialer ab us CLI ko
-P-Asserted-Identity (aur P-Preferred-Identity) header mein bhi bhejta hai.
-Tumhari ConnexCS wali P-Asserted-ID rewrite ( (.*) -> $1 ) ab usi ko
-aage Infinity tak le jayegi -> ANI = pool wala local number.
+AB
+--
+Local presence wapas pehle jaisa: dialer local CLI sirf "From" header mein
+bhejta hai. Calls normal connect hongi.
 
-(Jab pool match na ho to pehle jaisa fallback = user ka apna number,
-koi PAI nahi bhejta -- behaviour safe.)
+ANI (LOCAL PRESENCE) KA ASLI HAL -- ConnexCS side
+--------------------------------------------------
+Pool wala local number ANI banane ke liye masla DIALER ka nahi, ConnexCS
+ka hai: wo registration username ko ANI bana deta hai. Browser se PAI
+force karna calls tod deta hai. Isliye ye ConnexCS par set karna hoga:
 
-TEST (ek user par)
-------------------
-1) Deploy -> dialer page HARD-REFRESH (Ctrl+F5).
-2) Local presence ON wale user se aisa number dial karo jiska AREA CODE
-   pool mein maujood ho.
-3) Call ke CDR/console mein ANI check karo -> ab pool wala local number
-   hona chahiye, assigned nahi.
+  ConnexCS -> us SIP customer/trunk ki CLI/Caller-ID handling ko aisa
+  karo ke wo INVITE ke "From" header se CLI le (fixed/registration nahi).
+  (ConnexCS support se "use From header as CLI / trust endpoint CLI"
+   poochho -- parameter rewrite CLI = From user.)
 
-AGAR PHIR BHI ASSIGNED CLI JAYE
--------------------------------
-Do mein se ek:
- (a) Pool mein us destination ke AREA CODE ka koi number NAHI -> fallback
-     user ke number par. (Pool mein wo area code add karo.)
- (b) ConnexCS us customer par client ki PAI accept/trust nahi kar raha.
-     ConnexCS customer -> CLI/Caller-ID setting ko "From header / PAI se
-     lo" (fixed/registration nahi) par set karna pad sakta hai. Agar call
-     FAIL ho jaye (403) to PAI reject ho rahi hai -> batao, revert kar
-     denge.
+Jab ConnexCS From se CLI lega, to local presence (jo From mein already
+sahi number bhejta hai) khud chal jayegा -- dialer mein kuch nahi chahiye.
 
 BADLI FILES
 -----------
-  frontend/static/js/dialer.js     (PAI/PPI header jab local presence)
-  frontend/templates/base.html     (dialer.js ?v=20261126)
+  frontend/static/js/dialer.js     (PAI/PPI header removed)
+  frontend/templates/base.html     (dialer.js ?v=20261126b)
 
-NOTE: ye change sirf local-presence+pool-match wali calls ko chhuta hai.
-Baqi calls bilkul pehle jaisi.
+DEPLOY -> dialer HARD-REFRESH (Ctrl+F5) -> call connect check karo.
