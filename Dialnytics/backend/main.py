@@ -5649,6 +5649,7 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
         "number","telephone","tel","cell","company","business","organisation","organization","businessname",
         "website","url","web","site","email","emailaddress","mail","notes","note","comment","comments","remarks",
         "consent","optin","permission","donotcall","dnc","donotcontact","firstname","lastname","first","last",
+        "fn","ln","fname","lname","givenname","surname","addr","street","addr1","zip4","postalcode",
         "title","address","city","county","postcode","zip","state","region","age","provider"}
     header_cells = [ncol(c) for c in table[0]]
     has_header = sum(1 for h in header_cells if h in KNOWN_HEADERS) >= 2
@@ -5672,11 +5673,18 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
             phone_raw = pickr(r, "phone", "phonenumber", "mobile", "number", "telephone", "tel", "cell")
             name = pickr(r, "name", "fullname", "contact", "contactname", "leadname")
             if not name:
-                name = (pickr(r, "title") + " " + pickr(r, "firstname", "first") + " " + pickr(r, "lastname", "last")).strip()
+                name = (pickr(r, "title") + " "
+                        + pickr(r, "firstname", "first", "fn", "fname", "givenname") + " "
+                        + pickr(r, "lastname", "last", "ln", "lname", "surname")).strip()
             company = pickr(r, "company", "business", "organisation", "organization", "businessname")
             website = pickr(r, "website", "url", "web", "site")
             email = pickr(r, "email", "emailaddress", "mail")
             notes = pickr(r, "notes", "note", "comment", "comments", "remarks")
+            if not notes:  # keep address columns (ADDR/CITY/ST/ZIP) as the lead's notes so nothing is lost
+                notes = " ".join(x for x in [
+                    pickr(r, "address", "addr", "addr1", "street"),
+                    pickr(r, "city"), pickr(r, "state", "st", "region"),
+                    pickr(r, "zip", "zip4", "postcode", "postalcode")] if x).strip()
             leads_in.append((name or company, phone_raw, company, website, email, notes, consent_ok, dnc))
     else:
         # No header row (e.g. a raw telesales lead list). Detect columns by content.
@@ -5712,8 +5720,9 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
             extras = [cell(row[c]) for c in range(ncols) if c not in used and c < len(row) and cell(row[c])]
             leads_in.append((name, phone_raw, "", "", "", " · ".join(extras), True, False))
 
-    if len(leads_in) > 500:
-        raise HTTPException(status_code=422, detail="Maximum 500 rows per import")
+    CRM_IMPORT_MAX = int(os.getenv("CRM_IMPORT_MAX", "250000"))
+    if len(leads_in) > CRM_IMPORT_MAX:
+        raise HTTPException(status_code=422, detail=f"Maximum {CRM_IMPORT_MAX:,} rows per import")
 
     # Default country for bare national numbers (no + and no country code).
     # US/Canada 10-digit (area code 2-9) vs UK 0-/44- numbers. Lean US unless UK clearly dominates.
@@ -5726,6 +5735,11 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
     try:
         with db_connect() as conn:
             with conn.cursor() as cur:
+                # Preload this user's existing phones once so dedup needs no per-row SELECT
+                # (lets very large lists import in seconds instead of timing out).
+                cur.execute("SELECT phone FROM public.crm_leads WHERE user_id=%s", (user["id"],))
+                existing = {row[0] for row in cur.fetchall()}
+                to_insert = []; seen = set()
                 for (name, phone_raw, company, website, email, notes, consent_ok, dnc) in leads_in:
                     if dnc or not consent_ok:
                         skipped += 1; continue
@@ -5733,18 +5747,20 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
                     name = (name or "").strip()[:150]
                     if not phone or not name:
                         skipped += 1; continue
-                    cur.execute("SELECT 1 FROM public.crm_leads WHERE user_id=%s AND phone=%s", (user["id"], phone))
-                    if cur.fetchone():
-                        skipped += 1; continue      # same number already in this user's CRM
-                    # status/do_not_call set explicitly so the insert never depends on
-                    # column defaults (matches the manual "Add lead" insert).
-                    # Use "" (not None) for empty text so NOT NULL columns never break.
-                    cur.execute("""INSERT INTO public.crm_leads
-                        (user_id,name,phone,email,company,website,notes,consent,status,do_not_call)
-                        VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE,'new',FALSE)""",
-                        (user["id"], name, phone, (email or "")[:254],
-                         (company or "")[:200], (website or "")[:300], (notes or "")[:2000]))
-                    added += 1
+                    if phone in existing or phone in seen:
+                        skipped += 1; continue       # already in CRM, or duplicate within the file
+                    seen.add(phone)
+                    to_insert.append((user["id"], name, phone, (email or "")[:254],
+                                      (company or "")[:200], (website or "")[:300], (notes or "")[:2000]))
+                # status/do_not_call set explicitly so the insert never depends on column
+                # defaults (matches the manual "Add lead" insert). Batched for speed.
+                SQL = ("INSERT INTO public.crm_leads "
+                       "(user_id,name,phone,email,company,website,notes,consent,status,do_not_call) "
+                       "VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE,'new',FALSE)")
+                B = 2000
+                for i in range(0, len(to_insert), B):
+                    cur.executemany(SQL, to_insert[i:i + B])
+                added = len(to_insert)
     except psycopg.Error as e:
         # Surface a readable reason instead of a bare 500 (e.g. a missing column).
         detail = (getattr(e, "diag", None) and e.diag.message_primary) or str(e)
