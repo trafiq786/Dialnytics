@@ -1,28 +1,40 @@
 ==========================================================
-  CRM — "Delete all" button (+ sab recent fixes cumulative)
+  SPEED FIX — dialer/CRM slow (50k leads par)
 ==========================================================
 
-NAYA
-----
-CRM page par (search/filter ke saath) naya "Delete all" button.
- - Dabane par confirm: "Delete ALL <N> leads? ... cannot be undone."
- - Haan karne par SAARI leads ek saath delete (50k bhi instant --
-   single SQL statement). Queue rows bhi saaf.
+WAJAH
+-----
+1) crm_leads par INDEX nahi tha -> har query (CRM page, counts,
+   dashboard, dedup, picker) 50k rows seq-scan karti thi = slow.
+2) Power Dialer picker SAARI 50k leads browser mein load kar raha tha
+   (~bohat bada JSON) = tab slow/hang.
 
-ISME PICHLA SAB SHAAMIL (cumulative main.py):
-  - Queue limit 50,000
-  - CRM stats real COUNT, GET /api/crm/leads (Power Dialer sab leads)
-  - Picker/queue table render cap (freeze na ho)
-  - CSV 30MB upload, FN/LN, address->notes, US +1, 50k se zyada -> skip
+AB KYA THEEK HUA
+----------------
+1) DB INDEXES khud ban jate hain (deploy par, ek dafa):
+     crm_leads(user_id), (user_id,phone), (user_id,followup_at)
+     power_queue_items(queue_id,position), (lead_id)
+   -> har query bohat tez.
+2) Picker ab sirf recent 5,000 leads browser mein lata hai (halka).
+3) NAYA button "Queue ALL eligible" -> poori 50k ko SERVER par queue
+   karta hai (browser mein 50k load kiye baghair). Yahi use karo bade
+   list dial karne ke liye.
+
+KAISE 50k DIAL KARO (ab)
+------------------------
+Create Queue -> dialog -> Mode/Delay set -> "Queue ALL eligible" dabao
+-> server poori eligible list queue kar deta hai -> Start.
+(Chhote hath se chunne ke liye search + Select all abhi bhi hai, 5k sample.)
 
 BADLI FILES
 -----------
-  backend/main.py                       (POST /api/crm/leads/delete-all)
-  frontend/templates/crm.html           (Delete all button, crm.js ?v=5)
-  frontend/static/js/crm.js             (delete-all handler)
-  frontend/templates/power_dialer.html  (?v=7)
-  frontend/static/js/power-dialer.js
+  backend/main.py                       (indexes + /api/power/queue/all + picker cap)
+  frontend/templates/power_dialer.html  (Queue ALL button, ?v=8)
+  frontend/static/js/power-dialer.js    (queue-all handler)
+  frontend/templates/crm.html           (cumulative)
+  frontend/static/js/crm.js             (cumulative)
 
-DEPLOY ke baad CRM page HARD-REFRESH (Ctrl+F5).
+DEPLOY ke baad CRM + Power Dialer dono HARD-REFRESH (Ctrl+F5).
 
-EHTIYAT: "Delete all" wapas nahi aata -- confirm soch kar dabao.
+NOTE: Pehla deploy thoda der le sakta hai (index ban raha hota hai 50k par)
+-- ek dafa ka kaam hai, phir tez.

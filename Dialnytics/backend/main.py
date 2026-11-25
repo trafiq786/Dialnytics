@@ -675,6 +675,16 @@ DO $$ BEGIN
   IF to_regclass('public.power_queues') IS NOT NULL THEN
     ALTER TABLE public.power_queues ADD COLUMN IF NOT EXISTS skip_disposition boolean NOT NULL DEFAULT false;
   END IF;
+  -- Indexes so large CRMs (tens of thousands of leads) stay fast.
+  IF to_regclass('public.crm_leads') IS NOT NULL THEN
+    CREATE INDEX IF NOT EXISTS idx_crm_leads_user ON public.crm_leads(user_id);
+    CREATE INDEX IF NOT EXISTS idx_crm_leads_user_phone ON public.crm_leads(user_id, phone);
+    CREATE INDEX IF NOT EXISTS idx_crm_leads_user_followup ON public.crm_leads(user_id, followup_at);
+  END IF;
+  IF to_regclass('public.power_queue_items') IS NOT NULL THEN
+    CREATE INDEX IF NOT EXISTS idx_pqi_queue_pos ON public.power_queue_items(queue_id, position);
+    CREATE INDEX IF NOT EXISTS idx_pqi_lead ON public.power_queue_items(lead_id);
+  END IF;
 END $$;
 """ + ct.SCHEMA_SQL + rg.SCHEMA_SQL + wo.SCHEMA_SQL + ll.SCHEMA_SQL + pb.SCHEMA_SQL + an.SCHEMA_SQL + ai.SCHEMA_SQL
 
@@ -5545,7 +5555,15 @@ def crm_leads_all(request: Request):
         raise HTTPException(status_code=401, detail="Login required")
     if not has_power(user):
         raise HTTPException(status_code=403, detail="CRM is an optional add-on for your plan")
-    cap = int(os.getenv("CRM_PICKER_MAX", "50000"))
+    # Keep the browser light: load a recent sample for the picker, not all 50k.
+    # To dial the whole list, use "Queue all eligible" (POST /api/power/queue/all),
+    # which builds the queue server-side without sending every lead to the browser.
+    cap = int(os.getenv("CRM_PICKER_MAX", "5000"))
+    try:
+        req = int(request.query_params.get("limit") or cap)
+        cap = max(1, min(cap, req))
+    except (TypeError, ValueError):
+        pass
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""SELECT id,name,phone,email,company,status,consent,do_not_call
@@ -5870,6 +5888,39 @@ async def power_queue_create(request: Request):
                 SELECT %s, t.lead, t.pos - 1 FROM unnest(%s::uuid[]) WITH ORDINALITY AS t(lead,pos)""",
                 (qid,ids))
     return {"queue_id":str(qid),"count":len(ids)}
+
+@app.post("/api/power/queue/all")
+async def power_queue_all(request: Request):
+    """Queue ALL of the user's eligible (opted-in, non-DNC, dialable) leads, server-side,
+    up to POWER_QUEUE_MAX — without sending every lead id through the browser."""
+    user=get_current_user(request)
+    if not user: raise HTTPException(status_code=401,detail="Login required")
+    if not has_power(user): raise HTTPException(status_code=403,detail="Power Dialer is an optional add-on for your plan")
+    if user.get("role")!="admin" and plan_status(user)["days_left"]<0:
+        raise HTTPException(status_code=402,detail="Plan expired")
+    data=await request.json()
+    mode=data.get("mode")
+    if mode not in ("auto","manual"): raise HTTPException(status_code=422,detail="Invalid mode")
+    try: delay=int(data.get("delay",5))
+    except (ValueError,TypeError): raise HTTPException(status_code=422,detail="Invalid delay")
+    if not 3<=delay<=30: raise HTTPException(status_code=422,detail="Delay must be 3-30 seconds")
+    skip_disp = bool(data.get("skip_disposition")) and mode=="auto"
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO public.power_queues(user_id,mode,delay_seconds,status,skip_disposition)
+                VALUES(%s,%s,%s,'paused',%s) RETURNING id""",(user["id"],mode,delay,skip_disp))
+            qid=cur.fetchone()["id"]
+            cur.execute("""INSERT INTO public.power_queue_items(queue_id,lead_id,position)
+                SELECT %s, s.id, (row_number() OVER (ORDER BY s.created_at DESC))-1
+                FROM (SELECT id, created_at FROM public.crm_leads
+                      WHERE user_id=%s AND consent=TRUE AND do_not_call=FALSE
+                        AND status NOT IN ('converted','not_interested')
+                      ORDER BY created_at DESC LIMIT %s) s""",
+                (qid, user["id"], POWER_QUEUE_MAX))
+            count=cur.rowcount
+            if not count:
+                raise HTTPException(status_code=422,detail="No eligible opted-in CRM leads")
+    return {"queue_id":str(qid),"count":count}
 
 @app.get("/api/power/queue/{queue_id}")
 def power_queue_get(queue_id: uuid.UUID,request: Request):
