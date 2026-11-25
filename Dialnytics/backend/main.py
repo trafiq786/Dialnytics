@@ -5519,10 +5519,39 @@ def crm_page(request: Request):
         return locked_page(request, user, "CRM")
     with db_connect() as conn:
         with conn.cursor() as cur:
+            # Real totals over ALL leads (not just the ones shown in the table).
+            cur.execute("""SELECT COUNT(*) AS total,
+                                  COUNT(*) FILTER (WHERE consent AND NOT do_not_call) AS consented,
+                                  COUNT(*) FILTER (WHERE status='callback') AS callbacks,
+                                  COUNT(*) FILTER (WHERE do_not_call) AS dnc
+                           FROM public.crm_leads WHERE user_id=%s""", (user["id"],))
+            s = cur.fetchone()
+            stats = {"total": s["total"], "consented": s["consented"],
+                     "callbacks": s["callbacks"], "dnc": s["dnc"]}
+            # The browsable table shows the latest 1000; the Power Dialer loads them all.
             cur.execute("""SELECT * FROM public.crm_leads WHERE user_id=%s
                            ORDER BY created_at DESC LIMIT 1000""", (user["id"],))
             leads = [_crm_row(r) for r in cur.fetchall()]
-    return templates.TemplateResponse(request=request, name="crm.html", context={"user":user,"leads":leads})
+    return templates.TemplateResponse(request=request, name="crm.html",
+                                      context={"user": user, "leads": leads, "stats": stats})
+
+
+@app.get("/api/crm/leads")
+def crm_leads_all(request: Request):
+    """All of the user's leads (lightweight) — used by the Power Dialer lead picker
+    so it can queue the whole list, not just the latest 1000 shown on the CRM page."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required")
+    if not has_power(user):
+        raise HTTPException(status_code=403, detail="CRM is an optional add-on for your plan")
+    cap = int(os.getenv("CRM_PICKER_MAX", "50000"))
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id,name,phone,email,company,status,consent,do_not_call
+                           FROM public.crm_leads WHERE user_id=%s
+                           ORDER BY created_at DESC LIMIT %s""", (user["id"], cap))
+            return [_crm_row(r) for r in cur.fetchall()]
 
 @app.post("/api/crm/leads")
 async def crm_save_lead(request: Request):
