@@ -5720,9 +5720,13 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
             extras = [cell(row[c]) for c in range(ncols) if c not in used and c < len(row) and cell(row[c])]
             leads_in.append((name, phone_raw, "", "", "", " · ".join(extras), True, False))
 
+    # Import up to the cap; if the file has more, take the first N and skip the rest
+    # (no error, so a huge file still loads its first CRM_IMPORT_MAX leads).
     CRM_IMPORT_MAX = int(os.getenv("CRM_IMPORT_MAX", "50000"))
+    overflow = 0
     if len(leads_in) > CRM_IMPORT_MAX:
-        raise HTTPException(status_code=422, detail=f"Maximum {CRM_IMPORT_MAX:,} rows per import")
+        overflow = len(leads_in) - CRM_IMPORT_MAX
+        leads_in = leads_in[:CRM_IMPORT_MAX]
 
     # Default country for bare national numbers (no + and no country code).
     # US/Canada 10-digit (area code 2-9) vs UK 0-/44- numbers. Lean US unless UK clearly dominates.
@@ -5731,7 +5735,7 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
     _us = sum(1 for d in _digs if (len(d) == 11 and d[0] == "1") or (len(d) == 10 and d and d[0] in "23456789"))
     region_cc = "44" if _uk > _us else "1"
 
-    added = 0; skipped = 0
+    added = 0; skipped = overflow   # rows beyond the cap are counted as skipped
     try:
         with db_connect() as conn:
             with conn.cursor() as cur:

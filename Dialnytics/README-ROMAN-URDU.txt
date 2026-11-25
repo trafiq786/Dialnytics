@@ -1,29 +1,23 @@
 ==========================================================
-  CRM IMPORT v3 — limit 50k + COPY (bohot fast)
+  CRM IMPORT v4 — 50k se zyada ho to baqi SKIP (reject nahi)
 ==========================================================
 
 TABDEELI
 --------
-1) LIMIT ab 50,000 rows per import (pehle 250k thi).
-2) INSERT ab PostgreSQL COPY se hota hai -> 50k rows chand seconds mein
-   (pura import 1-2 minute se kaafi kam). Dedup pehle Python mein ho jata
-   hai (ek dafa existing numbers load), phir seedha COPY.
+- Ab agar file mein 50,000 se ZYADA leads hon to error nahi aata.
+  Pehle 50,000 import ho jate hain, baqi (extra) SKIP count mein chale
+  jate hain.
+  (Pehle poori file reject hoti thi "Maximum 50,000 rows".)
 
-(Pichle sab fixes isme shaamil: FN/LN naam, address->notes, US +1
- auto, khaali consent allow.)
+- Misal: 2.44 lakh wali file -> pehle 50,000 add (unique), baaki ~1.94
+  lakh "skipped" mein. Dubara upload karne par agle naye numbers add
+  honge (duplicate khud skip, is liye repeat nahi honge).
 
-ZAROORI
--------
-- Tumhari Leads__3.csv mein 2.44 lakh rows hain -> ab 50k limit se ZYADA
-  hai, is liye poori ek dafa nahi chadhegi. Do tareeqe:
-    (a) File ko 50k-50k ke hisson mein baant kar alag alag upload karo, YA
-    (b) Render env CRM_IMPORT_MAX ko barha do (jaise 100000) -- lekin
-        50k hi rakhna behtar hai (CRM/Power Dialer light rahega).
-
-- Har upload: naye unique numbers add honge, duplicate khud skip.
+Baqi sab waise hi:
+  - COPY se fast insert (seconds mein)
+  - FN/LN naam, address->notes, US +1 auto, khaali consent allow
+  - Limit badalni ho: Render env CRM_IMPORT_MAX (default 50000)
 
 BADLI FILE
 ----------
   backend/main.py
-
-NOTE: COPY tez hai lekin ek hi transaction -- 50k tak bilkul theek.
