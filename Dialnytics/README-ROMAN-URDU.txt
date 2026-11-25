@@ -1,23 +1,25 @@
 ==========================================================
-  CRM IMPORT v4 — 50k se zyada ho to baqi SKIP (reject nahi)
+  CRM IMPORT v5 — "File is too large" FIX
 ==========================================================
 
-TABDEELI
---------
-- Ab agar file mein 50,000 se ZYADA leads hon to error nahi aata.
-  Pehle 50,000 import ho jate hain, baqi (extra) SKIP count mein chale
-  jate hain.
-  (Pehle poori file reject hoti thi "Maximum 50,000 rows".)
+MASLA
+-----
+Deploy ke baad bhi "File is too large" aa raha tha. Wajah: CSV ka
+upload byte-limit sirf ~250 KB tha (rows ginne se PEHLE hi rok deta).
 
-- Misal: 2.44 lakh wali file -> pehle 50,000 add (unique), baaki ~1.94
-  lakh "skipped" mein. Dubara upload karne par agle naye numbers add
-  honge (duplicate khud skip, is liye repeat nahi honge).
-
-Baqi sab waise hi:
-  - COPY se fast insert (seconds mein)
-  - FN/LN naam, address->notes, US +1 auto, khaali consent allow
-  - Limit badalni ho: Render env CRM_IMPORT_MAX (default 50000)
-
-BADLI FILE
+AB KYA HUA
 ----------
-  backend/main.py
+- CSV upload limit ab 30 MB (Excel 15 MB).
+- Agar CSV phir bhi bada ho to REJECT nahi karta -- poori lines tak
+  padh leta hai aur 50k row-limit baaki trim kar deta hai.
+- Help text update ("Max 500 rows" -> "up to 50,000 per upload").
+
+Yani ab tumhari 14 MB wali file bhi chadhegi: pehle 50,000 leads
+import, baqi skip.
+
+BADLI FILES
+-----------
+  backend/main.py                 (upload size limit + big-CSV trim)
+  frontend/templates/crm.html     (help text)
+
+DEPLOY ke baad CRM page HARD-REFRESH (Ctrl+F5).

@@ -5618,10 +5618,15 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
     is_csv = fname.endswith(".csv")
     if not (is_csv or is_xlsx):
         raise HTTPException(status_code=422, detail="Upload a CSV or Excel (.xlsx) file")
-    limit = 3_000_000 if is_xlsx else 250_000
+    limit = 15_000_000 if is_xlsx else 30_000_000
     content = await file.read(limit + 1)
     if len(content) > limit:
-        raise HTTPException(status_code=413, detail="File is too large")
+        if is_xlsx:
+            raise HTTPException(status_code=413, detail="File is too large (max 15 MB Excel)")
+        # CSV: don't reject a huge list — keep whole lines up to the cap; the
+        # row limit (CRM_IMPORT_MAX) then trims how many actually import.
+        cut = content.rfind(b"\n", 0, limit)
+        content = content[:cut if cut > 0 else limit]
 
     # Read the file into a plain table: a list of rows, each a list of cell values.
     if is_xlsx:
