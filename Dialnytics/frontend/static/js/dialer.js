@@ -112,6 +112,8 @@ const input = document.getElementById('numberInput');
     function stopTimer() {
         if (timerId) clearInterval(timerId);
         timerId = null;
+        const it = document.getElementById('inCallTimer');
+        if (it) it.hidden = true;
     }
     function startTimer() {
         stopRingback();
@@ -126,11 +128,17 @@ const input = document.getElementById('numberInput');
             }
         }
         if (timerId) return;
-        document.getElementById('activitySub').textContent = clock(Math.floor((Date.now() - talkStart) / 1000));
-        timerId = setInterval(() => {
+        const startClock = new Date(talkStart).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const paint = () => {
             const sec = Math.floor((Date.now() - talkStart) / 1000);
-            document.getElementById('activitySub').textContent = clock(sec);
-        }, 1000);
+            const s = clock(sec);
+            const sub = document.getElementById('activitySub');
+            if (sub) sub.textContent = s;
+            const it = document.getElementById('inCallTimer');
+            if (it) { it.hidden = false; it.innerHTML = s + '<small>Started ' + startClock + '</small>'; }
+        };
+        paint();
+        timerId = setInterval(paint, 1000);
     }
     function saveDuration(status) {
         if (!logId) return;
@@ -345,6 +353,7 @@ function markEnded(reason) {
         document.getElementById('activitySub').textContent = st === 'active' ? '00:00' : who;
         const inState = document.getElementById('inCallState');
         if (inState) inState.textContent = label;
+        if (st !== 'active' && st !== 'held') { const it = document.getElementById('inCallTimer'); if (it) it.hidden = true; }
         setStatus(label + (who ? ' · ' + who : ''));
         if (st === 'active') {
             if (activeCall && activeCall.remoteStream && !activeCall._twilio) {
