@@ -1,46 +1,34 @@
 ==========================================================
-  AUDIO FIX — G711 prefer (one-way / no awaz)
+  CRM IMPORT 500 ERROR FIX ("Internal Server Error" / JSON)
 ==========================================================
 
-MAINE PURA CODE CHECK KIYA
---------------------------
-Media path (remote audio attach + play) SAHI hai:
- - Remote audio do jagah attach hota hai: 'track' event aur 'accepted'.
- - <audio id=remoteAudio autoplay playsinline> maujood hai.
- - echoRemoteStream receivers se audio track theek uthata hai.
-Yani "kabhi awaz, kabhi nahi" ek DETERMINISTIC code bug nahi -- warna
-hamesha no-audio hota. Ye media-plane (ConnexCS/Infinity) ka masla hai.
+MASLA
+-----
+Sheet upload par "Unexpected token 'I', Internal S... is not valid JSON"
+= server 500 (Internal Server Error) de raha tha.
 
-JO EK CHEEZ CODE-SIDE THEEK KI
-------------------------------
-Browser pehle OPUS codec offer karta tha -> ConnexCS ko Opus<->G711
-transcode karna padta tha -> yahi aksar ONE-WAY / NO AUDIO deta hai.
-Ab browser SDP mein G711 (PCMU/PCMA) pehle offer karega (koi codec hataya
-nahi, sirf order badla). Infinity/ConnexCS G711 natively carry karte hain
--> transcoding nahi -> audio reliable.
+WAJAH (asli bug)
+----------------
+Import dedup mein existing numbers load karte waqt code ne dict row ko
+integer-index kiya:  {row[0] for row in fetchall()}  -- par rows DICT hain
+(row_factory=dict_row), is liye row[0] -> KeyError -> 500.
 
-+ pichla STUN fix bhi isme hai (ICE stability).
+Isi liye:
+ - PEHLI dafa (jab CRM KHAALI thi) import chal gaya tha -- fetchall khaali,
+   loop chala hi nahi, error aaya hi nahi.
+ - AB (jab CRM mein leads hain) dedup SELECT rows deta hai -> row[0] ->
+   crash -> har upload 500.
 
-TEST (ek user par)
-------------------
-Deploy -> dialer HARD-REFRESH (Ctrl+F5) -> 2-3 calls karo.
-Awaz dono taraf aani chahiye, Reconnecting nahi.
+FIX
+---
+row[0]  ->  row["phone"]   (ek line)
 
-AGAR PHIR BHI (no audio / 5s PDD / voicemail)
----------------------------------------------
-Ab ye pakka ConnexCS/Infinity media-side hai. Ye check/karao:
- 1) ConnexCS carrier (Infinity) CODECS: G711u (PCMU) + G729 allow hon,
-    aur "transcode/NAT media" ON ho.
- 2) 5 sec PDD (active hone mein der) = Infinity route ki post-dial delay
-    -- Infinity se poochho, ya doosra route test karo.
- 3) One-way audio aksar NAT/media-IP ka masla -- ConnexCS media relay/
-    RTP proxy ON karo us customer par.
- 4) Strict NAT par TURN chahiye -- bolo to ConnexCS ka TURN daal dun.
+AB
+--
+Sheet upload phir se chalega -- naye unique numbers add, duplicate skip.
 
-BADLI FILES
------------
-  frontend/static/js/dialer.js     (preferG711 SDP + STUN)
-  frontend/templates/base.html     (dialer.js ?v=20261126d)
+BADLI FILE
+----------
+  backend/main.py   (one-line: row["phone"])
 
-NOTE: Agar G711 ke baad calls kharab hon (na chalein) to batao -- turant
-revert kar denge. Sirf codec ORDER badla hai, risk kam hai.
+DEPLOY -> CRM page Ctrl+F5 -> sheet dobara upload karo.

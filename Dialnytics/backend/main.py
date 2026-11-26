@@ -5812,7 +5812,7 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
                 # Preload this user's existing phones once so dedup needs no per-row SELECT
                 # (lets very large lists import in seconds instead of timing out).
                 cur.execute("SELECT phone FROM public.crm_leads WHERE user_id=%s", (user["id"],))
-                existing = {row[0] for row in cur.fetchall()}
+                existing = {row["phone"] for row in cur.fetchall()}
                 to_insert = []; seen = set()
                 for (name, phone_raw, company, website, email, notes, consent_ok, dnc) in leads_in:
                     if dnc or not consent_ok:
