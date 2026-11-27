@@ -5715,7 +5715,8 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
     YES = ("yes", "true", "1", "y")
     def cell(v): return "" if v is None else str(v).strip()
     def ncol(v): return re.sub(r"[^a-z0-9]", "", cell(v).lower())
-    KNOWN_HEADERS = {"name","fullname","contact","contactname","leadname","phone","phonenumber","mobile",
+    KNOWN_HEADERS = {"name","fullname","contact","contactname","leadname","customername","customer","clientname",
+        "zipcode","name","fullname","contact","contactname","leadname","phone","phonenumber","mobile",
         "number","telephone","tel","cell","company","business","organisation","organization","businessname",
         "website","url","web","site","email","emailaddress","mail","notes","note","comment","comments","remarks",
         "consent","optin","permission","donotcall","dnc","donotcontact","firstname","lastname","first","last",
@@ -5741,7 +5742,8 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
             consent_ok = pickr(r, "consent", "optin", "permission").strip().lower() \
                 not in ("no", "false", "0", "n", "optout", "opt-out", "declined", "revoked", "dnc")
             phone_raw = pickr(r, "phone", "phonenumber", "mobile", "number", "telephone", "tel", "cell")
-            name = pickr(r, "name", "fullname", "contact", "contactname", "leadname")
+            name = pickr(r, "name", "fullname", "contact", "contactname", "leadname",
+                         "customername", "customer", "clientname")
             if not name:
                 name = (pickr(r, "title") + " "
                         + pickr(r, "firstname", "first", "fn", "fname", "givenname") + " "
@@ -5754,7 +5756,7 @@ async def crm_import(request: Request, file: UploadFile = File(...)):
                 notes = " ".join(x for x in [
                     pickr(r, "address", "addr", "addr1", "street"),
                     pickr(r, "city"), pickr(r, "state", "st", "region"),
-                    pickr(r, "zip", "zip4", "postcode", "postalcode")] if x).strip()
+                    pickr(r, "zip", "zipcode", "zip4", "postcode", "postalcode")] if x).strip()
             leads_in.append((name or company, phone_raw, company, website, email, notes, consent_ok, dnc))
     else:
         # No header row (e.g. a raw telesales lead list). Detect columns by content.

@@ -1,19 +1,22 @@
 ==========================================================
-  CALL TIMER — Active ke saath duration + start time
+  CRM IMPORT — "Customer Name" format support
 ==========================================================
 
-KYA HUA
--------
-Floating phone / dialer mein ab call Active hone par:
- - LIVE timer (00:00 se ticking, har second) number ke neeche.
- - "Started 5:41 PM" (call kis waqt active hui).
-Timer sirf Active/On-hold par; ringing/calling par nahi, call khatam
-hote hi gayab.
+NAYA
+----
+Is format ki sheet ab seedha upload hogi:
+   Phone number | state | Customer Name | zip code
 
-BADLI FILES
------------
-  frontend/static/js/dialer.js        (timer in-call view mein paint)
-  frontend/templates/dialer_rail.html (timer element + style)
-  frontend/templates/base.html        (dialer.js ?v=20261126e)
+- "Customer Name" (ya Customer / Client Name) -> lead ka NAAM.
+- "Phone number" -> number (US 10-digit -> +1 auto).
+- state + zip code -> lead ke NOTES mein (zaaya nahi hota).
 
-DEPLOY ke baad dialer page HARD-REFRESH (Ctrl+F5).
+(Pehle "Customer Name" map nahi hota tha -> naam khaali -> rows skip.)
+
+BADLI FILE
+----------
+  backend/main.py   (name keys + known headers + zipcode)
+
+DEPLOY -> CRM page Ctrl+F5 -> sheet upload karo.
+NOTE: jo sample bheja usme sirf header tha (data nahi). Apni asli data
+wali file isi format mein upload karo.
