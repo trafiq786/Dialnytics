@@ -1,22 +1,30 @@
 ==========================================================
-  CRM IMPORT — "Customer Name" format support
+  CALL LOG DETAIL — rows ka scalloped/wavy look FIX
 ==========================================================
 
-NAYA
-----
-Is format ki sheet ab seedha upload hogi:
-   Phone number | state | Customer Name | zip code
+MASLA
+-----
+Call details popup (aur jahan bhi .dn-detail rows hain) mein har row
+ajeeb "wavy / scalloped" pill jaisa dikh raha tha.
 
-- "Customer Name" (ya Customer / Client Name) -> lead ka NAAM.
-- "Phone number" -> number (US 10-digit -> +1 auto).
-- state + zip code -> lead ke NOTES mein (zaaya nahi hota).
+WAJAH
+-----
+glass.css mein ".dn-detail" (jo ek ROW hai: Number/Contact/Direction...)
+ko galti se modal/drawer CONTAINERS (.dn-drawer, .power-lead-dialog,
+.profile-menu, .tour-box) ke SAATH group kiya gaya tha. Is wajah se HAR
+row ko glass-card background + border + shadow + border-radius 26px mil
+jata tha -> stacked rounded rows = scalloped/wavy edges.
 
-(Pehle "Customer Name" map nahi hota tha -> naam khaali -> rows skip.)
+FIX
+---
+".dn-detail" ko glass container groups se nikaal diya (4 jagah). Ab:
+ - Drawer/popup ka glass look WAISA hi (container par).
+ - Rows ab saaf flat lines (label left, value right, patli divider) —
+   jaisa hona chahiye. Light + dark dono theme theek.
 
 BADLI FILE
 ----------
-  backend/main.py   (name keys + known headers + zipcode)
+  frontend/static/css/glass.css
 
-DEPLOY -> CRM page Ctrl+F5 -> sheet upload karo.
-NOTE: jo sample bheja usme sirf header tha (data nahi). Apni asli data
-wali file isi format mein upload karo.
+DEPLOY ke baad koi bhi page HARD-REFRESH (Ctrl+F5). CSS ?v nahi tha to
+browser cache clear karna pad sakta hai (Ctrl+Shift+R).
